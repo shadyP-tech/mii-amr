@@ -14,6 +14,8 @@ from scripts.aufgabe04.artifacts.qr_verified_observation_pose import (
     HASH_FIELD, load_qr_verified_observation_pose, validate_qr_verified_observation_pose,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
+from scripts.aufgabe04.perception.stand_axis.models import StandAxisEdgeDebugArtifacts
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import (
@@ -192,9 +194,13 @@ class QrObservationPoseTests(unittest.TestCase):
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
         module = "scripts.aufgabe04.real_robot.observer.node."
 
-        def failed_head(*_args, diagnostics, **_kwargs):
-            diagnostics["reason"] = "head_proposal_ambiguous"
-            return None
+        estimate = replace(_unusable("head_proposal_ambiguous", source="model_current_measured_head"),
+            evidence_state="unobservable", model_profile_sha256=adapter.stand_model_profile.sha256,
+            model_measurement_status="measured")
+        debug = StandAxisEdgeDebugArtifacts(edges=None, evidence_state="unobservable",
+            model_profile_sha256=adapter.stand_model_profile.sha256,
+            model_measurement_status="measured", model_reason="head_proposal_ambiguous",
+            model_pose_fit_source="model_current_measured_head")
 
         def decode(crop, *_args, **_kwargs):
             u, v = crop.shape[1] / 2, crop.shape[0] / 2
@@ -206,9 +212,11 @@ class QrObservationPoseTests(unittest.TestCase):
                 stack.enter_context(patch(module + name, return_value=()))
             stack.enter_context(patch(module + "compressed_msg_to_bgr_frame", return_value=frame))
             stack.enter_context(patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kw: value))
-            stack.enter_context(patch(module + "acquire_registered_head_measurement", side_effect=failed_head))
-            stack.enter_context(patch(module + "detect_qr_observations_bgr", side_effect=decode))
-            estimator = stack.enter_context(patch(module + "estimate_stand_axis_from_metric_model"))
+            acquire = stack.enter_context(patch(module + "acquire_registered_head_measurement"))
+            decoder = stack.enter_context(patch(module + "detect_qr_observations_bgr", side_effect=decode))
+            native = stack.enter_context(patch(module + "detect_native_qr_observations_bgr", return_value=()))
+            estimator = stack.enter_context(patch(module + "estimate_stand_axis_from_metric_model",
+                return_value=(estimate, debug)))
             clock = stack.enter_context(patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic"))
             sensor_tuple = adapter._next_sensor_tuple.return_value
             for stamp in (100., 102.):
@@ -222,9 +230,23 @@ class QrObservationPoseTests(unittest.TestCase):
                 if stamp > 100.:
                     adapter.tf_retry_scheduler.offer(sensor_tuple, stamp_sec=stamp)
                 adapter._process_latest()
-            estimator.assert_not_called()
+            self.assertEqual(estimator.call_count, 2)
+            self.assertTrue(all(call.args[1] is frame for call in estimator.call_args_list))
+            self.assertTrue(all(not any(key.startswith("expected_head_") for key in call.kwargs)
+                                for call in estimator.call_args_list))
+            acquire.assert_not_called()
+            self.assertEqual(native.call_count, 2)
+            self.assertEqual(decoder.call_count, 2)
+            self.assertTrue(all(call.kwargs["max_elapsed_sec"] <= .12 for call in decoder.call_args_list))
+            self.assertTrue(all(call.args[0].shape[0] < frame.shape[0] and
+                                call.args[0].shape[1] < frame.shape[1] for call in decoder.call_args_list))
         self.assertIsNotNone(self.result(), json.loads(adapter.args.status_json.read_text()))
         self.assertEqual(self.result()["sensor_stamp_sec"], 102.)
+        self.assertIsNone(self.result()["stand_axis_rad"])
+        self.assertFalse(self.result()["facing_ready"])
+        self.assertFalse(self.result()["motion_authorized"])
+        self.assertEqual(self.result()["completion_scope"], "discovery_only")
+        self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count, 0)
 
     def test_usable_but_wrongly_associated_head_cannot_block_independent_qr(self):
         from scripts.aufgabe04.perception.stand_axis.models import ImagePoint, StandAxisEdgeDebugArtifacts

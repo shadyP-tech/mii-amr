@@ -101,7 +101,9 @@ class CameraTargetRegistrationSelection:
         strict_retry = self.strict_retry
         return {
             "enabled": bool(enabled),
-            "attempted": proposal is not None or self.search_hint_used or self.head_acquisition is not None,
+            "attempted": (proposal is not None or self.search_hint_used
+                          or self.head_acquisition is not None
+                          or self.current_measured_head_registration is not None),
             "search_hint_used": self.search_hint_used,
             "head_acquisition": self.head_acquisition,
             "current_measured_head_registration": (

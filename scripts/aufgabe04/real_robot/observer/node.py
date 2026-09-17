@@ -60,8 +60,8 @@ from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
 )
 from scripts.aufgabe04.perception.stand_axis.model_input_cache import MetricModelInputCache
 from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
-from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
-    MetricPoseTracker,
+from scripts.aufgabe04.perception.stand_axis.head_geometry_acquisition import (
+    DEFAULT_MIN_EDGE_HEIGHT_PX, create_head_geometry_tracker,
 )
 from scripts.aufgabe04.perception.stand_axis.observation_freshness import (
     observation_freshness,
@@ -132,6 +132,9 @@ from scripts.aufgabe04.real_robot.observer.candidate_head_tracking import (
 from scripts.aufgabe04.real_robot.observer.tracked_head_registration import (
     tracked_head_selection, register_current_tracked_head,
 )
+from scripts.aufgabe04.real_robot.observer.viewer_head_acquisition import (
+    evaluate_viewer_head, classify_viewer_head,
+)
 from scripts.aufgabe04.real_robot.observer.backside_proposal_reuse import (
     BacksideProposalContext,
     BacksideProposalReuse,
@@ -174,7 +177,7 @@ from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
     acquire_registered_head_measurement, unresolved_front_framing_hint,
 )
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
-    HeadProcessingDeadline, select_cold_candidate_head, unavailable_head_evaluation,
+    HeadProcessingDeadline, unavailable_head_evaluation,
 )
 from scripts.aufgabe04.real_robot.observer.capture_history import (
     BoundedObserverCapture,
@@ -407,7 +410,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self.stand_model_profile,
             args.stand_head_center_height_m,
         )
-        self.model_pose_tracker = MetricPoseTracker(prediction_ttl_sec=0.25)
+        self.model_pose_tracker = create_head_geometry_tracker()
         self.backside_proposal_reuse = BacksideProposalReuse(
             max_translation_m=args.stationary_translation_m,
             max_rotation_rad=math.radians(args.stationary_rotation_deg),
@@ -806,6 +809,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         tracking = getattr(self, "_candidate_head_tracking", None)
         if tracking is not None:
             tracking.reset(reason)
+        self._viewer_head_anchor = None
+        tracker = getattr(self, "model_pose_tracker", None)
+        if tracker is not None:
+            tracker.reset()
 
     def _reset_qr_marker_epoch(self) -> None:
         """Forget marker presence only after leaving its stationary epoch."""
@@ -1362,7 +1369,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 / projection.depth_m
             )
         )
-        roi_attempts = target_centered_head_roi_attempts(
+        viewer_geometry = (getattr(self.stand_model_profile, "committable", False)
+                           and self.stand_model_profile.environment == "physical")
+        valid_projected_height = math.isfinite(expected_head_height_px) and expected_head_height_px > 0
+        roi_attempts = () if viewer_geometry and not valid_projected_height else target_centered_head_roi_attempts(
             projection,
             intrinsics,
             expected_head_height_px=expected_head_height_px,
@@ -1374,7 +1384,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 not self.args.disable_backside_reacquisition
             ),
         )
-        if not roi_attempts or expected_head_height_px < self.args.min_head_size_px:
+        if not viewer_geometry and (
+                not roi_attempts or expected_head_height_px < self.args.min_head_size_px):
             self._note_observation_soft_miss(
                 "target_outside_camera_gate",
                 stamp_sec=image.stamp_sec,
@@ -1387,8 +1398,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             return
         resolved_stand_axis_profile = self.stand_axis_profile.resolve(
-            expected_head_height_px
+            expected_head_height_px if valid_projected_height else 1.0
         )
+        if viewer_geometry:
+            # Match the viewer's geometry recipe. Projected candidate scale is
+            # evaluated after fitting; it must not change acquisition inputs.
+            resolved_stand_axis_profile = replace(
+                resolved_stand_axis_profile, min_edge_height_px=DEFAULT_MIN_EDGE_HEIGHT_PX)
         scan_translation, scan_rotation = _transform_values(scan_from_map)
         scan_point = transform_point(
             (self.args.stand_x, self.args.stand_y, 0.0),
@@ -1506,8 +1522,23 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             intrinsics.cx_px,
             intrinsics.cy_px,
         )
+        candidate_context = CandidateHeadContext(
+            target_key=self._target_evidence_key(),
+            model_sha256=self.stand_model_profile.sha256,
+            camera_signature=calibrated_camera_signature,
+            image_shape=tuple(frame.shape),
+            stationary_epoch=(0 if self.observation_evidence is None else
+                              self.observation_evidence.snapshot().motion_epoch))
+        if viewer_geometry:
+            anchor = getattr(self, "_viewer_head_anchor", None)
+            if (anchor is None or anchor[0] != candidate_context
+                    or not _pose_is_stationary(anchor[1], robot_pose,
+                        max_translation_m=self.args.stationary_translation_m,
+                        max_rotation_rad=math.radians(self.args.stationary_rotation_deg))):
+                self.model_pose_tracker.reset()
+                self._viewer_head_anchor = (candidate_context, robot_pose)
         prediction = self.model_pose_tracker.prediction(
-            now_sec=image.stamp_sec,
+            now_sec=processing_started_ros if viewer_geometry else image.stamp_sec,
             profile_sha256=self.stand_model_profile.sha256,
             camera_signature=camera_signature,
         )
@@ -1522,12 +1553,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_sensor_age_sec=self.args.max_sensor_age_sec,
             work_deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
         )
-        head_budget.deadline_monotonic_sec = min(
-            head_budget.deadline_monotonic_sec,
-            qr_acquisition_budget.head_deadline_with_identity_reserve(
-                now_monotonic_sec=time.monotonic(),
-                previous_head_miss=(getattr(self, "_last_head_miss_target", None)
-                                    == self._target_evidence_key())))
+        if not viewer_geometry:
+            head_budget.deadline_monotonic_sec = min(
+                head_budget.deadline_monotonic_sec,
+                qr_acquisition_budget.head_deadline_with_identity_reserve(
+                    now_monotonic_sec=time.monotonic(),
+                    previous_head_miss=(getattr(self, "_last_head_miss_target", None)
+                                        == self._target_evidence_key())))
 
         def evaluate_roi_attempt(
             attempt: HeadRoiAttempt,
@@ -1641,31 +1673,46 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 current_ros_sec=lambda: self.node.get_clock().now().nanoseconds / 1e9,
             )
 
-        candidate_context = CandidateHeadContext(
-            target_key=self._target_evidence_key(),
-            model_sha256=self.stand_model_profile.sha256,
-            camera_signature=calibrated_camera_signature,
-            image_shape=tuple(frame.shape),
-            stationary_epoch=(0 if self.observation_evidence is None else
-                              self.observation_evidence.snapshot().motion_epoch))
         candidate_search = self._candidate_search()
-        search_hint = candidate_search.hint(
+        search_hint = None if viewer_geometry else candidate_search.hint(
             roi_attempts, context=candidate_context,
             observed_at_sec=image.stamp_sec, robot_pose=robot_pose,
             max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio)
         search_metadata = dict(candidate_search.last_metadata)
-        if search_hint is not None:
+        tracking_evaluation = None
+        if viewer_geometry:
+            tracking_evaluation = evaluate_viewer_head(
+                self.cv2, frame, model_profile=self.stand_model_profile,
+                intrinsics=intrinsics, pose_hint=prediction.pose,
+                projection=projection, expected_head_height_px=expected_head_height_px,
+                fallback_attempt=roi_attempts[-1] if roi_attempts else None,
+                cache=qr_decode_cache, budget=qr_acquisition_budget,
+                native_decoder=lambda crop: detect_native_qr_observations_bgr(crop, self.cv2),
+                full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
+                    crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    prefer_native_geometry=True),
+                deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
+                edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
+                canny_low=resolved_stand_axis_profile.canny_low,
+                canny_high=resolved_stand_axis_profile.canny_high,
+                estimator=estimate_stand_axis_from_metric_model)
+            current_view = classify_viewer_head(
+                tracking_evaluation, model_profile=self.stand_model_profile,
+                intrinsics=intrinsics, expected_head_height_px=expected_head_height_px)
+            registration = tracked_head_selection(
+                current_view, search_hint_used=prediction.pose is not None)
+            search_metadata = {
+                "policy": "shared_viewer_full_frame_geometry",
+                "hint_used": prediction.pose is not None,
+                "acquisition_before_candidate_association": True,
+                "measurement_reused": False, "motion_authorized": False,
+            }
+            head_acquisition_metadata = dict(current_view.debug.head_acquisition_diagnostics or {})
+        elif search_hint is not None:
             # Prior pose/corners only locate pixels. This image gets one strict
             # current-border fit, with no alternate-border retry on ambiguity.
             registration = tracked_head_selection(
                 evaluate_roi_attempt(search_hint.attempt, search_hint.pose_hint))
-        elif (getattr(self.stand_model_profile, "committable", False)
-                and self.stand_model_profile.environment == "physical"
-                and not self.args.disable_backside_reacquisition):
-            registration = select_cold_candidate_head(
-                roi_attempts, frame=frame, model_profile=self.stand_model_profile,
-                acquire_registered=acquire_registered,
-                diagnostics=head_acquisition_metadata, budget=head_budget)
         else:
             registration = self.backside_proposal_reuse.select(
                 roi_attempts,
@@ -1687,11 +1734,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
         self._last_head_miss_target = (None if registration.selected.estimate.usable
                                       else self._target_evidence_key())
-        registration = probe_identity_after_head_miss(
-            registration, cache=qr_decode_cache, budget=qr_acquisition_budget,
-            full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
-                crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
-                prefer_native_geometry=True), now=time.monotonic)
+        if not viewer_geometry:
+            registration = probe_identity_after_head_miss(
+                registration, cache=qr_decode_cache, budget=qr_acquisition_budget,
+                full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
+                    crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    prefer_native_geometry=True), now=time.monotonic)
         current_head_association = None
         current = registration.selected
         estimate, debug, selected_attempt = current.estimate, current.debug, current.attempt
@@ -1715,7 +1763,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     self.args.backside_registration_max_bearing_delta_deg),
                 resolve_lidar_association=resolve_lidar_association,
             )
-        if search_hint is not None:
+        if viewer_geometry or search_hint is not None:
             registration = register_current_tracked_head(
                 registration, association=current_head_association,
                 observed_at_sec=image.stamp_sec, now_sec=now_sec,
@@ -1738,14 +1786,24 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_age_sec=self.args.max_sensor_age_sec,
             max_future_sec=self.args.max_future_timestamp_sec,
         )
+        geometry_completed_ros = now_sec
+        if tracking_evaluation is not None:
+            geometry_completed_monotonic = (tracking_evaluation.qr_decode_metadata or {}).get(
+                "geometry_completed_monotonic_sec")
+            if geometry_completed_monotonic is not None:
+                geometry_completed_ros = processing_started_ros + (
+                    geometry_completed_monotonic - processing_started_monotonic)
         tracker_update = self.model_pose_tracker.update_from_observation(
-            estimate,
-            debug,
+            estimate if tracking_evaluation is None else tracking_evaluation.estimate,
+            debug if tracking_evaluation is None else tracking_evaluation.debug,
             observed_at_sec=image.stamp_sec,
-            completed_at_sec=now_sec,
+            completed_at_sec=geometry_completed_ros,
             profile_sha256=self.stand_model_profile.sha256,
             camera_signature=camera_signature,
-            result_fresh=result_freshness.accepted,
+            result_fresh=(result_freshness.accepted if tracking_evaluation is None else
+                          observation_freshness(observed_at_sec=image.stamp_sec,
+                              now_sec=geometry_completed_ros,
+                              max_age_sec=self.args.max_sensor_age_sec).accepted),
         )
         if result_freshness.accepted:
             self._camera_count("fresh_detector_results")
@@ -1757,7 +1815,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "profile_sha256": self.stand_model_profile.sha256,
             "environment": self.stand_model_profile.environment,
             "measurement_status": self.stand_model_profile.measurement_status,
-            "target_projection": asdict(projection),
+            "target_projection": {
+                **asdict(projection),
+                "u_px": projection.u_px if math.isfinite(projection.u_px) else None,
+                "v_px": projection.v_px if math.isfinite(projection.v_px) else None,
+            },
             "head_roi": selected_attempt.metadata(),
             "head_roi_attempts": [
                 evaluation.attempt.metadata()
@@ -1798,6 +1860,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "started_monotonic_sec": processing_started_monotonic,
                 "detector_completed_ros_sec": now_sec,
                 "detector_completed_monotonic_sec": processing_completed_monotonic,
+                "geometry_completed_ros_sec": geometry_completed_ros,
                 "detector_elapsed_ms": (processing_completed_monotonic - processing_started_monotonic) * 1000,
                 "qr_acquisition": qr_acquisition_budget.metadata(),
                 "head_processing_budget": head_budget.metadata(),
@@ -1844,7 +1907,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._capture_pending["detector_metadata"] = axis_metadata
         if not result_freshness.accepted:
             self._camera_count("obsolete_detector_results")
-            self._reset_candidate_search("obsolete_detector_result")
+            if not viewer_geometry:
+                self._reset_candidate_search("obsolete_detector_result")
             self._note_observation_soft_miss(
                 "obsolete_detector_result", stamp_sec=image.stamp_sec, pose=robot_pose
             )
@@ -2038,17 +2102,20 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
-        # Retain a locator only after the final current-source check and target
-        # association. QR presence/classification never controls this hint.
-        candidate_search.remember(
-            selected, context=candidate_context,
-            observed_at_sec=image.stamp_sec,
-            now_sec=self.node.get_clock().now().nanoseconds / 1e9,
-            max_age_sec=self.args.max_sensor_age_sec, robot_pose=robot_pose,
-            candidate_associated=(current_head_association is not None
-                and current_head_association.accepted
-                and self._source_freshness(image.stamp_sec, scan.stamp_sec).accepted))
-        model_metadata["candidate_head_tracking"] = dict(candidate_search.last_metadata)
+        # Legacy crop tracking remains candidate-bound. The shared full-image
+        # tracker above retains only geometry search information, before binding.
+        if not viewer_geometry:
+            candidate_search.remember(
+                selected, context=candidate_context,
+                observed_at_sec=image.stamp_sec,
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_age_sec=self.args.max_sensor_age_sec, robot_pose=robot_pose,
+                candidate_associated=(current_head_association is not None
+                    and current_head_association.accepted
+                    and self._source_freshness(image.stamp_sec, scan.stamp_sec).accepted))
+        model_metadata["candidate_head_tracking"] = (
+            {**search_metadata, "tracker_update": asdict(tracker_update)} if viewer_geometry
+            else dict(candidate_search.last_metadata))
         framing = unresolved_front_framing_hint(
             registration, target_key=self.args.stand_id,
             source_image_stamp_sec=image.stamp_sec,
@@ -2969,17 +3036,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_BACKSIDE_REACQUISITION_PADDING_SCALE,
         help=(
-            "Target-centred expanded ROI padding used after the nominal "
-            "QR/model or no-QR backside acquisition cannot produce strict "
-            "evidence."
+            "Target-centred fallback QR crop padding when full-image physical "
+            "head acquisition misses; also controls the legacy expanded-ROI retry."
         ),
     )
     parser.add_argument(
         "--disable-backside-reacquisition",
         action="store_true",
         help=(
-            "Disable the bounded QR/model and backside expanded-ROI retry and "
-            "use only the nominal projected head crop."
+            "Use only the nominal fallback QR crop and disable the legacy "
+            "expanded-ROI retry. Physical head geometry still uses the shared "
+            "full-image viewer acquisition."
         ),
     )
     parser.add_argument(

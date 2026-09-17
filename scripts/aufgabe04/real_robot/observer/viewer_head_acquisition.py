@@ -1,0 +1,189 @@
+"""Viewer-equivalent geometry followed by bounded, head-local marker work.
+
+The original image and intrinsics reach the shared fitter unchanged. QR work
+uses a separate crop and cannot select, refit or rescale the physical head.
+Candidate association and receipt freshness remain the observer's responsibility.
+"""
+
+from dataclasses import replace
+import math
+import time
+
+from scripts.aufgabe04.perception.stand_axis.head_geometry_acquisition import estimate_current_head_geometry
+from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
+from scripts.aufgabe04.perception.stand_axis.marker_work_schedule import (
+    MIN_NATIVE_MARKER_BUDGET_SEC, current_head_available_for_markers,
+)
+from scripts.aufgabe04.perception.stand_axis.qr_marker_validation import validate_qr_marker
+from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import RectifiedCameraMatrix, detect_qr_quad
+from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
+from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi, validate_intrinsics
+from scripts.aufgabe04.real_robot.observer.camera_target_registration import HeadRoiEvaluation
+from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
+from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import merge_current_qr_observations
+
+
+VIEWER_HEAD_SOURCE = "viewer_full_frame_head_search"
+
+
+def _finite_or_zero(value):
+    return float(value) if value is not None and math.isfinite(value) else 0.
+
+
+def _marker_bounds(frame, estimate, complete_head, fallback_attempt):
+    height, width = frame.shape[:2]
+    if complete_head:
+        u, v = zip(*((p.u_px, p.v_px) for p in estimate.corners))
+        margin = max(8., .15 * max(max(u)-min(u), max(v)-min(v)))
+        bounds = (max(0, math.floor(min(u)-margin)), max(0, math.floor(min(v)-margin)),
+                  min(width, math.ceil(max(u)+margin)+1), min(height, math.ceil(max(v)+margin)+1))
+        return bounds, "current_complete_head"
+    if fallback_attempt is None:
+        return None, "no_bounded_identity_crop"
+    roi = fallback_attempt.roi
+    bounds = (max(0, roi.x0), max(0, roi.y0), min(width, roi.x1), min(height, roi.y1))
+    if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+        return None, "no_bounded_identity_crop"
+    return bounds, fallback_attempt.source
+
+
+def _local_observations(observations, crop):
+    if observations is None:
+        return None
+    validated = []
+    for observation in observations:
+        # Validate in the decoder's actual input before translation. A backend's
+        # complete input rectangle must never become apparently valid QR corners.
+        corners = validated_qr_corners(observation.corners, image_shape=crop.shape)
+        validated.append(replace(observation, corners=corners))
+    return tuple(validated)
+
+
+def _full_image_observations(observations, bounds):
+    return None if observations is None else tuple(replace(
+        item, corners=None if item.corners is None else tuple(
+            (u + bounds[0], v + bounds[1]) for u, v in item.corners)) for item in observations)
+
+
+def evaluate_viewer_head(
+    cv2, frame, *, model_profile, intrinsics, pose_hint, projection,
+    expected_head_height_px, fallback_attempt, cache, budget, native_decoder,
+    full_decoder, deadline_monotonic_sec, edge_preprocess="channel_union",
+    canny_low=20, canny_high=60, estimator=None, now=None,
+):
+    """Measure full-frame geometry once, returning neutral side classification.
+
+    A decoded payload supplies positive marker evidence. Empty decoding supplies
+    none: only a completed current native finder check on a complete head may
+    provide marker absence. Skipped or late checks retain unknown side.
+    """
+    now = time.monotonic if now is None else now
+    validate_intrinsics(intrinsics)
+    if frame.shape[:2] != (intrinsics.height_px, intrinsics.width_px):
+        raise ValueError("viewer head frame must match its full-image intrinsics")
+    started = now()
+    estimate, debug = estimate_current_head_geometry(
+        cv2, frame, model_profile=model_profile,
+        camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
+        camera_cx_px=intrinsics.cx_px, camera_cy_px=intrinsics.cy_px,
+        pose_hint=pose_hint, edge_preprocess=edge_preprocess,
+        canny_low=canny_low, canny_high=canny_high,
+        deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
+    )
+    geometry_completed = now()
+    geometry_ms = (geometry_completed-started)*1000.
+    height = _finite_or_zero(expected_head_height_px)
+    attempt = HeadRoiAttempt(
+        ImageRoi(0, 0, intrinsics.width_px, intrinsics.height_px, height),
+        VIEWER_HEAD_SOURCE, 1., _finite_or_zero(getattr(projection, "u_px", None)),
+        _finite_or_zero(getattr(projection, "v_px", None)), height,
+    )
+    complete_head = current_head_available_for_markers((estimate, debug, None))
+    bounds, scope = _marker_bounds(frame, estimate, complete_head, fallback_attempt)
+    observations, qr_detected, marker_verified, detection_scale = None, None, None, None
+    marker_reason = "head_unavailable_marker_unchecked" if not complete_head else "qr_marker_processing_budget_exhausted"
+    metadata = dict(performed=False, geometry_first=True, geometry_scope="full_image",
+        geometry_completed_monotonic_sec=geometry_completed,
+        identity_scope=scope, identity_roi=None if bounds is None else list(bounds),
+        current_image_geometry_refit=False, marker_refresh_performed=False,
+        elapsed_ms=0.)
+    identity_started = now()
+    if bounds is None:
+        metadata["reason"] = scope
+    elif budget.remaining_work_sec(now()) < MIN_NATIVE_MARKER_BUDGET_SEC:
+        metadata["reason"] = "identity_deferred_for_source_freshness"
+    else:
+        x0, y0, x1, y1 = bounds
+        crop = frame[y0:y1, x0:x1]
+        native = cache.decode(roi=bounds, mode="native", frame=crop, decoder=native_decoder)
+        observations = _local_observations(native.observations, crop)
+        metadata.update(performed=True, native_check=native.metadata())
+        if not observations and complete_head and budget.remaining_work_sec(now()) >= MIN_NATIVE_MARKER_BUDGET_SEC:
+            marker_started = now()
+            detection = detect_qr_quad(cv2, crop, scales=(1.,),
+                allow_decode_fallback=False, allow_native_decode_fallback=False)
+            marker = validate_qr_marker(cv2, crop, detection)
+            metadata.update(marker_refresh_performed=True,
+                native_marker_elapsed_ms=(now()-marker_started)*1000.)
+            detection_scale = None if detection is None else detection.scale
+            if budget.remaining_work_sec(now()) > 0.:
+                qr_detected, marker_verified, marker_reason = detection is not None, marker.verified, marker.reason
+            else:
+                marker_reason = "qr_marker_completion_deadline_exceeded"
+        decision = budget.request(roi=bounds, roi_source=scope, now_monotonic_sec=now(),
+            current_qr_signal=bool(observations) or qr_detected is True,
+            identity_geometry_available=bool(observations) and (
+                len(observations) > 1 or observations[0].corners is not None),
+            complete_head_available=complete_head, selected_crop=True)
+        metadata["acquisition"] = decision.metadata()
+        if decision.allowed:
+            if decision.cache_only and budget._full_result is not None:
+                acquired = replace(budget._full_result, cache_hit=True, elapsed_ms=0.)
+            else:
+                provenance = {}
+                acquired = cache.decode(roi=bounds, mode="full", frame=crop,
+                    decoder=lambda image: full_decoder(image, decision.max_elapsed_sec, provenance),
+                    decoder_provenance=provenance)
+                budget._full_result = acquired
+            observations = merge_current_qr_observations(observations, _local_observations(acquired.observations, crop))
+            metadata["full_decode"] = acquired.metadata()
+        if observations:
+            qr_detected, marker_verified = True, True
+            marker_reason = "multiple_decoded_qr_identities" if len(observations) > 1 else "decoded_qr_identity"
+        observations = _full_image_observations(observations, bounds)
+    identity_ms = (now()-identity_started)*1000.
+    metadata["elapsed_ms"] = identity_ms
+    timings = {**(debug.stage_timings_ms or {}), "initial_geometry_pass_ms": geometry_ms,
+               "qr_identity": identity_ms, "total": (now()-started)*1000.}
+    debug = replace(debug, qr_detected=qr_detected, qr_marker_verified=marker_verified,
+        qr_marker_reason=marker_reason, qr_detection_scale=detection_scale, stage_timings_ms=timings)
+    return HeadRoiEvaluation(attempt, frame, estimate, debug, observations, metadata)
+
+
+def classify_viewer_head(evaluation, *, model_profile, intrinsics, expected_head_height_px):
+    """Attach current side evidence without changing the measured angle.
+
+    Its current complete head defines the classification center; the original
+    projected height remains a scale check. This is not candidate association:
+    the observer must still associate these original full-image corners with
+    the intended map candidate and current scan before creating any receipt.
+    """
+    corners = evaluation.estimate.corners
+    if corners is None or len(corners) != 4:
+        return evaluation
+    center = tuple(sum(getattr(p, name) for p in corners)/len(corners) for name in ("u_px", "v_px"))
+    debug = replace(evaluation.debug, head_acquisition_diagnostics={
+        **(evaluation.debug.head_acquisition_diagnostics or {}),
+        "side_projection_source": "current_verified_head_pixels",
+        "side_projection_center_px": center, "original_candidate_association_required": True,
+    })
+    estimate, debug = classify_current_head_backside(
+        evaluation.estimate, debug, model_profile=model_profile,
+        camera=RectifiedCameraMatrix(intrinsics.fx_px, intrinsics.fy_px, intrinsics.cx_px, intrinsics.cy_px),
+        expected_center_u_px=center[0], expected_center_v_px=center[1],
+        expected_height_px=expected_head_height_px,
+    )
+    return replace(evaluation, estimate=estimate, debug=debug)
+
+
+__all__ = ["VIEWER_HEAD_SOURCE", "evaluate_viewer_head", "classify_viewer_head"]

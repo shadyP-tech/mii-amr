@@ -44,6 +44,10 @@ class CurrentHeadCandidateAssociation:
 
     def metadata(self) -> dict:
         return {**asdict(self), "schema_version": 1,
+                # An invalid/behind-camera projection remains rejected in the
+                # typed proof, but its diagnostic must still be valid JSON.
+                "projected_center_px": tuple(
+                    value if math.isfinite(value) else None for value in self.projected_center_px),
                 "association_source": "current_measured_head",
                 "single_angle_admitted": self.head_admission.accepted,
                 "bounded_head_detection": self.head_orientation_bounds is not None,

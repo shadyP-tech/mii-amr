@@ -18,6 +18,7 @@ from scripts.aufgabe04.real_robot.observer.camera_target_registration import (
 from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
 from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_detection_admission
 from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
+from scripts.aufgabe04.real_robot.observer.viewer_head_acquisition import VIEWER_HEAD_SOURCE
 
 
 TRACKED_HEAD_SOURCE = "candidate_tracked_head_search"
@@ -50,19 +51,19 @@ class CurrentMeasuredHeadRegistration:
                 "motion_authorized": False}
 
 
-def tracked_head_selection(evaluation: HeadRoiEvaluation) -> CameraTargetRegistrationSelection:
-    """Wrap one newly evaluated tracked crop, with no registration authority."""
+def tracked_head_selection(evaluation: HeadRoiEvaluation, *, search_hint_used=True) -> CameraTargetRegistrationSelection:
+    """Wrap current geometry, cold or tracked, with no registration authority."""
     return CameraTargetRegistrationSelection(
         selected=evaluation, evaluations=(evaluation,), proposal=None,
         decision=None, strict_retry=None, reacquisition_mode=None,
-        search_hint_used=True,
+        search_hint_used=search_hint_used,
     )
 
 
 def _current_geometry_bounds(proof):
     current = proof.evaluation
     estimate, debug = current.estimate, current.debug
-    if current.attempt.source != TRACKED_HEAD_SOURCE:
+    if current.attempt.source not in {TRACKED_HEAD_SOURCE, VIEWER_HEAD_SOURCE}:
         return "current_tracked_head_crop_required", None
     if (not math.isfinite(proof.max_age_sec) or proof.max_age_sec <= 0
             or not observation_freshness(

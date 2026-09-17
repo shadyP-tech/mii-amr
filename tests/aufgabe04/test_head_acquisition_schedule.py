@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from contextlib import ExitStack
+from dataclasses import replace
 from unittest.mock import Mock, patch
 import unittest
 
@@ -11,8 +12,9 @@ from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, select_cold_candidate_head,
 )
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
-from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import QrAcquisitionDecision
 from scripts.aufgabe04.real_robot.configuration.geometry import ImageRoi
+from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
+from scripts.aufgabe04.perception.stand_axis.models import StandAxisEdgeDebugArtifacts
 from scripts.aufgabe04.perception.stand_axis.physical_head_pipeline import fit_physical_head_in_frame
 from scripts.aufgabe04.real_robot.observer import node as observer_node
 from tests.aufgabe04 import test_camera_observer_processing as processing_fixtures
@@ -108,38 +110,39 @@ class AcquisitionFailureObserverTests(unittest.TestCase):
                 decoders = [stack.enter_context(patch(module + name, return_value=())) for name in (
                     "detect_qr_texts_bgr", "detect_qr_observations_bgr",
                     "detect_native_qr_observations_bgr")]
-                fit = stack.enter_context(patch(module + "estimate_stand_axis_from_metric_model"))
+                estimate = replace(_unusable(failure, source="model_current_measured_head"),
+                    evidence_state="unobservable", model_profile_sha256=adapter.stand_model_profile.sha256,
+                    model_measurement_status="measured")
+                debug = StandAxisEdgeDebugArtifacts(edges=None, evidence_state="unobservable",
+                    model_profile_sha256=adapter.stand_model_profile.sha256,
+                    model_measurement_status="measured", model_reason=failure,
+                    model_pose_fit_source="model_current_measured_head")
+                fit = stack.enter_context(patch(module + "estimate_stand_axis_from_metric_model",
+                    return_value=(estimate, debug)))
                 bind = stack.enter_context(patch(module + "bind_qr_observations_to_target",
                     wraps=observer_node.bind_qr_observations_to_target))
 
-                def failed_proposal(*_args, diagnostics, **_kwargs):
-                    diagnostics["reason"] = failure
-                    return None
-
                 acquire = stack.enter_context(patch(
-                    module + "acquire_registered_head_measurement", side_effect=failed_proposal))
+                    module + "acquire_registered_head_measurement"))
                 if failure == "head_acquisition_deadline_exceeded":
-                    stack.enter_context(patch(
-                        "scripts.aufgabe04.real_robot.observer.head_acquisition_schedule."
-                        "HeadProcessingDeadline.allow", return_value=False))
                     stack.enter_context(patch(
                         "scripts.aufgabe04.real_robot.observer.qr_acquisition_policy."
-                        "QrFrameAcquisitionBudget.request",
-                        return_value=QrAcquisitionDecision(
-                            False, "image_processing_budget_exhausted", 0.)))
+                        "QrFrameAcquisitionBudget.remaining_work_sec", return_value=0.))
                 adapter._process_latest()
                 decoders[0].assert_not_called()  # Legacy unbounded text fallback.
-                decoders[2].assert_not_called()
                 if failure == "head_acquisition_deadline_exceeded":
                     decoders[1].assert_not_called()
+                    decoders[2].assert_not_called()
                 else:
+                    decoders[2].assert_called_once()
                     decoders[1].assert_called_once()
                     self.assertLessEqual(decoders[1].call_args.kwargs["max_elapsed_sec"], .12)
-                fit.assert_not_called()
-                if failure == "head_acquisition_deadline_exceeded":
-                    acquire.assert_not_called()
-                else:
-                    acquire.assert_called_once()
+                    self.assertLess(decoders[1].call_args.args[0].shape[0], frame.shape[0])
+                    self.assertLess(decoders[1].call_args.args[0].shape[1], frame.shape[1])
+                fit.assert_called_once()
+                self.assertIs(fit.call_args.args[1], frame)
+                self.assertFalse(any(key.startswith("expected_head_") for key in fit.call_args.kwargs))
+                acquire.assert_not_called()
                 self.assertFalse(adapter.completed)
                 status = adapter._write_status.call_args
                 self.assertEqual(status.args, ("metric_model_measurement_unavailable",))

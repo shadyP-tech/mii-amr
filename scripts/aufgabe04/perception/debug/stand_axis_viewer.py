@@ -98,8 +98,10 @@ from scripts.aufgabe04.perception.stand_axis_image import (
     estimate_stand_axis_from_edges,
     estimate_stand_axis_from_mask,
 )
-from scripts.aufgabe04.perception.stand_axis.model_pipeline import (
-    estimate_stand_axis_from_metric_model,
+from scripts.aufgabe04.perception.stand_axis.head_geometry_acquisition import (
+    DEFAULT_MIN_EDGE_HEIGHT_PX,
+    create_head_geometry_tracker,
+    estimate_current_head_geometry,
 )
 from scripts.aufgabe04.perception.stand_axis.model_profile import (
     StandModelProfile,
@@ -108,9 +110,6 @@ from scripts.aufgabe04.perception.stand_axis.model_profile import (
 from scripts.aufgabe04.perception.stand_axis.model_diagnostics import (
     metric_model_status_payload as _metric_model_status_payload,
     resolved_fallback_face_to_qr_ratio as _resolved_fallback_face_to_qr_ratio,
-)
-from scripts.aufgabe04.perception.stand_axis.pose_tracking import (
-    MetricPoseTracker,
 )
 from scripts.aufgabe04.perception.stand_axis.radiator_rib_mask import (
     repeated_vertical_rib_exclusion_mask,
@@ -378,7 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--close-iterations", type=int, default=2)
     parser.add_argument("--open-iterations", type=int, default=1)
     parser.add_argument("--min-area-px", type=float, default=250.0)
-    parser.add_argument("--min-edge-height-px", type=float, default=8.0)
+    parser.add_argument("--min-edge-height-px", type=float, default=DEFAULT_MIN_EDGE_HEIGHT_PX)
     parser.add_argument(
         "--edge-preprocess",
         choices=("outer-border", "gray", "channel-union"),
@@ -2738,8 +2737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deviation_rad=math.radians(args.axis_consensus_max_deviation_deg),
     )
     model_pose_tracker = (
-        None if stand_model_profile is None else MetricPoseTracker(
-            prediction_ttl_sec=0.25, search_hint_ttl_sec=2.0, max_soft_misses=2)
+        None if stand_model_profile is None else create_head_geometry_tracker()
     )
     head_candidate_temporal_gate = HeadCandidateTemporalGate(
         # The model path draws its bounded prediction on the current frame.
@@ -3347,7 +3345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         camera_signature=camera_signature,
                     )
                     metric_estimate, metric_artifacts = (
-                        estimate_stand_axis_from_metric_model(
+                        estimate_current_head_geometry(
                             cv2,
                             axis_frame,
                             model_profile=stand_model_profile,
