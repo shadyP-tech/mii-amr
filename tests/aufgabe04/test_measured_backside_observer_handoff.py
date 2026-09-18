@@ -129,6 +129,14 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
             frame_count = 8 if scenario == "panel_then_recovery" else 9 if "marker" in scenario else 7
             for count in range(frame_count):
                 index[0] = count
+                if scenario == "endpoint_scan":
+                    adapter.args.scan_topology_profile = "full_rotation"
+                    sensor.scan.value.angle_min = 0.
+                    sensor.scan.value.angle_increment = math.radians(1.)
+                    sensor.scan.value.angle_max = math.radians(359.)
+                    n = 360 if count < 3 else 359
+                    sensor.scan.value.ranges = tuple(.6 if i <= 2 or i >= n-2
+                                                     else math.inf for i in range(n))
                 if scenario == "fragmented_scan" and count == 6:
                     sensor.scan.value.ranges = (.6, .6, math.nan, .6, .6)
                 stamp = 100. + count * .2
@@ -147,9 +155,15 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
         return adapter
 
     def test_first_view_commits_seven_samples_and_selects_opposite_before_generic_views(self):
+        self.check_opposite_branch()
+
+    def test_witnessed_endpoints_commit_and_select_opposite_before_generic_views(self):
+        self.check_opposite_branch("endpoint_scan")
+
+    def check_opposite_branch(self, scenario="backside"):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            adapter = self.observe(root)
+            adapter = self.observe(root, scenario)
             self.assertTrue(adapter.completed, adapter._write_status.call_args)
             self.assertFalse(adapter.args.recommended_pose_json.exists())
             receipt = load_backside_axis_observation(adapter.args.axis_observation_json)
@@ -157,7 +171,11 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
             self.assertEqual(payload["axis_sample_source"], REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE)
             self.assertEqual(payload["axis_sample_count"], 7)
             self.assertEqual(payload["motion_capability"], "none")
-            self.assertEqual(payload["target_registration"]["eligible_lidar_cluster_count"], 1)
+            registration = payload["target_registration"]
+            self.assertEqual(registration["eligible_lidar_cluster_count"], 2 if scenario == "endpoint_scan" else 1)
+            if scenario == "endpoint_scan":
+                self.assertEqual(registration["witnessed_fragmentation"]["kind"],
+                                 "scan_endpoint_fragments_witnessed")
             # The opposing normal must lie on the other side of the stand.
             self.assertLess(math.cos(receipt.opposite_face_normal_rad - math.pi), -.5)
             backside = SimpleNamespace(recommendation_path=None, inspection_observation_path=None,
@@ -194,6 +212,11 @@ class MeasuredBacksideObserverHandoffTests(unittest.TestCase):
                     self.assertTrue(adapter._qr_marker_seen_in_stationary_epoch)
                     self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count_by_source.get(
                         REGISTERED_BACKSIDE_AXIS_SAMPLE_SOURCE, 0), 0)
+                if scenario == "ambiguous_lidar":
+                    detection = adapter._write_status.call_args.kwargs["stand_axis_debug"]["metric_model"]["head_detection"]
+                    self.assertTrue(detection["head_frame_detected"])
+                    self.assertFalse(detection["target_association_accepted"])
+                    self.assertEqual(detection["target_association_reason"], "ambiguous_registered_camera_clusters")
                 if scenario == "late_publication":
                     self.assertEqual(adapter._write_status.call_args.args, ("obsolete_publication_evidence",))
 

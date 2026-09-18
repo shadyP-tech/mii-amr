@@ -44,7 +44,7 @@ def load_candidate_inspection_view(path: Path) -> dict[str, object]:
     ):
         raise ValueError("unsupported inspection view schema")
     if payload.get("purpose") not in {
-        "diverse_inspection", "arrival_alignment", "camera_distance_recovery",
+        "diverse_inspection", "arrival_alignment", "camera_distance_recovery", "lidar_axis_hint",
     }:
         raise ValueError("unsupported inspection view purpose")
     if payload.get("motion_authorized") is not False or payload.get(

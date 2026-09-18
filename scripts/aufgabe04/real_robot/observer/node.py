@@ -74,6 +74,7 @@ from scripts.aufgabe04.perception.stand_axis.observation_freshness import (
 from scripts.aufgabe04.perception.stand_axis.model_diagnostics import (
     metric_fit_diagnostics_payload,
 )
+from scripts.aufgabe04.perception.stand_axis.head_frame_detection import head_frame_detection
 from scripts.aufgabe04.perception.stand_axis_handoff import (
     RigidTransform,
     rectified_pixel_bearing_in_scan,
@@ -1862,6 +1863,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 observed_at_sec=image.stamp_sec, now_sec=now_sec,
                 max_age_sec=self.args.max_sensor_age_sec,
                 expected_model_sha256=self.stand_model_profile.sha256)
+        visual_head = head_frame_detection(registration.selected.estimate, registration.selected.debug)
         registration, backside_crop_review = gate_backside_head_crop(registration)
         selected = registration.selected
         selected_attempt = selected.attempt
@@ -1903,6 +1905,15 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if estimate.usable and estimate.evidence_state in {"fresh_refined", "fresh_backside"}:
             self._camera_count("verified_geometry_results")
         model_metadata = {
+            "head_detection": {
+                **visual_head,
+                "head_frame_detected": visual_head["head_frame_detected"] and result_freshness.accepted,
+                "yaw_reliable": visual_head["yaw_reliable"] and result_freshness.accepted,
+                "source_fresh": result_freshness.accepted,
+                "target_association_accepted": bool(current_head_association and current_head_association.accepted),
+                "target_association_reason": (None if current_head_association is None
+                                              else current_head_association.reason),
+            },
             "mode": "metric_model_only",
             "profile_id": self.stand_model_profile.profile_id,
             "profile_sha256": self.stand_model_profile.sha256,

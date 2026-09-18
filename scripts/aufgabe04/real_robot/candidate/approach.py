@@ -17,7 +17,7 @@ import time
 from typing import Callable, Mapping
 
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
-    load_candidate_inspection_view, write_candidate_inspection_view,
+    INSPECTION_VIEW_BEARING_MODE, load_candidate_inspection_view, write_candidate_inspection_view,
 )
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionRouteUnavailableError,
@@ -271,6 +271,8 @@ class CameraCandidateSelectionRequest:
     unresolved: frozenset[str]
     support_class_by_uid: Mapping[str, str] | None
     route_uncertainty_context: CandidateRouteUncertaintyContext | None = None
+    source_registry: StandSurveyRegistry | None = None
+    planning_frame: CandidatePlanningFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -943,6 +945,11 @@ def _select_initial_preapproach(
     request: CameraCandidateSelectionRequest,
 ) -> CameraCandidateInitialSelection:
     config = request.config
+    from scripts.aufgabe04.real_robot.candidate.lidar_inspection_hints import load_camera_lidar_hints
+    hints, hint_diagnostics = load_camera_lidar_hints(
+        survey_root=config.survey_root, plan=config.plan, snapshot=config.snapshot,
+        registry=request.source_registry, planning_frame=request.planning_frame,
+    )
     planned = plan_and_select_camera_candidate(
         map_yaml=config.map_yaml,
         semantic_map_id=config.semantic_map_id,
@@ -960,6 +967,8 @@ def _select_initial_preapproach(
         ),
         support_class_by_uid=request.support_class_by_uid,
         route_uncertainty_context=request.route_uncertainty_context,
+        lidar_inspection_hints=hints,
+        lidar_hint_diagnostics=hint_diagnostics,
     )
     return CameraCandidateInitialSelection(
         candidate_uid=planned.selected_candidate_uid,
@@ -2121,6 +2130,8 @@ def execute_candidate_approach_phase(
                     unresolved=frozenset(eligible),
                     support_class_by_uid=exact_two_support_by_uid,
                     route_uncertainty_context=route_uncertainty_context,
+                    source_registry=source_registry,
+                    planning_frame=selection_planning_frame,
                 )
             )
         except (
@@ -2188,6 +2199,19 @@ def execute_candidate_approach_phase(
             / f"{candidate_index:03d}_{candidate.candidate_uid}"
         )
         source_root = candidate_root / "preapproach_source"
+        initial_inspection_view_path = None
+        if (selection.prepared_plan is not None and
+                selection.prepared_plan.approach_bearing_mode == INSPECTION_VIEW_BEARING_MODE):
+            initial_inspection_view_path = candidate_root / "lidar_initial_inspection_view.json"
+            hint_evidence_path = candidate_root / "lidar_initial_selection.json"
+            _write_json(hint_evidence_path, dict(selection.evidence))
+            write_candidate_inspection_view(
+                initial_inspection_view_path, snapshot=planning_config.snapshot,
+                candidate_uid=candidate.candidate_uid, start=current,
+                view_normal_rad=selection.prepared_plan.approach_bearing_rad - math.pi,
+                purpose="lidar_axis_hint", view_index=0,
+                source_observation_path=hint_evidence_path,
+            )
         preapproach_plan_request = CandidatePreapproachRequest(
             map_yaml=planning_config.map_yaml,
             semantic_map_id=planning_config.semantic_map_id,
@@ -2205,6 +2229,7 @@ def execute_candidate_approach_phase(
             physical_clearance=planning_config.physical_clearance,
             prepared_plan=selection.prepared_plan,
             selection_evidence=selection.evidence,
+            inspection_view_path=initial_inspection_view_path,
         )
         effects.event_sink(
             selection_log_path,

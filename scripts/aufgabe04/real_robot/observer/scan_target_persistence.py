@@ -1,8 +1,8 @@
-"""Stopped-pose proof for a target split by one missing internal LiDAR beam.
+"""Stopped-pose proof for a target split by a bounded missing LiDAR interval.
 
 Three distinct earlier scans must each contain one real contiguous target and
 a real return spanning today's missing beam. Current fragments remain separate
-and their raw count stays in the association. No endpoint join, synthetic return,
+and their raw count stays in the association. No global endpoint join, synthetic return,
 nearest-cluster preference, range relaxation or angle authority is introduced.
 """
 
@@ -18,6 +18,9 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
 from scripts.aufgabe04.real_robot.observer.scan_target_geometry import scan_target_geometry
 from scripts.aufgabe04.real_robot.observer.scan_witness_buffer import StoppedScanWitnessBuffer
+from scripts.aufgabe04.real_robot.observer.scan_endpoint_fragments import (
+    endpoint_fragments, ENDPOINT_WITNESS_KIND, INTERNAL_WITNESS_KIND,
+)
 
 
 MIN_WITNESS_SCANS = 3
@@ -252,27 +255,34 @@ def _xy(sample, pose):
             pose.y_m + sample.distance_m * math.sin(angle))
 
 
-def _resolved(current, witnesses):
+def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=False):
     scan, robot, pose, association, clusters = _read_entry(current)
-    if "input_source" in current:
+    if "input_source" in current and not allow_partial:
         raise ValueError("current target requires current camera registration")
     if association.rejection_reason != "ambiguous_registered_camera_clusters" or len(clusters) != 2:
         raise ValueError("witnessed fragmentation requires exactly two current fragments")
     left, right = sorted(clusters, key=lambda c: c.start_index)
-    # Only one missing internal beam is eligible. No seam, index leap,
-    # out-of-range return, or previously rejected finite return can be filled.
-    if (left.start_index > left.end_index or right.start_index > right.end_index
+    seam = kind == ENDPOINT_WITNESS_KIND
+    if seam:
+        if not endpoint_fragments(scan, clusters):
+            raise ValueError("current fragments do not meet the bounded endpoint witness contract")
+        gap_left, gap_right = right.samples[-1], left.samples[0]
+        samples = tuple(s for cluster in (right, left) for s in cluster.samples)
+    elif (left.start_index > left.end_index or right.start_index > right.end_index
             or right.start_index != left.end_index + 2
             or math.isfinite(scan.ranges[left.end_index + 1])):
         raise ValueError("current fragments are not separated by one missing internal beam")
-    gap_left, gap_right = left.samples[-1], right.samples[0]
-    samples = tuple(s for cluster in (left, right) for s in cluster.samples)
+    else:
+        gap_left, gap_right = left.samples[-1], right.samples[0]
+        samples = tuple(s for cluster in (left, right) for s in cluster.samples)
     parameters = current["parameters"]
     max_gap, max_jump = parameters["max_point_gap_m"], parameters["max_range_jump_m"]
     if (abs(gap_right.distance_m - gap_left.distance_m) > max_jump
             or math.dist(_xy(gap_left, pose), _xy(gap_right, pose)) > max_gap):
         raise ValueError("current fragment spacing exceeds the unchanged spatial gates")
-    if not isinstance(witnesses, (tuple, list)) or len(witnesses) != MIN_WITNESS_SCANS:
+    if (not isinstance(witnesses, (tuple, list))
+            or (not allow_partial and len(witnesses) != MIN_WITNESS_SCANS)
+            or len(witnesses) > MIN_WITNESS_SCANS):
         raise ValueError("three independent witnessed scans are required")
     previous_stamp = None
     anchor_robot = anchor_scan_pose = None
@@ -303,7 +313,7 @@ def _resolved(current, witnesses):
                     - _historical_search_bearing(current, entry))) > 1e-9):
             raise ValueError("independent witness is not bound to the current head ray")
         if (not old_association.associated or len(old_clusters) != 1
-                or old_clusters[0].start_index > old_clusters[0].end_index):
+                or (old_clusters[0].start_index > old_clusters[0].end_index and not seam)):
             raise ValueError("a witness contains competing targets or crosses the scan boundary")
         old_points = tuple(_xy(s, old_pose) for s in old_clusters[0].samples)
         if any(min(math.dist(_xy(s, pose), p) for p in old_points) > max_gap for s in samples):
@@ -319,12 +329,14 @@ def _resolved(current, witnesses):
             and max(math.dist(p, a), math.dist(p, b)) <= max_gap
             for p in old_points):
             raise ValueError("no historical real beam witnesses the missing interval")
+    if allow_partial:
+        return None  # Compatibility may retain witnesses; it never admits a target.
     aggregate = lidar._build_cluster(samples)
     search = replace(association.search_association, associated=True, rejection_reason="",
         distance_m=aggregate.distance_m, selected_cluster_sample_count=len(samples),
         selected_cluster_start_index=samples[0].index, selected_cluster_end_index=samples[-1].index,
         selected_cluster_source_indices=tuple(s.index for s in samples),
-        selected_cluster_wraps_scan_seam=False, selected_cluster_bearing_rad=aggregate.bearing_rad,
+        selected_cluster_wraps_scan_seam=seam, selected_cluster_bearing_rad=aggregate.bearing_rad,
         selected_cluster_bearing_delta_from_map_rad=abs(_angle(
             aggregate.bearing_rad - association.registered_search_bearing_rad)),
         selection_source="witnessed_current_fragments")
@@ -338,11 +350,13 @@ def validated_witnessed_fragmentation(proof, *, association=None):
     if (not isinstance(proof, dict)
             or set(proof) != {"schema_version", "kind", "current", "witnesses", "persistent_target_count"}
             or type(proof["schema_version"]) is not int or proof["schema_version"] != 1
-            or proof["kind"] != "one_internal_missing_beam_witnessed"
+            or not isinstance(proof["kind"], str)
+            or proof["kind"] not in {INTERNAL_WITNESS_KIND, ENDPOINT_WITNESS_KIND}
             or type(proof["persistent_target_count"]) is not int or proof["persistent_target_count"] != 1):
         raise ValueError("witnessed fragmentation proof is malformed")
     try:
-        result = replace(_resolved(proof["current"], proof["witnesses"]), witnessed_fragmentation=proof)
+        result = replace(_resolved(proof["current"], proof["witnesses"], kind=proof["kind"]),
+                         witnessed_fragmentation=proof)
     except (TypeError, KeyError, ArithmeticError, AttributeError) as exc:
         raise ValueError("witnessed fragmentation evidence is malformed") from exc
     if association is not None and result != association:
@@ -553,7 +567,8 @@ class StoppedScanTargetPersistence:
                 reason="unique_current_cluster" if association.associated else association.rejection_reason,
                 witness_scan_count=len(self._history))
             if association.rejection_reason == "ambiguous_registered_camera_clusters":
-                proof = dict(schema_version=1, kind="one_internal_missing_beam_witnessed",
+                seam = endpoint_fragments(current_scan, clusters)
+                proof = dict(schema_version=1, kind=ENDPOINT_WITNESS_KIND if seam else INTERNAL_WITNESS_KIND,
                              current=entry, witnesses=[old for old in self._history
                                  if old["scan"]["scan_stamp_sec"] < scan.scan_stamp_sec][-MIN_WITNESS_SCANS:],
                              persistent_target_count=1)
@@ -561,9 +576,17 @@ class StoppedScanTargetPersistence:
                     result = validated_witnessed_fragmentation(proof)
                 except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
                     self.last_metadata = dict(accepted=False, reason=str(exc))
-                    # A current contradictory or unresolved target cannot
-                    # inherit an old connecting target on the next image.
-                    self._history = []
+                    # Compatible endpoint fragments may wait for three real
+                    # witnesses. They never become witnesses themselves. Any
+                    # geometric, context, timing or continuity contradiction
+                    # still consumes the history, as for internal gaps.
+                    try:
+                        if not seam:
+                            raise ValueError("not endpoint fragments")
+                        _resolved(entry, proof["witnesses"], kind=ENDPOINT_WITNESS_KIND,
+                                  allow_partial=True)
+                    except (TypeError, ValueError, ArithmeticError, KeyError):
+                        self._history = []
             if association.associated and len(clusters) == 1 and scan.scan_stamp_sec != self._last_stamp:
                 self._history.append(entry)
                 self._history = self._history[-MIN_WITNESS_SCANS:]
