@@ -1440,10 +1440,14 @@ def _capture_camera_recommendation(
     candidate,
     output_dir: Path,
     observation_attempt_index: int = 0,
+    allow_centering: bool = False,
+    timeout_sec: float | None = None,
+    observation_not_before_sec: float | None = None,
 ) -> (
     tuple[Path | None, str | None, Path | None]
     | tuple[None, str | None, None, Path]
     | tuple[None, str, None, None, Path]
+    | tuple[None, None, None, None, None, Path]
 ):
     if args.stand_model_profile is None:
         raise RuntimeError(
@@ -1463,6 +1467,7 @@ def _capture_camera_recommendation(
     axis_observation_path = output_dir / "axis_observation.json"
     inspection_observation_path = output_dir / "inspection_observation.json"
     qr_observation_pose_path = output_dir / "qr_observation_pose.json"
+    centering_path = output_dir / "candidate_centering.json" if allow_centering else None
     command = [
         sys.executable,
         "scripts/aufgabe04/real_robot/entrypoints/passive_viewpoint_node.py",
@@ -1520,6 +1525,10 @@ def _capture_camera_recommendation(
             str(args.stand_model_profile),
         ]
     )
+    if centering_path is not None:
+        command.extend(["--candidate-centering-json", str(centering_path)])
+    if observation_not_before_sec is not None:
+        command.extend(["--observation-not-before-sec", str(observation_not_before_sec)])
     process = subprocess.Popen(command)
     process_evidence = monitor_passive_observer_process(
         process=process,
@@ -1527,13 +1536,39 @@ def _capture_camera_recommendation(
         axis_observation_path=axis_observation_path,
         inspection_observation_path=inspection_observation_path,
         qr_observation_pose_path=qr_observation_pose_path,
-        timeout_sec=args.camera_timeout_sec,
+        candidate_centering_path=centering_path,
+        timeout_sec=args.camera_timeout_sec if timeout_sec is None else timeout_sec,
     )
     write_content_hashed_json(
         process_evidence_path,
         process_evidence.to_dict(),
         hash_field="observer_process_evidence_sha256",
     )
+    if process_evidence.artifact_kind == "candidate_centering":
+        from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
+        status_evidence = load_passive_observer_status(status_path)
+        if (not allow_centering or centering_path is None
+                or process_evidence.returncode != 0 or process_evidence.signals_sent
+                or status_evidence.load_error is not None
+                or status_evidence.state != "candidate_centering_committed"):
+            raise RuntimeError("centering advisory lacks successful passive observer completion")
+        stream_id = f"{args.session_id}_{candidate.candidate_uid}"
+        advisory = validate_camera_centering_advisory(
+            json.loads(centering_path.read_text()), candidate_uid=candidate.candidate_uid,
+            stream_id=stream_id,
+            target_key=f"{stream_id}:{candidate.candidate_uid}:{candidate.geometry.x_m:.9f}:{candidate.geometry.y_m:.9f}",
+            robot_profile_sha256=real_robot_profile_sha256(profile),
+            calibration_profile_sha256=profile.calibration_profile_sha256,
+            stand_model_profile_sha256=stand_model.sha256, now_sec=time.time(),
+            min_image_stamp_sec=observation_not_before_sec,
+            min_scan_stamp_sec=observation_not_before_sec,
+        )
+        if (advisory.planning_frame != profile.map_frame
+                or advisory.scan_from_camera.parent_frame != profile.scan_frame
+                or advisory.base_from_camera.parent_frame != profile.base_frame
+                or advisory.base_from_camera.child_frame != profile.camera_optical_frame):
+            raise ValueError("centering advisory frame binding mismatch")
+        return None, None, None, None, None, centering_path
     if process_evidence.artifact_kind == "qr_verified_observation_pose":
         # A saved QR must not mask a failed observer or forced cleanup. The
         # passive child owns the bounded geometry grace period and commits
@@ -1905,8 +1940,39 @@ def _capture_candidate_observation(
         candidate=request.candidate,
         output_dir=request.output_dir,
         observation_attempt_index=request.attempt_index,
+        allow_centering=getattr(request, "allow_centering", False),
+        timeout_sec=getattr(request, "timeout_sec", None),
+        observation_not_before_sec=getattr(request, "observation_not_before_sec", None),
     )
     return CandidateObservation(*result)
+
+
+def _run_camera_centering_turn(*, profile, args, master_authorization_path,
+        minimum_clearance_m, candidate, advisory_path, output_dir, view_id,
+        turn_index, remaining_travel_rad, previous_result_path):
+    from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
+    from scripts.aufgabe04.real_robot.execution.candidate_centering import (
+        CandidateCenteringChildRequest, run_candidate_centering_child,
+    )
+    payload = json.loads(Path(advisory_path).read_text())
+    stream_id = f"{args.session_id}_{candidate.candidate_uid}"
+    advisory = validate_camera_centering_advisory(
+        payload, candidate_uid=candidate.candidate_uid, stream_id=stream_id,
+        target_key=f"{stream_id}:{candidate.candidate_uid}:{candidate.geometry.x_m:.9f}:{candidate.geometry.y_m:.9f}",
+        robot_profile_sha256=real_robot_profile_sha256(profile),
+        calibration_profile_sha256=profile.calibration_profile_sha256,
+        stand_model_profile_sha256=load_measured_physical_stand_model(args.stand_model_profile).sha256,
+        now_sec=time.time(),
+    )
+    return run_candidate_centering_child(CandidateCenteringChildRequest(
+        session_id=args.session_id, output_dir=output_dir, profile=profile,
+        master_authorization_path=master_authorization_path,
+        candidate_id=candidate.candidate_uid, view_id=view_id, turn_index=turn_index,
+        advisory=payload, signed_turn_rad=advisory.requested_yaw_rad,
+        remaining_travel_rad=remaining_travel_rad,
+        minimum_clearance_m=minimum_clearance_m,
+        previous_result_path=previous_result_path,
+    ))
 
 
 from .cli import (
@@ -2340,7 +2406,8 @@ def main(argv=None) -> int:
         authorized_leg_description = (
             "coverage child legs"
             if coverage_scoped_mode
-            else "coverage, candidate, and opposite-face child legs"
+            else ("coverage, candidate, and opposite-face child legs, plus "
+                  "bounded stopped inspection recenter turns (at most two 6-degree turns per view)")
         )
         print(
             "Preauthorization readiness passed without motion: the exact "
@@ -2888,6 +2955,7 @@ def main(argv=None) -> int:
                 max_candidate_inspection_views=(
                     args.max_candidate_inspection_views
                 ),
+                camera_timeout_sec=args.camera_timeout_sec,
                 max_route_admission_attempts_per_candidate=(
                     args.max_route_admission_attempts_per_candidate
                 ),
@@ -2971,6 +3039,12 @@ def main(argv=None) -> int:
                         args=args,
                         request=request,
                     )
+                ),
+                run_centering_turn=lambda **kwargs: _run_camera_centering_turn(
+                    profile=profile, args=args,
+                    master_authorization_path=mission_leg_motion_authorization_json,
+                    minimum_clearance_m=clearance["minimum_active_standoff_m"],
+                    **kwargs,
                 ),
             ),
         )

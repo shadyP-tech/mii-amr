@@ -106,6 +106,8 @@ def fit_current_measured_head(
     )
     debug = StandAxisEdgeDebugArtifacts(
         edges=raw_edges, raw_edges=raw_edges, face_mask=refinement.evidence_mask,
+        rectangle_mask=(_debug_rectangle_image(cv2, raw_edges.shape, corners)
+                        if refinement.accepted and outer_recovery.accepted else None),
         predicted_corners=seed.corners, refined_corners=corners,
         candidate_corners=refinement.candidate_corners,
         corner_arm_support=refinement.corner_arm_support,

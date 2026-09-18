@@ -139,6 +139,22 @@ class RectificationMapCache:
         return self._value
 
 
+def rectified_source_support(calibration, cv2_module, numpy_module, *, map_cache=None):
+    """Pixels whose bilinear remap samples exist in the original camera image.
+
+    This is camera-domain provenance, not scene segmentation. Black objects
+    remain valid; only sampling outside the source canvas is excluded. Consumers
+    must account for their blur/gradient footprint at their processing scale.
+    """
+    validate_camera_calibration(calibration)
+    def build():
+        return _rectification_maps(calibration, cv2_module, numpy_module)
+    x, y = (build() if map_cache is None else
+            map_cache.maps(calibration, cv2_module, numpy_module, build))
+    return ((x >= 0.) & (y >= 0.) & (x < calibration.width_px - 1.)
+            & (y < calibration.height_px - 1.)).astype(numpy_module.uint8)
+
+
 def _rectification_maps(calibration, cv2_module, numpy_module):
     camera_matrix = numpy_module.asarray(
         calibration.camera_matrix, dtype=float

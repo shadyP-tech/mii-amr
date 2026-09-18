@@ -7,6 +7,20 @@ from scripts.aufgabe04.perception.stand_axis.head_model_admission import (
     admit_measured_head_model,
 )
 from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+from scripts.aufgabe04.perception.stand_axis.head_outer_border import current_head_boundary_eligible
+
+
+def current_border_diagnostic(*, estimate, artifacts, local_result_fresh, source_fresh):
+    """Display current-image border proof separately from live pose admission."""
+    quality = None if artifacts is None else artifacts.head_model_quality
+    verified = bool(local_result_fresh and estimate is not None and artifacts is not None
+        and current_head_boundary_eligible(estimate, artifacts)
+        and quality is not None and quality.raw_corner_support_accepted
+        and quality.outer_border_verified)
+    return {"visible": verified, "motion_authorized": False, "pose_authorized": False,
+            "state": ("current_image_borders" if source_fresh else "delayed_image_borders")
+                     if verified else "borders_unavailable",
+            "reason": None if estimate is None else estimate.reason}
 
 
 def estimate_in_full_image(crop_estimate, roi):

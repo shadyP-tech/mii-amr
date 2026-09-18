@@ -36,12 +36,20 @@ MISSION_LEG_MOTION_AUTHORIZATION_HASH_FIELD = (
 MISSION_LEG_MOTION_PERMIT_HASH_FIELD = "mission_leg_motion_permit_sha256"
 
 MISSION_LEG_RUN_CONFIRMATION = "RUN"
-MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "Reuse this autonomous mission RUN only for separately sealed routine "
     "child legs whose exact run, leg, target, route, certificates, and passed "
     "dry run are bound by a mission-leg motion permit; startup reseals, "
     "recovery motion, target changes, artifact changes, and motion without an "
     "exact permit are not authorized."
+)
+MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    + " Separately sealed same-candidate inspection centering turns are also "
+    "authorized: zero translation, at most two turns of six degrees each, "
+    "at most twelve degrees of measured angular travel per inspection view, "
+    "with current camera/LiDAR evidence, exclusive velocity ownership, fresh "
+    "odometry, live clearance checks, and stopped-pose proof."
 )
 
 
@@ -668,7 +676,10 @@ def _validate_authorization(
         raise ValueError("allowed_leg_kinds must contain at least one routine leg")
     for kind in authorization.allowed_leg_kinds:
         _require_routine_leg_kind(kind, "allowed_leg_kinds")
-    if authorization.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+    if authorization.scope_text not in (
+        MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    ):
         raise ValueError("mission leg motion authorization scope_text mismatch")
     if authorization.operator_confirmation != MISSION_LEG_RUN_CONFIRMATION:
         raise ValueError(

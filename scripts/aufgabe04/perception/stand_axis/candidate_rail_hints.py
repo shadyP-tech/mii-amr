@@ -19,7 +19,8 @@ MAX_GUIDED_HINTS = 256
 
 def candidate_observed_rail_hints(cv2, raw_edges, groups, candidate_search, *,
                                   deadline_monotonic_sec=None, diagnostics=None,
-                                  prioritized_groups_out=None, rail_limit=24):
+                                  prioritized_groups_out=None, rail_limit=24,
+                                  source_support=None):
     """Screen complete pairs before charging the bounded candidate hint pool.
 
     Work is bounded by two 512-line pools and processed one line at a time.
@@ -96,13 +97,13 @@ def candidate_observed_rail_hints(cv2, raw_edges, groups, candidate_search, *,
             height = (side[:, 1]+side[:, 3])/2.
             width = (side[:, 0]+side[:, 2])/2.
             positions = quads.mean(axis=1)
-            keep = ((.85*height <= 1.35*expected) & (1.15*1.25*height >= .60*expected)
-                    & (width <= 1.35*height) & (side.min(axis=1) >= MIN_HEAD_EDGE_PX)
-                    & (np.linalg.norm(positions-center, axis=1) <= radius)
+            keep = ((width <= 1.35*height) & (side.min(axis=1) >= MIN_HEAD_EDGE_PX)
                     & (quads[:, :, 0].min(axis=1) >= 3.)
                     & (quads[:, :, 1].min(axis=1) >= 3.)
                     & (quads[:, :, 0].max(axis=1) < cols-3.)
                     & (quads[:, :, 1].max(axis=1) < rows-3.))
+            keep &= ((.85*height <= 1.35*expected) & (1.15*1.25*height >= .60*expected)
+                     & (np.linalg.norm(positions-center, axis=1) <= radius))
             quads, partners, height, positions = quads[keep], partners[keep], height[keep], positions[keep]
             if not len(quads):
                 continue
@@ -115,6 +116,8 @@ def candidate_observed_rail_hints(cv2, raw_edges, groups, candidate_search, *,
                 check_head_acquisition_deadline(deadline_monotonic_sec, "candidate_observed_corner_support")
                 quad = quads[number]
                 ordered = order_corners(tuple(ImagePoint(*point) for point in quad))
+                if source_support is not None and not source_support.accepts(ordered):
+                    continue
                 if not metric_corner_arm_support(cv2, raw_edges, ordered).accepted:
                     continue
                 # A complete observed pair, rather than its segment length,

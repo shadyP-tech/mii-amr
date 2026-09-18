@@ -37,8 +37,12 @@ from scripts.aufgabe04.perception.debug.stand_model_overlay import (
 )
 from scripts.aufgabe04.perception.debug.text_overlay import OverlayTextCursor
 from scripts.aufgabe04.perception.debug.viewer_frame_timing import ViewerFrameTiming
+from scripts.aufgabe04.perception.debug.viewer_color_edges import (
+    VIEWER_STAND_PALETTE, color_edge_support, color_edge_exclusion,
+)
 from scripts.aufgabe04.perception.debug.viewer_model_overlay_policy import (
     current_crop_head_estimate, current_model_overlay_state, estimate_in_full_image,
+    current_border_diagnostic,
 )
 from scripts.aufgabe04.perception.debug.viewer_axis_admission import (
     current_axis_evidence_ready, viewer_axis_admission,
@@ -58,7 +62,12 @@ from scripts.aufgabe04.perception.camera_stand_observation import (
     stand_axis_from_camera_yaw,
     write_camera_observation,
 )
-from scripts.aufgabe04.perception.camera_calibration import RectificationMapCache, rectify_bgr_frame
+from scripts.aufgabe04.perception.camera_calibration import (
+    RectificationMapCache, rectify_bgr_frame, rectified_source_support,
+)
+from scripts.aufgabe04.perception.stand_axis.image_source_support import ImageSourceSupport
+from scripts.aufgabe04.perception.stand_axis.nearest_scan_head import nearest_scan_head_search
+from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
 from scripts.aufgabe04.perception.debug.calibrated_handoff_runtime import (
     CalibrationRuntimeSnapshot,
     RosCameraCalibrationTfSource,
@@ -305,7 +314,7 @@ def _temporal_rectangle_artifacts(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    labels = palette_labels()
+    labels = palette_labels(VIEWER_STAND_PALETTE)
     parser = argparse.ArgumentParser(
         description=(
             "Debug-only live stand-axis viewer for a square stand face. "
@@ -354,10 +363,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--color", choices=labels, default="green")
     parser.add_argument(
+        "--edge-color", choices=("all", *labels), default="all",
+        help="Keep edges near this stand color (default: all stand palette colors). --tune overrides this with the live HSV range.",
+    )
+    parser.add_argument(
+        "--no-color-edge-mask", dest="color_edge_mask", action="store_false",
+        default=True, help="Disable HSV filtering of stand edges for comparison.",
+    )
+    parser.add_argument(
         "--axis-source",
         choices=("edges", "color-mask"),
         default="edges",
-        help="edges is color/QR agnostic and uses the filled outer silhouette; color-mask keeps the HSV contour mode.",
+        help="edges fits current Canny borders with HSV support; color-mask keeps the HSV contour mode.",
     )
     parser.add_argument(
         "--structural-diagnostic",
@@ -368,7 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
             "and operational observation outputs are disabled."
         ),
     )
-    parser.add_argument("--tune", action="store_true", help="Show HSV trackbars for color-mask axis debugging.")
+    parser.add_argument("--tune", action="store_true", help="Tune HSV support for edge filtering or color-mask contours (initialized from --color).")
     parser.add_argument("--print-palette", action="store_true")
     parser.add_argument("--print-every", type=int, default=15)
     parser.add_argument("--save-snapshot", type=Path)
@@ -800,6 +817,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Use 0 to disable."
         ),
     )
+    parser.add_argument("--head-target", choices=("nearest", "unique"), default="nearest",
+        help="Select the nearest stand-sized current scan target (requires calibrated handoff), or compare all image heads.")
+    parser.add_argument("--strict-live-diagnostics", action="store_true",
+        help="Stop diagnostic fitting at the source-age deadline too. By default delayed fits remain display-only within the local receipt budget.")
     parser.add_argument(
         "--observation-output-json",
         type=Path,
@@ -837,7 +858,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--display-mask",
         action="store_true",
-        help="Also show the HSV color mask window. Mainly useful with --axis-source color-mask.",
+        help="Show the HSV edge support mask, or the selected-color contour mask when edge filtering is disabled.",
     )
     parser.add_argument(
         "--display-edges",
@@ -2622,9 +2643,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ImportError as exc:
         raise SystemExit("OpenCV and numpy are required for the stand-axis viewer.") from exc
 
-    selected_ranges = list(ranges_for_label(args.color))
+    selected_ranges = list(ranges_for_label(args.color, VIEWER_STAND_PALETTE))
+    selected_edge_ranges = [item for item in VIEWER_STAND_PALETTE
+                            if args.edge_color == "all" or item.label == args.edge_color]
     if args.print_palette:
-        print_palette(selected_ranges)
+        print_palette(selected_edge_ranges if args.axis_source == "edges"
+                      and args.color_edge_mask and not args.tune else selected_ranges)
 
     if args.sim_raw_image_topic:
         frame_source = RosSimulationRawImageTopicFrameSource(
@@ -2657,6 +2681,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             camera_frame=args.camera_optical_frame,
             max_camera_info_age_sec=args.max_camera_info_age_sec,
             tf_timeout_sec=args.handoff_tf_timeout_sec,
+            base_frame=args.base_frame,
         )
         calibration_source.start()
     lidar_source = None
@@ -2778,6 +2803,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else AdaptiveForegroundGateTracker(model_ttl_sec=0.75)
     )
     last_accepted_head_display_snapshot = None
+    last_nearest_search = None
 
     try:
         while True:
@@ -2835,6 +2861,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             decode_duration_sec = time.monotonic() - decode_started_monotonic
             rectification_duration_sec = 0.
             decoded_source_frame = frame.copy()
+            source_valid_pixels = None
             camera_fx_px = configured_camera_fx_px
             camera_fy_px = configured_camera_fy_px
             camera_cx_px = configured_camera_cx_px
@@ -2891,6 +2918,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             camera_fy_px = calibration.fy_px
                             camera_cx_px = calibration.cx_px
                             camera_cy_px = calibration.cy_px
+                            source_valid_pixels = rectified_source_support(
+                                calibration, cv2, numpy, map_cache=rectification_map_cache)
                         rectification_duration_sec = time.monotonic() - rectification_started_monotonic
                 if not calibration_snapshot.ready:
                     camera_fx_px = None
@@ -2907,6 +2936,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             if args.resize != 1.0:
                 frame = cv2.resize(frame, None, fx=args.resize, fy=args.resize)
+                if source_valid_pixels is not None:
+                    source_valid_pixels = cv2.resize(source_valid_pixels,
+                        (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
                 if calibration_snapshot.ready:
                     camera_fx_px *= args.resize
                     camera_fy_px *= args.resize
@@ -3181,10 +3213,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     wall_edge_mask = wall_edge_mask_result.mask
             active_ranges = selected_ranges
+            active_edge_ranges = ([current_track_range(cv2, args.color)]
+                                  if args.tune else selected_edge_ranges)
+            edge_color_support = None
+            if args.axis_source == "edges" and args.color_edge_mask:
+                edge_color_support = color_edge_support(
+                    cv2, numpy, frame, color=args.edge_color,
+                    ranges=active_edge_ranges,
+                )
             if args.axis_source == "color-mask" or args.display_mask or args.tune:
-                # This optional HSV view is diagnostic (or the explicitly
-                # selected legacy color-mask mode). Edge/silhouette mode does
-                # not consume it for localization, fitting, or yaw.
+                # Selected-color classification remains separate from the
+                # potentially multi-color edge support shown by the viewer.
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 active_ranges = [current_track_range(cv2, args.color)] if args.tune else selected_ranges
                 mask = build_mask_for_ranges(cv2, numpy, hsv, active_ranges)
@@ -3235,6 +3274,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 edge_artifacts = StandAxisEdgeDebugArtifacts(edges=edges)
             elif args.axis_source == "edges":
                 edge_exclusion_mask = wall_edge_mask
+                if edge_color_support is not None:
+                    edge_exclusion_mask = color_edge_exclusion(
+                        cv2, edge_color_support, roi=target_roi,
+                        existing=edge_exclusion_mask,
+                    )
                 topology_edge_exclusion_mask = None
                 if (
                     not args.sim_raw_image_topic
@@ -3344,27 +3388,68 @@ def main(argv: Sequence[str] | None = None) -> int:
                         profile_sha256=stand_model_profile.sha256,
                         camera_signature=camera_signature,
                     )
-                    metric_estimate, metric_artifacts = (
-                        estimate_current_head_geometry(
-                            cv2,
-                            axis_frame,
+                    nearest_search, nearest_metadata = None, {"policy": "unique_image_head"}
+                    if args.head_target == "nearest":
+                        scan_for_head = (None if lidar_source is None else lidar_source.nearest_scan(
+                            image_stamp_sec=read.stamp_sec, tolerance_sec=.15))
+                        nearest_search, nearest_metadata = nearest_scan_head_search(
+                            scan=scan_for_head, image_stamp_sec=read.stamp_sec,
+                            now_sec=time.time(), max_scan_age_sec=args.max_scan_age_sec,
+                            scan_from_camera=calibration_snapshot.scan_from_camera,
+                            base_from_camera=calibration_snapshot.base_from_camera,
                             model_profile=stand_model_profile,
-                            camera_fx_px=camera_fx_px,
-                            camera_fy_px=camera_fy_px,
-                            camera_cx_px=axis_camera_cx_px,
-                            camera_cy_px=axis_camera_cy_px,
-                            pose_hint=prediction.pose,
-                            edge_preprocess=args.edge_preprocess.replace("-", "_"),
-                            blur_kernel=args.edge_blur_kernel,
-                            canny_low=args.canny_low,
-                            canny_high=args.canny_high,
-                            min_edge_height_px=args.min_edge_height_px,
-                            qr_marker_policy=("disabled" if args.no_qr_decode else "auto"),
-                            deadline_monotonic_sec=frame_timing.work_deadline(
-                                max_result_age_sec=args.max_result_age_sec,
-                                max_frame_age_sec=args.max_frame_age_sec),
+                            fx=camera_fx_px, fy=camera_fy_px,
+                            cx=query_camera_cx_px, cy=query_camera_cy_px, image_shape=frame.shape)
+                        if nearest_search is not None and target_roi is not None:
+                            nearest_search = CandidateHeadSearch(
+                                (nearest_search.center[0]-target_roi.x0,
+                                 nearest_search.center[1]-target_roi.y0), nearest_search.height,
+                                nearest_search.max_center_offset_ratio)
+                        if (nearest_search is None or last_nearest_search is None
+                                or math.dist(nearest_search.center, last_nearest_search.center)
+                                   > .5*nearest_search.height
+                                or abs(nearest_search.height/last_nearest_search.height-1.) > .2):
+                            model_pose_tracker.reset()
+                            prediction = model_pose_tracker.prediction(now_sec=time.monotonic(),
+                                profile_sha256=stand_model_profile.sha256, camera_signature=camera_signature)
+                        last_nearest_search = nearest_search
+                    support_pixels = source_valid_pixels
+                    if support_pixels is not None and target_roi is not None:
+                        support_pixels = support_pixels[target_roi.y0:target_roi.y1, target_roi.x0:target_roi.x1]
+                    image_source_support = (None if support_pixels is None else
+                        ImageSourceSupport(cv2, support_pixels, blur_kernel=args.edge_blur_kernel))
+                    if args.head_target == "nearest" and nearest_search is None:
+                        metric_estimate = _unavailable_target_estimate(nearest_metadata["reason"])
+                        metric_artifacts = StandAxisEdgeDebugArtifacts(edges=None,
+                            model_reason=metric_estimate.reason, evidence_state="unobservable")
+                    else:
+                        metric_estimate, metric_artifacts = (
+                            estimate_current_head_geometry(
+                                cv2,
+                                axis_frame,
+                                model_profile=stand_model_profile,
+                                camera_fx_px=camera_fx_px,
+                                camera_fy_px=camera_fy_px,
+                                camera_cx_px=axis_camera_cx_px,
+                                camera_cy_px=axis_camera_cy_px,
+                                pose_hint=prediction.pose,
+                                candidate_search=nearest_search,
+                                source_support=image_source_support,
+                                edge_exclusion_mask=edge_exclusion_mask,
+                                edge_preprocess=args.edge_preprocess.replace("-", "_"),
+                                blur_kernel=args.edge_blur_kernel,
+                                canny_low=args.canny_low,
+                                canny_high=args.canny_high,
+                                min_edge_height_px=args.min_edge_height_px,
+                                qr_marker_policy=("disabled" if args.no_qr_decode else "auto"),
+                                deadline_monotonic_sec=frame_timing.work_deadline(
+                                    max_result_age_sec=args.max_result_age_sec,
+                                    max_frame_age_sec=(args.max_frame_age_sec if args.strict_live_diagnostics else 0.)),
+                            )
                         )
-                    )
+                    metric_artifacts = replace(metric_artifacts, head_acquisition_diagnostics={
+                        **(metric_artifacts.head_acquisition_diagnostics or {}),
+                        "target_selection": nearest_metadata})
 
                 fallback_estimate = None
                 fallback_artifacts = None
@@ -3651,7 +3736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         open_iterations=args.open_iterations,
                     )
             display_frame = frame
-            display_mask = mask
+            display_mask = mask if edge_color_support is None else edge_color_support
             display_edges = edges
             display_face_mask = face_mask
             display_rectangle_mask = rectangle_mask
@@ -3662,7 +3747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if temporal_selection is not None:
                 current_head_display_snapshot = HeadDisplaySnapshot(
                     frame=frame,
-                    mask=mask,
+                    mask=display_mask,
                     edges=edges,
                     face_mask=face_mask,
                     rectangle_mask=rectangle_mask,
@@ -3677,7 +3762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     last_accepted_head_display_snapshot = (
                         _capture_head_display_snapshot(
                             frame=frame,
-                            mask=mask,
+                            mask=display_mask,
                             edges=edges,
                             face_mask=face_mask,
                             rectangle_mask=rectangle_mask,
@@ -4206,6 +4291,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 estimate=admission_estimate, artifacts=edge_artifacts,
                 result_fresh=render_result_fresh,
             )
+            border_diagnostic = current_border_diagnostic(
+                estimate=metric_estimate, artifacts=metric_artifacts,
+                local_result_fresh=frame_timing.assess(now_sec=rendered_monotonic_sec,
+                    max_result_age_sec=args.max_result_age_sec, max_frame_age_sec=0.).accepted,
+                source_fresh=render_result_fresh)
             rendered_estimate = (
                 estimate if render_result_fresh
                 else _unavailable_target_estimate("obsolete_detector_result")
@@ -4238,6 +4328,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result_fresh=render_result_fresh,
                 overlay_state=model_overlay,
             )
+            if border_diagnostic["visible"] and not model_overlay.current_fit_accepted:
+                points = [(round(p.u_px+(0 if target_roi is None else target_roi.x0)),
+                           round(p.v_px+(0 if target_roi is None else target_roi.y0)))
+                          for p in metric_estimate.corners]
+                cv2.polylines(annotated, [numpy.asarray(points, numpy.int32)], True, (0, 190, 255), 2)
+                text_cursor.draw(cv2, annotated,
+                    border_diagnostic["state"]+"; display only; pose="+metric_estimate.reason,
+                    font_face=cv2.FONT_HERSHEY_SIMPLEX, font_scale=.45, color=(0, 190, 255), thickness=1)
             if (
                 edge_artifacts.predicted_corners is not None
                 and estimate.evidence_state != "predicted_only"
@@ -4493,6 +4591,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 recording_options = {
                     "source_frame": decoded_source_frame,
                     "metadata": recording_metadata({
+                        "border_diagnostic": border_diagnostic,
                         "source_sequence": read.sequence,
                         "source_stamp_sec": read.stamp_sec,
                         "source_frame_id": read.frame_id,
@@ -4549,7 +4648,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key in (27, ord("q")):
                 break
             if key == ord("p"):
-                print_palette(active_ranges)
+                print_palette(active_edge_ranges if edge_color_support is not None else active_ranges)
             if key == ord("r"):
                 if recorder.active:
                     recorder.stop()

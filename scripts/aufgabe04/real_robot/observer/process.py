@@ -21,7 +21,7 @@ from typing import Callable, Literal, Protocol
 
 ObserverArtifactKind = Literal[
     "recommendation", "qr_verified_observation_pose", "axis_observation",
-    "inspection_observation",
+    "inspection_observation", "candidate_centering",
 ]
 ObserverCompletionKind = Literal["artifact", "deadline", "child_exit"]
 ObserverCleanupAction = Literal[
@@ -137,6 +137,7 @@ def _detect_artifact(
     axis_observation_path: Path,
     inspection_observation_path: Path | None = None,
     qr_observation_pose_path: Path | None = None,
+    candidate_centering_path: Path | None = None,
 ) -> _DetectedArtifact | None:
     # A facing recommendation is richer than a discovery-only viewing pose.
     # A positive QR receipt takes precedence over axis/advisory artifacts and
@@ -149,6 +150,8 @@ def _detect_artifact(
         return _DetectedArtifact("axis_observation", axis_observation_path)
     if inspection_observation_path is not None and inspection_observation_path.exists():
         return _DetectedArtifact("inspection_observation", inspection_observation_path)
+    if candidate_centering_path is not None and candidate_centering_path.exists():
+        return _DetectedArtifact("candidate_centering", candidate_centering_path)
     return None
 
 
@@ -284,6 +287,7 @@ def monitor_passive_observer_process(
     timeout_sec: float,
     inspection_observation_path: Path | None = None,
     qr_observation_pose_path: Path | None = None,
+    candidate_centering_path: Path | None = None,
     poll_interval_sec: float = 0.1,
     graceful_wait_timeout_sec: float = 3.0,
     sigint_wait_timeout_sec: float = 5.0,
@@ -344,6 +348,7 @@ def monitor_passive_observer_process(
             axis_observation_path=axis_observation,
             inspection_observation_path=inspection_observation_path,
             qr_observation_pose_path=qr_observation_pose_path,
+            candidate_centering_path=candidate_centering_path,
         )
         if artifact is not None:
             completion_kind = "artifact"
@@ -358,6 +363,7 @@ def monitor_passive_observer_process(
                 axis_observation_path=axis_observation,
                 inspection_observation_path=inspection_observation_path,
                 qr_observation_pose_path=qr_observation_pose_path,
+                candidate_centering_path=candidate_centering_path,
             )
             completion_kind = "artifact" if artifact is not None else "child_exit"
             break
@@ -371,6 +377,7 @@ def monitor_passive_observer_process(
                 axis_observation_path=axis_observation,
                 inspection_observation_path=inspection_observation_path,
                 qr_observation_pose_path=qr_observation_pose_path,
+                candidate_centering_path=candidate_centering_path,
             )
             completion_kind = "artifact" if artifact is not None else "deadline"
             break

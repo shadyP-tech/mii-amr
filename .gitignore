@@ -52,6 +52,10 @@ tests/aufgabe04/fixtures/startup_route_admission_20260911/*
 !tests/aufgabe04/fixtures/startup_route_admission_20260911/inputs.json
 !tests/aufgabe04/fixtures/exact_two_six_candidate_run_20260907.json
 !tests/aufgabe04/fixtures/lidar_morphology_conflict_20260907.json
+!tests/aufgabe04/fixtures/lidar_head_region/
+tests/aufgabe04/fixtures/lidar_head_region/*
+!tests/aufgabe04/fixtures/lidar_head_region/frame_000025.jpg
+!tests/aufgabe04/fixtures/lidar_head_region/frame_000025.json
 !tests/aufgabe04/fixtures/candidate_runtime_prestart_stop_20260908.json
 !tests/aufgabe04/fixtures/recorded_backside_20260910/
 tests/aufgabe04/fixtures/recorded_backside_20260910/*

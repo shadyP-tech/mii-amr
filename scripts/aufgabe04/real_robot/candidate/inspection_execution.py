@@ -34,6 +34,7 @@ class CandidateInspectionEffects(Generic[Frame, Observation]):
     route_search_evidence: Callable[[], Mapping[str, object]] | None = None
     distance_recovery: Callable[[Frame, Mapping[str, object]], object | None] | None = None
     move_distance_recovery: Callable[[Frame, object, Path, int, Path | None], Frame] | None = None
+    capture_centered: Callable[[Frame, Path, int], tuple[Observation, Frame]] | None = None
 
 
 def execute_candidate_inspection(
@@ -74,9 +75,11 @@ def execute_candidate_inspection(
         progress: dict[str, object] = {}
         normal = effects.canonical_normal(frame)
         try:
-            observation = effects.capture(
-                frame, candidate_root / f"camera_lidar_attempt_{index:02d}", index,
-            )
+            output = candidate_root / f"camera_lidar_attempt_{index:02d}"
+            if effects.capture_centered is None:
+                observation = effects.capture(frame, output, index)
+            else:
+                observation, frame = effects.capture_centered(frame, output, index)
             if observation.recommendation_path is not None:
                 state.record(outcome="resolved", normal=normal,
                              observation={"qr_id": observation.qr_id,

@@ -35,11 +35,16 @@ from scripts.aufgabe04.perception.camera_stand_observation import (
 )
 from scripts.aufgabe04.perception.camera_calibration import (
     RectificationMapCache,
+    camera_calibration_from_info, rectified_source_support,
     rectify_bgr_frame as _rectify_bgr_frame,
 )
 from scripts.aufgabe04.perception.ros_image_adapter import (
     compressed_msg_stamp_sec,
     compressed_msg_to_bgr_frame,
+)
+from scripts.aufgabe04.perception.stand_axis.image_source_support import ImageSourceSupport
+from scripts.aufgabe04.perception.stand_axis.lidar_head_edge_region import (
+    project_lidar_candidate_head_region,
 )
 from scripts.aufgabe04.perception.candidate_lidar_association import (
     MAX_CAMERA_MAP_BEARING_DELTA_DEG,
@@ -159,6 +164,9 @@ from scripts.aufgabe04.real_robot.observer.immediate_front_observation import (
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import (
     prepare_qr_observation_pose, record_qr_observation_pose, commit_qr_observation_pose,
     qr_observation_grace_pending,
+)
+from scripts.aufgabe04.real_robot.observer.candidate_centering_receipt import (
+    prepare_candidate_centering, record_candidate_centering, commit_candidate_centering,
 )
 from scripts.aufgabe04.artifacts.backside_axis_observation import MINIMUM_BACKSIDE_AXIS_CONFIDENCE
 from scripts.aufgabe04.real_robot.observer.camera_publication import (
@@ -781,6 +789,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._pending_qr_observation_pose = None
         self._qr_observation_pose_fallback = None
         self._qr_observation_pose_ready = None
+        self._pending_candidate_centering = None
+        self._candidate_centering_ready = None
         self._scan_target_persistence = None
         self._reset_scan_witnesses()
         self._reset_candidate_search("observation_evidence_reset")
@@ -830,6 +840,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._pending_qr_observation_pose = None
         self._qr_observation_pose_fallback = None
         self._qr_observation_pose_ready = None
+        self._pending_candidate_centering = None
+        self._candidate_centering_ready = None
 
     def _note_front_observation(self, decision, robot_pose: Pose2D) -> None:
         """Veto QR-free axes without resetting target identity evidence."""
@@ -947,6 +959,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                                observed_at_sec=observed_at_sec)
         record_bounded_head(self, update=update, image_stamp_sec=image_stamp_sec,
                             observed_at_sec=observed_at_sec)
+        record_candidate_centering(self, update=update, image_stamp_sec=image_stamp_sec,
+                                   observed_at_sec=observed_at_sec)
         self._last_observation_update = update
         self._head_qr_tracking_stamp_sec = (
             image_stamp_sec
@@ -1162,12 +1176,22 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._immediate_front_ready = None
         self._pending_qr_observation_pose = None
         self._qr_observation_pose_ready = None
+        self._pending_candidate_centering = None
+        self._candidate_centering_ready = None
         sensor_tuple = self._next_sensor_tuple()
         if sensor_tuple is None:
             return
         image = sensor_tuple.image
         scan = sensor_tuple.scan
         camera_info = sensor_tuple.camera_info
+        not_before = getattr(self.args, "observation_not_before_sec", None)
+        if not_before is not None and (
+                image.stamp_sec <= not_before or scan.stamp_sec <= not_before):
+            self._discard_sensor_tuple(sensor_tuple, reason="sensor tuple predates stopped inspection epoch")
+            self._write_status("awaiting_post_turn_sensor_tuple",
+                observation_not_before_sec=not_before,
+                image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec)
+            return
         now_sec = self.node.get_clock().now().nanoseconds / 1_000_000_000.0
         image_age = now_sec - image.stamp_sec
         if (
@@ -1684,6 +1708,41 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         search_metadata = dict(candidate_search.last_metadata)
         tracking_evaluation = None
         if viewer_geometry:
+            region_association = preliminary_lidar_association
+            region_association_scope = "original_map_cone"
+            if region_association.eligible_cluster_count == 0:
+                # The existing camera-registration path permits a bounded map
+                # bearing offset. Search that same envelope before pixels are
+                # available, requiring uniqueness and the unchanged range gate.
+                region_association = associate_candidate_lidar_target(
+                    plain_scan, map_bearing_rad=scan_bearing,
+                    cone_half_angle_rad=math.radians(
+                        self.args.lidar_cone_half_angle_deg
+                        + self.args.backside_registration_max_bearing_delta_deg),
+                    accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                    now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                    max_scan_age_sec=self.args.max_sensor_age_sec,
+                    min_cluster_sample_count=self.args.lidar_min_samples)
+                region_association_scope = "existing_registration_bearing_envelope"
+            lidar_edge_region, lidar_edge_region_diagnostics = project_lidar_candidate_head_region(
+                candidate_xy=(self.args.stand_x, self.args.stand_y),
+                camera_from_map=RigidTransform(
+                    parent_frame=self.profile.camera_optical_frame,
+                    child_frame=self.profile.map_frame,
+                    translation_xyz_m=camera_translation, rotation_xyzw=camera_rotation),
+                model_profile=self.stand_model_profile,
+                intrinsics=camera_signature, image_shape=frame.shape,
+                position_uncertainty_m=self.args.stand_uncertainty_m,
+                surface_center_margin_m=self.args.stand_radius_m,
+                association=region_association,
+                image_stamp_sec=image.stamp_sec,
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_sensor_age_sec=self.args.max_sensor_age_sec,
+                sync_tolerance_sec=self.args.sync_tolerance_sec)
+            lidar_edge_region_diagnostics.update(
+                association_scope=region_association_scope,
+                eligible_cluster_count=region_association.eligible_cluster_count,
+                association_rejection_reason=region_association.rejection_reason)
             current_scan_proposal_filter = CurrentScanHeadProposalFilter(
                 intrinsics=intrinsics, scan_from_camera=scan_from_camera_geometry,
                 scan=plain_scan, map_bearing_rad=scan_bearing,
@@ -1714,6 +1773,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 canny_low=resolved_stand_axis_profile.canny_low,
                 canny_high=resolved_stand_axis_profile.canny_high,
                 proposal_filter=current_scan_proposal_filter,
+                lidar_edge_region=lidar_edge_region,
+                lidar_edge_region_diagnostics=lidar_edge_region_diagnostics,
+                source_support=ImageSourceSupport(self.cv2, rectified_source_support(
+                    camera_calibration_from_info(camera_info.value), self.cv2, self.numpy,
+                    map_cache=self._rectification_map_cache)),
                 estimator=estimate_stand_axis_from_metric_model)
             current_view = classify_viewer_head(
                 tracking_evaluation, model_profile=self.stand_model_profile,
@@ -1727,6 +1791,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "candidate_screen_before_cold_selection": bool(
                     (tracking_evaluation.qr_decode_metadata or {}).get("candidate_screen")),
                 "current_scan_preview_before_cold_selection": current_scan_proposal_filter.metadata(),
+                "lidar_edge_region": lidar_edge_region_diagnostics,
                 "current_scan_association_after_geometry": True,
                 "measurement_reused": False, "motion_authorized": False,
             }
@@ -2125,6 +2190,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_axis_debug=axis_metadata,
             )
             return
+        # Centering alone requires an exact odometry anchor. A missing optional
+        # transform cannot suppress an otherwise admissible current QR result.
+        centering_odom_pose = None
+        if (getattr(self.args, "candidate_centering_json", None) is not None
+                and getattr(self.profile, "odom_frame", None) is not None):
+            try:
+                centering_odom_pose = pose2d_from_transform(self._lookup(
+                    self.profile.odom_frame, self.profile.base_frame,
+                    image_message.header.stamp))
+            except (self.TransformException, TypeError, ValueError):
+                pass
         # Legacy crop tracking remains candidate-bound. The shared full-image
         # tracker above retains only geometry search information, before binding.
         if not viewer_geometry:
@@ -2139,6 +2215,16 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         model_metadata["candidate_head_tracking"] = (
             {**search_metadata, "tracker_update": asdict(tracker_update)} if viewer_geometry
             else dict(candidate_search.last_metadata))
+        if getattr(self.args, "candidate_centering_json", None) is not None:
+            self._pending_candidate_centering = prepare_candidate_centering(
+                crop=current_crop, association=current_head_association,
+                image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
+                target_key=self._target_evidence_key(), robot_pose=robot_pose,
+                odom_pose=centering_odom_pose, intrinsics=intrinsics,
+                scan_from_camera=scan_from_camera_geometry,
+                base_from_camera=RigidTransform(
+                    self.profile.base_frame, self.profile.camera_optical_frame,
+                    *_transform_values(base_from_camera)), metadata=model_metadata)
         framing = unresolved_front_framing_hint(
             registration, target_key=self.args.stand_id,
             source_image_stamp_sec=image.stamp_sec,
@@ -2904,7 +2990,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
     def _write_status(self, state: str, **details) -> None:
         committed = (commit_immediate_front(self) or commit_bounded_head(self)
-                     or commit_qr_observation_pose(self))
+                     or commit_qr_observation_pose(self) or commit_candidate_centering(self))
         if committed is not None:
             state, committed_details = committed
             details = {**details, **committed_details}
@@ -3172,6 +3258,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recommended-pose-json", required=True, type=Path)
     parser.add_argument("--axis-observation-json", type=Path, default=None)
     parser.add_argument("--inspection-observation-json", type=Path, default=None)
+    parser.add_argument("--candidate-centering-json", type=Path, default=None,
+        help="Optional motion-neutral current-head centering advisory before angle consensus.")
+    parser.add_argument("--observation-not-before-sec", type=float, default=None,
+        help="Require image and scan stamps newer than the preceding turn's stopped proof.")
     parser.add_argument("--qr-observation-pose-json", type=Path, default=None,
         help="Discovery-only QR-confirmed robot observation pose when head angle remains unavailable.")
     parser.add_argument("--qr-pose-fallback-delay-sec", type=float, default=0.0,
@@ -3187,6 +3277,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(parser: argparse.ArgumentParser, args) -> None:
+    if args.observation_not_before_sec is not None and (
+            not math.isfinite(args.observation_not_before_sec)
+            or args.observation_not_before_sec < 0):
+        parser.error("--observation-not-before-sec must be finite and nonnegative")
     if (not math.isfinite(args.qr_pose_fallback_delay_sec)
             or not 0 <= args.qr_pose_fallback_delay_sec <= 10.):
         parser.error("--qr-pose-fallback-delay-sec must be between zero and ten seconds")
@@ -3318,6 +3412,8 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         output_paths.append(args.inspection_observation_json.resolve())
     if args.qr_observation_pose_json is not None:
         output_paths.append(args.qr_observation_pose_json.resolve())
+    if args.candidate_centering_json is not None:
+        output_paths.append(args.candidate_centering_json.resolve())
     if len(set(output_paths)) != len(output_paths):
         parser.error(
             "status, status events, recommendation, and axis outputs must "

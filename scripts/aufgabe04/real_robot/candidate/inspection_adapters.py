@@ -24,6 +24,10 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePreapproachUnreachableError,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
+    CandidateArrivalAdmissionConfig, evaluate_candidate_arrival_admission,
+)
+from scripts.aufgabe04.real_robot.candidate.centering_execution import capture_with_centering
 from scripts.aufgabe04.navigation.planning.map_io import read_map_metadata
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionEffects, CandidateInspectionRouteUnavailableError,
@@ -317,6 +321,56 @@ def execute_local_candidate_inspection(
             raise ValueError("inspection observation target center binding mismatch")
         return {**evidence, "inspection_observation_path": str(observation.inspection_observation_path)}
 
+    def centered_capture(frame, output, index):
+        def capture(current, destination, view, enabled, timeout, not_before):
+            return effects.capture_observation(observation_request_type(
+                current.candidate, destination, view, allow_centering=enabled,
+                timeout_sec=timeout, observation_not_before_sec=not_before,
+            ))
+
+        def turn(current, advisory_path, root, serial, remaining, previous_result):
+            outcome = effects.run_centering_turn(
+                candidate=current.candidate, advisory_path=advisory_path,
+                output_dir=root, view_id=f"{candidate_uid}:inspection:{index}",
+                turn_index=serial, remaining_travel_rad=remaining,
+                previous_result_path=previous_result,
+            )
+            # The sealed yaw-only child proves its signed turn and stopped
+            # odometry. Reproject localization/candidate geometry afresh; old
+            # map-facing yaw is not an admission criterion for this new view.
+            updated = fresh_frame(root / "arrival")
+            decision = evaluate_candidate_arrival_admission(
+                pose(updated), target_x_m=updated.candidate.geometry.x_m,
+                target_y_m=updated.candidate.geometry.y_m,
+                config=CandidateArrivalAdmissionConfig(
+                    min_range_m=source_config.physical_clearance["minimum_active_standoff_m"],
+                    max_range_m=source_config.approach_offset_m + source_config.camera_arrival_range_slack_m,
+                    max_bearing_error_rad=math.pi,
+                ),
+            )
+            evidence = {**decision.to_evidence_dict(), "candidate_uid": candidate_uid,
+                        "admission_kind": "candidate_centering_reacquisition",
+                        "turn_result_path": str(outcome.result_path),
+                        "bearing_check_source": "sealed_inspection_turn",
+                        "camera_centered": False, "requires_fresh_observation": True,
+                        "motion_authorized": False}
+            path = root / "post_turn_arrival.json"
+            write_content_hashed_json(path, evidence,
+                                      hash_field="candidate_centering_arrival_sha256")
+            if not decision.accepted:
+                raise CandidateObservationUnavailableError(
+                    candidate_uid=candidate_uid, observation_attempt_index=index,
+                    reason="candidate_centering_post_turn_range_rejected",
+                    process_evidence={"arrival_path": str(path)}, status_evidence=evidence,
+                )
+            return updated, outcome
+
+        return capture_with_centering(
+            candidate_uid=candidate_uid, frame=frame, output_dir=output,
+            view_index=index, timeout_sec=source_config.camera_timeout_sec,
+            capture=capture, turn=turn,
+        )
+
     try:
         initial = admit_corrected(candidate_root, observation_frame, 0)
     except CandidateInspectionRouteUnavailableError as exc:
@@ -335,5 +389,6 @@ def execute_local_candidate_inspection(
             canonical_normal=normal, move_view=move_view, move_opposite=move_opposite,
             progress_evidence=progress, route_search_evidence=route_search.to_dict,
             distance_recovery=distance_recovery, move_distance_recovery=move_distance_recovery,
+            capture_centered=centered_capture if effects.run_centering_turn is not None else None,
         ),
     )

@@ -95,6 +95,7 @@ def estimate_stand_axis_from_metric_model(
     proposal_filter=None,
     deadline_monotonic_sec: float | None = None,
     qr_marker_policy: str = "auto",
+    edge_exclusion_mask=None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Fit physical head angles from current pixels independently of QR.
 
@@ -108,12 +109,20 @@ def estimate_stand_axis_from_metric_model(
     it never retains a classified result or supplies an angle to another image.
     Proposal callbacks bypass that holder so current scan/clock state is checked
     again; exact-image edge preprocessing may still be reused.
+    Optional edge exclusion is applied after cached preprocessing on every
+    call; masked fits bypass geometry reuse and cannot reuse supplied refinement.
     ``disabled``/``supplied_only`` avoid native marker work. Unchecked marker
     absence remains unknown and cannot label a backside. Positive supplied
     decoder observations never require a second native acquisition.
     """
 
     timing = ModelStageTiming()
+    if edge_exclusion_mask is not None:
+        if (edge_exclusion_mask.shape != frame.shape[:2]
+                or edge_exclusion_mask.dtype.name != "uint8"):
+            raise ValueError("edge_exclusion_mask must be uint8 and match the processed frame size")
+        if current_head_refinement is not None:
+            raise ValueError("edge exclusion cannot reuse a prior current_head_refinement")
     if qr_marker_policy not in {"auto", "disabled", "supplied_only"}:
         raise ValueError("QR marker policy must be auto, disabled, or supplied_only")
     if type(current_head_proposal_verified) is not bool:
@@ -125,6 +134,17 @@ def estimate_stand_axis_from_metric_model(
         float(camera_cy_px),
     )
     camera.validate()
+    if deadline_monotonic_sec is not None and time.monotonic() >= deadline_monotonic_sec:
+        reason = "head_acquisition_deadline_exceeded"
+        estimate = replace(_unusable(reason, source="model_current_measured_head"),
+            evidence_state="unobservable", model_profile_sha256=model_profile.sha256,
+            model_measurement_status=model_profile.measurement_status)
+        return estimate, StandAxisEdgeDebugArtifacts(edges=None,
+            model_reason=reason, evidence_state="unobservable",
+            model_profile_sha256=model_profile.sha256,
+            model_measurement_status=model_profile.measurement_status,
+            head_acquisition_diagnostics={"deadline_stage": "before_edge_preprocessing"},
+            stage_timings_ms={"total": 0.})
     head_proposal = validate_current_head_proposal(
         current_head_proposal_corners, frame_shape=frame.shape,
     )
@@ -145,6 +165,10 @@ def estimate_stand_axis_from_metric_model(
     def current_edges():
         edges = (preprocess_edges() if cached_inputs is None else
                  cached_inputs.compute("edge_preprocessing", preprocess_edges))
+        # Keep the cache unfiltered: live HSV tuning can change on the same
+        # image. Mask actual Canny pixels, never the source image or QR input.
+        if edge_exclusion_mask is not None:
+            edges = cv2.bitwise_and(edges, cv2.bitwise_not(edge_exclusion_mask))
         timing.mark("edge_preprocessing")
         return edges
 
@@ -182,7 +206,8 @@ def estimate_stand_axis_from_metric_model(
 
         # A callback can depend on a changing scan, clock or persistence state.
         # Even the same callable and image cannot certify that context again.
-        if current_image_head_fit is None or proposal_filter is not None:
+        if (current_image_head_fit is None or proposal_filter is not None
+                or edge_exclusion_mask is not None):
             raw_edges, head_result = fit_current_head()
         else:
             raw_edges, head_result = current_image_head_fit.compute(

@@ -107,6 +107,11 @@ class AcquisitionFailureObserverTests(unittest.TestCase):
                     stack.enter_context(patch(module + name, return_value=()))
                 stack.enter_context(patch(module + "compressed_msg_to_bgr_frame", return_value=frame))
                 stack.enter_context(patch(module + "_rectify_bgr_frame", side_effect=lambda value, *_, **_kwargs: value))
+                # This test injects geometry and checks scheduling only; its
+                # camera stub has no calibration or image-domain operations.
+                stack.enter_context(patch(module + "camera_calibration_from_info", return_value=None))
+                stack.enter_context(patch(module + "rectified_source_support", return_value=None))
+                stack.enter_context(patch(module + "ImageSourceSupport", return_value=None))
                 decoders = [stack.enter_context(patch(module + name, return_value=())) for name in (
                     "detect_qr_texts_bgr", "detect_qr_observations_bgr",
                     "detect_native_qr_observations_bgr")]

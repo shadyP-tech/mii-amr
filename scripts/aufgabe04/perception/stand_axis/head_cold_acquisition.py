@@ -100,12 +100,15 @@ def _bounded_quad(points, shape):
 def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
                          search_bounds=None, rail_groups_out=None,
                          preferred_head_height_px=None, all_rail_groups_out=None,
-                         candidate_search=None, guidance_diagnostics=None):
+                         candidate_search=None, guidance_diagnostics=None, source_support=None,
+                         edge_region=None, edge_region_diagnostics=None):
     """Pair current line segments, using candidate scale only to order hints."""
     import numpy as np
 
     preferred_height = (search_bounds.height if search_bounds is not None
                         else preferred_head_height_px)
+    # Preserve LSD's original sampling and endpoints: cropping gray changes
+    # even interior subpixel lines. Screen its results before the rail quota.
     detected = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hough")
     # Equal-luminance colour boundaries can be absent from grayscale LSD while
@@ -115,6 +118,8 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
     groups = ([], [])
     segments = [segment for lines in (detected, raw_lines) if lines is not None
                 for segment in lines.reshape(-1, 4)]
+    if edge_region_diagnostics is not None:
+        edge_region_diagnostics.update(input_line_segments=len(segments), rejected_line_segments=0)
     for x0, y0, x1, y1 in segments:
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_rails")
         dx, dy = float(x1 - x0), float(y1 - y0)
@@ -125,6 +130,13 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
         if direction is None:
             continue
         first, last = (float(x0), float(y0)), (float(x1), float(y1))
+        if edge_region is not None and not edge_region.contains(
+                (ImagePoint(*first), ImagePoint(*last))):
+            if edge_region_diagnostics is not None:
+                edge_region_diagnostics["rejected_line_segments"] += 1
+            continue
+        if source_support is not None and not source_support.segment(first, last):
+            continue
         if search_bounds is not None:
             # Before the fixed rail quota: remote room boundaries cannot displace
             # the selected candidate's rails simply by being longer.
@@ -143,7 +155,8 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
     if candidate_search is not None and preferred_head_height_px is not None:
         candidate_observed_rail_hints(cv2, raw_edges, distinct_groups, candidate_search,
             deadline_monotonic_sec=deadline_monotonic_sec, diagnostics=guidance_diagnostics,
-            prioritized_groups_out=guided_groups, rail_limit=MAX_RAILS_PER_DIRECTION)
+            prioritized_groups_out=guided_groups, rail_limit=MAX_RAILS_PER_DIRECTION,
+            source_support=source_support)
     hints = []
     for direction, group in enumerate(groups):
         # LSD and Hough often locate the same rail with different endpoints.
@@ -274,8 +287,14 @@ def acquire_cold_head_proposal(
         )
     if raw_edges.ndim != 2 or raw_edges.shape != frame_bgr.shape[:2]:
         raise ValueError("raw_edges must match the cold search image")
+    edge_region = getattr(candidate_search, "edge_region", None)
+    locator_edges = raw_edges if edge_region is None else edge_region.locator_edges(raw_edges)
+    if edge_region is not None:
+        diagnostics["lidar_edge_region"] = dict(edge_region.diagnostics(),
+            input_edge_pixels=int(np.count_nonzero(raw_edges)),
+            retained_edge_pixels=int(np.count_nonzero(locator_edges)))
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contours")
-    contours = cv2.findContours(raw_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    contours = cv2.findContours(locator_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
     diagnostics["input_contours"] = len(contours)
     if search_bounds is not None:
         x0, y0, x1, y1 = search_bounds.image_bounds(raw_edges.shape)
@@ -288,6 +307,12 @@ def acquire_cold_head_proposal(
     eligible_contours = []
     for contour in contours:
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contour_hypotheses")
+        if edge_region is not None:
+            x0, y0, x1, y1 = edge_region.bounds
+            x, y, w, h = cv2.boundingRect(contour)
+            # Mask clipping is not a closed observed contour.
+            if x <= x0 or y <= y0 or x+w >= x1 or y+h >= y1:
+                continue
         perimeter = cv2.arcLength(contour, True)
         if perimeter < 4 * MIN_HEAD_EDGE_PX:
             continue
@@ -318,6 +343,9 @@ def acquire_cold_head_proposal(
                                             preferred_head_height_px=_preferred_rail_height_px,
                                             all_rail_groups_out=all_rail_groups,
                                             candidate_search=candidate_search if _guided_rail_search else None,
+                                            source_support=getattr(proposal_filter, "source_support", None),
+                                            edge_region=edge_region,
+                                            edge_region_diagnostics=diagnostics.get("lidar_edge_region"),
                                             guidance_diagnostics=guidance)
     diagnostics["horizontal_rails"], diagnostics["vertical_rails"] = rail_counts
     seeds.extend((hint, "paired_current_rails") for hint in hints)

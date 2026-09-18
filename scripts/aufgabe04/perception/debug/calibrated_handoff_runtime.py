@@ -20,6 +20,7 @@ class CalibrationRuntimeSnapshot:
     calibration: CameraCalibration | None = None
     scan_from_camera: RigidTransform | None = None
     camera_info_age_sec: float | None = None
+    base_from_camera: RigidTransform | None = None
 
 
 class RosCameraCalibrationTfSource:
@@ -33,12 +34,14 @@ class RosCameraCalibrationTfSource:
         camera_frame: str,
         max_camera_info_age_sec: float,
         tf_timeout_sec: float,
+        base_frame: str | None = None,
     ) -> None:
         self.camera_info_topic = camera_info_topic
         self.scan_frame = scan_frame
         self.camera_frame = camera_frame
         self.max_camera_info_age_sec = max_camera_info_age_sec
         self.tf_timeout_sec = tf_timeout_sec
+        self.base_frame = base_frame
         self._lock = threading.Lock()
         self._calibration: CameraCalibration | None = None
         self._camera_info_received_sec: float | None = None
@@ -183,12 +186,24 @@ class RosCameraCalibrationTfSource:
                 float(rotation.w),
             ),
         )
+        base_from_camera = None
+        if self.base_frame is not None:
+            try:
+                base_tf = self.tf_buffer.lookup_transform(self.base_frame, self.camera_frame,
+                    self.Time(), timeout=self.Duration(seconds=self.tf_timeout_sec)).transform
+                base_from_camera = RigidTransform(
+                    parent_frame=self.base_frame, child_frame=self.camera_frame,
+                    translation_xyz_m=(base_tf.translation.x, base_tf.translation.y, base_tf.translation.z),
+                    rotation_xyzw=(base_tf.rotation.x, base_tf.rotation.y, base_tf.rotation.z, base_tf.rotation.w))
+            except self.TransformException:
+                pass  # Existing calibrated handoff remains separately available.
         return CalibrationRuntimeSnapshot(
             True,
             "calibrated",
             calibration=calibration,
             scan_from_camera=scan_from_camera,
             camera_info_age_sec=age,
+            base_from_camera=base_from_camera,
         )
 
     def release(self) -> None:

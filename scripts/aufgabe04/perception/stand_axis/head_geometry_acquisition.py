@@ -9,6 +9,8 @@ Current candidate association and QR identity binding remain separate gates.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from scripts.aufgabe04.perception.stand_axis.current_image_head_fit import CurrentImageHeadFit
 from scripts.aufgabe04.perception.stand_axis.model_input_cache import MetricModelInputCache, RoiBounds
 from scripts.aufgabe04.perception.stand_axis.model_pipeline import estimate_stand_axis_from_metric_model
@@ -52,6 +54,8 @@ def estimate_current_head_geometry(
     current_image_head_fit: CurrentImageHeadFit | None = None,
     candidate_search=None,
     proposal_filter=None,
+    source_support=None,
+    edge_exclusion_mask=None,
     estimator=None,
 ):
     """Run the same full-image cold/tracked metric path in both consumers.
@@ -64,12 +68,19 @@ def estimate_current_head_geometry(
     evidence; they do not seed its pose. Exact-image caches may avoid repeating
     work when decoding adds identity to this same image. A supplied proposal
     filter disables geometry reuse because scan/clock context can change.
+    An optional uint8 edge exclusion removes Canny evidence before acquisition
+    and fitting, while leaving source pixels available for QR decoding.
     ``estimator`` is an injection seam for consumer tests; production uses the
     shared metric fitter.
     """
 
     fit = estimate_stand_axis_from_metric_model if estimator is None else estimator
-    return fit(
+    if source_support is not None and source_support.shape != frame.shape[:2]:
+        raise ValueError("source support must match the exact processing image")
+    edge_region = getattr(candidate_search, "edge_region", None)
+    if edge_region is not None and edge_region.shape != frame.shape[:2]:
+        raise ValueError("LiDAR head region must match the exact processing image")
+    result = fit(
         cv2,
         frame,
         model_profile=model_profile,
@@ -90,5 +101,35 @@ def estimate_current_head_geometry(
         input_cache_roi=input_cache_roi,
         current_image_head_fit=current_image_head_fit,
         candidate_search=candidate_search,
-        proposal_filter=proposal_filter,
+        proposal_filter=(proposal_filter if source_support is None else
+                         source_support.filter(proposal_filter)),
+        **({"edge_exclusion_mask": edge_exclusion_mask}
+           if edge_exclusion_mask is not None else {}),
     )
+    if source_support is None and edge_region is None:
+        return result
+    estimate, debug = result
+    diagnostics = dict(debug.head_acquisition_diagnostics or {})
+    if source_support is not None:
+        diagnostics["source_support"] = source_support.diagnostics()
+    if edge_region is not None:
+        diagnostics["lidar_edge_region"] = edge_region.diagnostics()
+    debug = replace(debug, head_acquisition_diagnostics=diagnostics)
+    # Tracked fits bypass cold proposal callbacks, and raw refinement can move
+    # a border. Recheck final pixels before any geometry can leave this facade.
+    outside_source = (source_support is not None and estimate.corners is not None
+                      and not source_support.accepts(estimate.corners))
+    outside_candidate = (edge_region is not None and estimate.corners is not None
+                         and not edge_region.contains(estimate.corners))
+    if outside_source or outside_candidate:
+        from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
+        reason = ("head_border_outside_source_image" if outside_source
+                  else "head_border_outside_lidar_candidate_region")
+        estimate = replace(_unusable(reason, source=estimate.source),
+            evidence_state="unobservable", model_profile_sha256=estimate.model_profile_sha256,
+            model_measurement_status=estimate.model_measurement_status)
+        debug = replace(debug, model_pose=None, head_model_quality=None,
+            head_orientation_bounds=None, head_outer_recovery=None,
+            refined_corners=None, rectangle_mask=None, projected_landmarks=None,
+            model_reason=reason, evidence_state="unobservable")
+    return estimate, debug

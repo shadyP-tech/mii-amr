@@ -233,6 +233,7 @@ class CandidateApproachConfig:
     require_uncertainty_aware_selection: bool = False
     camera_arrival_max_bearing_error_rad: float = math.radians(3.0)
     camera_arrival_range_slack_m: float = 0.20
+    camera_timeout_sec: float = 90.0
     max_candidate_inspection_views: int = 8
     expected_stand_count: int | None = None
     server_qr_mapping_evidence_path: Path | None = None
@@ -303,6 +304,9 @@ class CandidateObservationRequest:
     candidate: FrozenCandidate
     output_dir: Path
     attempt_index: int
+    allow_centering: bool = False
+    timeout_sec: float | None = None
+    observation_not_before_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -312,6 +316,7 @@ class CandidateObservation:
     axis_observation_path: Path | None
     inspection_observation_path: Path | None = None
     qr_observation_pose_path: Path | None = None
+    centering_advisory_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1037,6 +1042,7 @@ class CandidateApproachEffects:
     ] | None = None
     event_sink: Callable[[Path, Mapping[str, object]], None] = _append_jsonl
     clock: Callable[[], float] = time.time
+    run_centering_turn: Callable[..., object] | None = None
 
 
 def _read_finite_pose2d(

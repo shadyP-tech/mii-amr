@@ -129,6 +129,9 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.constants
     STALE_TF_RECOVERY_SPIN_TIMEOUT_SEC,
     TF_LISTENER_NODE_NAME,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.candidate_centering import (
+    CandidateCenteringRuntimeMixin,
+)
 
 
 try:  # pragma: no cover - exercised on ROS hosts.
@@ -198,6 +201,7 @@ def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
 
 
 class SimpleWaypointFollowerNode(
+    CandidateCenteringRuntimeMixin,
     StartupActiveLocalizationRuntimeMixin,
     ControlLoopRuntimeMixin,
     CallbackServiceRuntimeMixin,
@@ -375,6 +379,9 @@ class SimpleWaypointFollowerNode(
         self.latest_odom_callback_count = (
             getattr(self, "latest_odom_callback_count", 0) + 1
         )
+        monitor = getattr(self, "_candidate_centering_odom_monitor", None)
+        if monitor is not None:
+            monitor.record(self._latest_odom_pose())
 
     def publish_zero(self) -> None:
         self.command_smoother.reset()

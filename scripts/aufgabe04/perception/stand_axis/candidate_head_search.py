@@ -1,8 +1,9 @@
 """Reject incompatible head locations without supplying measured image corners.
 
 The current candidate projection supplies only a conservative search screen.
-Full-image edge detection, raw border refinement and competing-head checks stay
-unchanged. Current camera/LiDAR association remains required after the 3D fit.
+Full-image edge detection and raw border refinement stay unchanged. An optional
+LiDAR volume region limits contour and rail discovery before the work quotas.
+Current camera/LiDAR association remains required after the 3D fit.
 """
 
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import math
 from scripts.aufgabe04.perception.stand_axis.head_proposal import _extent
 from scripts.aufgabe04.perception.stand_axis.head_outer_border import OUTER_HEAD_SEARCH_GROWTH_FACTORS
 from scripts.aufgabe04.perception.stand_axis.geometry import _distance, order_corners
+from scripts.aufgabe04.perception.stand_axis.lidar_head_edge_region import LidarHeadEdgeRegion
 
 
 # Match observer.head_model_admission.head_scale_gate. Tests compare these
@@ -25,6 +27,7 @@ class CandidateHeadSearch:
     center: tuple[float, float]
     height: float
     max_center_offset_ratio: float = 1.5
+    edge_region: LidarHeadEdgeRegion | None = None
 
     def __post_init__(self):
         if (len(self.center) != 2
@@ -63,12 +66,14 @@ class CandidateHeadSearch:
         _width, height, center = _extent(corners)
         tl, tr, br, bl = order_corners(corners)
         left, right = _distance(tl, bl), _distance(tr, br)
-        return (MIN_MEASURED_HEIGHT_RATIO <= height / self.height <= MAX_MEASURED_HEIGHT_RATIO
+        return ((self.edge_region is None or self.edge_region.contains(corners))
+                and MIN_MEASURED_HEIGHT_RATIO <= height / self.height <= MAX_MEASURED_HEIGHT_RATIO
                 and min(left, right) / max(left, right, 1.e-9) >= MIN_MEASURED_SIDE_BALANCE
                 and math.dist(center, self.center) / self.height <= self.max_center_offset_ratio)
 
     def diagnostics(self):
         return {"policy": "conservative_candidate_head_screen", "image_scope": "full_image",
+                "edge_region": None if self.edge_region is None else self.edge_region.diagnostics(),
                 "center_u_px": self.center[0], "center_v_px": self.center[1],
                 "height_px": self.height, "max_center_offset_ratio": self.max_center_offset_ratio,
                 "hint_center_refinement_allowance_px": 10.,

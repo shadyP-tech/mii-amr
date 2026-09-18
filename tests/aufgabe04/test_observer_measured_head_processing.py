@@ -25,6 +25,7 @@ from scripts.aufgabe04.perception.stand_axis.qr_marker_validation import QrMarke
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
 from scripts.aufgabe04.real_robot.observer.viewer_head_acquisition import evaluate_viewer_head
+from scripts.aufgabe04.real_robot.observer.current_scan_head_proposal_filter import CurrentScanHeadProposalFilter
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import load_recommendation
 from tests.aufgabe04 import test_camera_observer_processing as processing_fixtures
 from tests.aufgabe04 import test_head_model_admission as head_fixtures
@@ -42,8 +43,24 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         fixture = processing_fixtures.CameraObserverProcessingTest()
         adapter = fixture.make_adapter()
         if physical:
+            # Full metric context for candidate-volume and source-pixel gates.
+            # This synthetic stand's head is at the fixture camera's height.
+            import cv2
+            adapter.cv2 = cv2
             adapter.stand_model_profile.environment = "physical"
             adapter.stand_model_profile.committable = True
+            adapter.stand_model_profile.head_top_height_m = adapter.stand_head_center_height_m + .039
+            adapter.stand_model_profile.head_depth_m = .006
+            adapter.stand_model_profile.tolerance_m = .002
+            info = adapter._next_sensor_tuple.return_value.camera_info.value
+            info.k = (400., 0., 400., 0., 400., 300., 0., 0., 1.)
+            info.r = (1., 0., 0., 0., 1., 0., 0., 0., 1.)
+            info.d = (0., 0., 0., 0., 0.)
+            if scenario in {"offset_scan", "offset_scan_ambiguous"}:
+                scan = adapter._next_sensor_tuple.return_value.scan.value
+                scan.angle_min = .18
+                if scenario == "offset_scan_ambiguous":
+                    scan.ranges = (.6, .6, math.inf, .6, .6)
             adapter.model_pose_tracker = create_head_geometry_tracker()
             # This nominal crop would clip the off-center head. Physical
             # acquisition uses the whole image before candidate association.
@@ -63,6 +80,12 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         qr_geometry_priorities = []
         metric_options = []
         metric_frame_indices = []
+        scan_filters = []
+
+        def scan_filter(**options):
+            value = CurrentScanHeadProposalFilter(**options)
+            scan_filters.append(value)
+            return value
 
         def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None,
                    prefer_native_geometry=False):
@@ -208,6 +231,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 "detect_qr_observations_bgr": {"side_effect": full_decode},
                 "detect_native_qr_observations_bgr": {"side_effect": native_decode},
                 "estimate_stand_axis_from_metric_model": {"side_effect": metric},
+                "CurrentScanHeadProposalFilter": {"side_effect": scan_filter},
             }
             for name, options in patches.items():
                 stack.enter_context(patch(module + name, **options))
@@ -282,6 +306,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             adapter._test_pose_hints = pose_hints
             adapter._test_head_calls = head_calls
             adapter._test_metric_options = metric_options
+            adapter._test_scan_filters = scan_filters
             adapter._test_qr_geometry_priorities = qr_geometry_priorities
             return adapter, payload
 
@@ -424,19 +449,37 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                             for item in adapter._test_metric_options))
         self.assertTrue(all(item["pose_hint"] is not None for item in tracked))
         self.assertTrue(all("current_head_proposal_corners" not in item for item in tracked))
-        filters = [item["proposal_filter"] for item in adapter._test_metric_options]
+        filters = adapter._test_scan_filters
         self.assertEqual(len({id(value) for value in filters}), 7)
         self.assertEqual([value.scan.scan_stamp_sec for value in filters],
                          [100. + index * .2 for index in range(7)])
         self.assertTrue(all(callable(value.preview_lidar_association) for value in filters))
         self.assertTrue(all(callable(value.current_ros_sec) for value in filters))
         self.assertTrue(all(value.metadata()["persistence_read_only"] for value in filters))
+        self.assertTrue(all(item["candidate_search"].edge_region is not None
+                            for item in adapter._test_metric_options))
         first_metadata = adapter._write_status.call_args_list[0].kwargs["stand_axis_debug"]
         self.assertTrue(first_metadata["current_head_candidate_association"]["accepted"])
         first_model = first_metadata["metric_model"]
         self.assertEqual(len(first_model["head_roi_attempts"]), 1)
         self.assertFalse(first_model["camera_target_registration"]["strict_retry_applied"])
         self.assertEqual(adapter._last_observation_update.resolved_qr_id, "QR_003")
+
+    def test_physical_region_uses_unique_registered_scan_envelope_before_geometry(self):
+        adapter, payload = self.run_view("physical_offset_scan")
+        self.assertTrue(all(item["candidate_search"].edge_region is not None
+                            for item in adapter._test_metric_options))
+        # The broad pre-search hint cannot authorize the deliberately mismatched
+        # synthetic visual head; normal current-head association still governs.
+        self.assertIsNone(payload)
+        self.assertFalse(adapter.completed)
+
+    def test_physical_region_does_not_choose_between_registered_scan_clusters(self):
+        adapter, payload = self.run_view("physical_offset_scan_ambiguous")
+        self.assertTrue(all(item["candidate_search"].edge_region is None
+                            for item in adapter._test_metric_options))
+        self.assertIsNone(payload)
+        self.assertFalse(adapter.completed)
 
     def test_physical_bound_head_marker_crop_prioritizes_native_qr_geometry(self):
         adapter, payload = self.run_view("physical_recover_qr")

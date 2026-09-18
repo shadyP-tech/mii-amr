@@ -179,7 +179,22 @@ def texture_members(cv2, outer, others, *, deadline_monotonic_sec=None):
                     if coverage < .5 * float(item[2][along] - item[1][along]):
                         return False
             return True
-        members = [item[0] for item in normalized if explained(item)]
+        def concentric_inset(item):
+            # Repeated printed motifs can contain concentric rails. Requiring
+            # collinearity with the outer motif mistakes its inner ring for a
+            # separate head. Only the already established three distributed,
+            # disjoint anchors can own such an inset; ordinary containment in
+            # the head (including a lone central rectangle) is insufficient.
+            for anchor in group:
+                scale = item[4] / anchor[4]
+                center_error = np.abs(item[3] - anchor[3]) / anchor[4]
+                if (np.all(item[1] > anchor[1]) and np.all(item[2] < anchor[2])
+                        and np.all((.35 <= scale) & (scale <= .90))
+                        and abs(float(scale[0] - scale[1])) <= .10
+                        and np.all(center_error <= .08)):
+                    return True
+            return False
+        members = [item[0] for item in normalized if explained(item) or concentric_inset(item)]
         if len(members) > len(best):
             best = members
     return best

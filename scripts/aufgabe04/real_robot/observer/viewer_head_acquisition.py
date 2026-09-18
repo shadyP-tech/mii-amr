@@ -73,6 +73,9 @@ def evaluate_viewer_head(
     canny_low=20, canny_high=60, estimator=None, now=None,
     max_center_offset_ratio=1.5,
     proposal_filter=None,
+    source_support=None,
+    lidar_edge_region=None,
+    lidar_edge_region_diagnostics=None,
 ):
     """Measure full-frame geometry once, returning neutral side classification.
 
@@ -91,6 +94,8 @@ def evaluate_viewer_head(
     depth = getattr(projection, "depth_m", None)
     if depth is None or not math.isfinite(depth) or depth <= 0.:
         candidate_search = None
+    if candidate_search is not None and lidar_edge_region is not None:
+        candidate_search = replace(candidate_search, edge_region=lidar_edge_region)
     estimate, debug = estimate_current_head_geometry(
         cv2, frame, model_profile=model_profile,
         camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
@@ -100,6 +105,7 @@ def evaluate_viewer_head(
         deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
         candidate_search=candidate_search,
         proposal_filter=proposal_filter,
+        source_support=source_support,
     )
     geometry_completed = now()
     geometry_ms = (geometry_completed-started)*1000.
@@ -116,6 +122,7 @@ def evaluate_viewer_head(
     metadata = dict(performed=False, geometry_first=True, geometry_scope="full_image",
         candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
         current_scan_proposal_filter_applied=proposal_filter is not None,
+        lidar_edge_region=lidar_edge_region_diagnostics,
         geometry_completed_monotonic_sec=geometry_completed,
         identity_scope=scope, identity_roi=None if bounds is None else list(bounds),
         current_image_geometry_refit=False, marker_refresh_performed=False,
