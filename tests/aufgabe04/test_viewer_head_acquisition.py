@@ -54,7 +54,7 @@ def evaluate(scene, *, native=None, full=None, available=2., clock=None, **chang
         started_ros_sec=10., started_monotonic_sec=10., max_sensor_age_sec=available)
     options = dict(model_profile=profile, intrinsics=intrinsics, pose_hint=None,
         # Displacement stays inside association bounds; it must not crop or seed geometry.
-        projection=OpticalProjection(340., 260., .5, height, True),
+        projection=OpticalProjection(340., 260., .35, height, True),
         expected_head_height_px=height, fallback_attempt=None, cache=RoiQrDecodeCache(),
         budget=budget, native_decoder=native or (lambda crop: ()),
         full_decoder=full or (lambda *args: ()), deadline_monotonic_sec=None,
@@ -82,7 +82,8 @@ def test_geometry_uses_original_image_intrinsics_and_only_a_conservative_candida
     assert not any(key.startswith("expected_head_") for key in options)
     assert "current_head_proposal_corners" not in options
     assert options["candidate_search"].center == (340., 260.)
-    assert options["candidate_search"].height == scene[3]
+    assert options["candidate_search"].height == pytest.approx(scene[2].fy_px*scene[1].head_height_m/.35)
+    assert options["candidate_search"].pixel_size.depth_m == .35
     assert options["proposal_filter"] is None
     assert result.qr_decode_metadata["current_scan_proposal_filter_applied"] is False
     assert result.qr_decode_metadata["candidate_screen"]["supplies_corners"] is False

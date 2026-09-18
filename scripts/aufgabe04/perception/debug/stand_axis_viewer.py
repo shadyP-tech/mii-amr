@@ -67,7 +67,7 @@ from scripts.aufgabe04.perception.camera_calibration import (
 )
 from scripts.aufgabe04.perception.stand_axis.image_source_support import ImageSourceSupport
 from scripts.aufgabe04.perception.stand_axis.nearest_scan_head import nearest_scan_head_search
-from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
 from scripts.aufgabe04.perception.debug.calibrated_handoff_runtime import (
     CalibrationRuntimeSnapshot,
     RosCameraCalibrationTfSource,
@@ -364,7 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--color", choices=labels, default="green")
     parser.add_argument(
         "--edge-color", choices=("all", *labels), default="all",
-        help="Keep edges near this stand color (default: all stand palette colors). --tune overrides this with the live HSV range.",
+        help="Color-filter the edge preview and legacy detector. Metric head fitting preserves raw borders. --tune overrides the palette with the live HSV range.",
     )
     parser.add_argument(
         "--no-color-edge-mask", dest="color_edge_mask", action="store_false",
@@ -527,6 +527,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Approximate camera-to-stand center distance. Used as fallback when LiDAR distance is unavailable.",
     )
+    parser.add_argument("--head-depth-m", type=float,
+        help="Known optical-camera Z depth of the head in metres. With --head-target unique, constrain pixel size without assuming image location. Nearest mode uses calibrated LiDAR depth.")
+    parser.add_argument("--head-depth-uncertainty-m", type=float, default=.02,
+        help="Uncertainty of manually supplied --head-depth-m (default: 0.02 m).")
     parser.add_argument(
         "--camera-fx-px",
         type=float,
@@ -2379,6 +2383,15 @@ def _standalone_head_geometry_reason(
 
 
 def _validate_runtime_args(args) -> None:
+    if args.head_depth_m is not None:
+        if not math.isfinite(args.head_depth_m) or args.head_depth_m <= 0:
+            raise ValueError("--head-depth-m must be finite and positive")
+        if args.head_target != "unique":
+            raise ValueError("--head-depth-m requires --head-target unique")
+        if args.stand_model_profile is None:
+            raise ValueError("--head-depth-m requires --stand-model-profile")
+    if not math.isfinite(args.head_depth_uncertainty_m) or args.head_depth_uncertainty_m < 0:
+        raise ValueError("--head-depth-uncertainty-m must be finite and nonnegative")
     if args.diagnostic_window_size_px <= 0:
         raise ValueError("--diagnostic-window-size-px must be positive")
     if args.stand_model_profile is not None and args.axis_source != "edges":
@@ -3401,10 +3414,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             fx=camera_fx_px, fy=camera_fy_px,
                             cx=query_camera_cx_px, cy=query_camera_cy_px, image_shape=frame.shape)
                         if nearest_search is not None and target_roi is not None:
-                            nearest_search = CandidateHeadSearch(
-                                (nearest_search.center[0]-target_roi.x0,
-                                 nearest_search.center[1]-target_roi.y0), nearest_search.height,
-                                nearest_search.max_center_offset_ratio)
+                            nearest_search = replace(nearest_search, center=(
+                                nearest_search.center[0]-target_roi.x0,
+                                nearest_search.center[1]-target_roi.y0))
                         if (nearest_search is None or last_nearest_search is None
                                 or math.dist(nearest_search.center, last_nearest_search.center)
                                    > .5*nearest_search.height
@@ -3413,6 +3425,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                             prediction = model_pose_tracker.prediction(now_sec=time.monotonic(),
                                 profile_sha256=stand_model_profile.sha256, camera_signature=camera_signature)
                         last_nearest_search = nearest_search
+                    elif args.head_depth_m is not None:
+                        nearest_search = metric_head_search(model_profile=stand_model_profile,
+                            depth_m=args.head_depth_m, depth_uncertainty_m=args.head_depth_uncertainty_m,
+                            fx=camera_fx_px, fy=camera_fy_px,
+                            cx=axis_camera_cx_px, cy=axis_camera_cy_px, image_shape=axis_frame.shape)
+                        nearest_metadata = {"policy": "explicit_optical_depth_size_only",
+                                            "search": nearest_search.diagnostics()}
                     support_pixels = source_valid_pixels
                     if support_pixels is not None and target_roi is not None:
                         support_pixels = support_pixels[target_roi.y0:target_roi.y1, target_roi.x0:target_roi.x1]
@@ -3435,7 +3454,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 pose_hint=prediction.pose,
                                 candidate_search=nearest_search,
                                 source_support=image_source_support,
-                                edge_exclusion_mask=edge_exclusion_mask,
+                                # HSV filtering can erase the warm or desaturated
+                                # sides of a grey head. Fit original current edges;
+                                # metric location/size bounds suppress background.
                                 edge_preprocess=args.edge_preprocess.replace("-", "_"),
                                 blur_kernel=args.edge_blur_kernel,
                                 canny_low=args.canny_low,
@@ -3449,6 +3470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     metric_artifacts = replace(metric_artifacts, head_acquisition_diagnostics={
                         **(metric_artifacts.head_acquisition_diagnostics or {}),
+                        "color_mask_scope": "preview_and_legacy_only",
                         "target_selection": nearest_metadata})
 
                 fallback_estimate = None
@@ -3738,6 +3760,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             display_frame = frame
             display_mask = mask if edge_color_support is None else edge_color_support
             display_edges = edges
+            if edges is not None and edge_color_support is not None:
+                preview_support = (edge_color_support if target_roi is None else
+                    edge_color_support[target_roi.y0:target_roi.y1, target_roi.x0:target_roi.x1])
+                display_edges = cv2.bitwise_and(edges, preview_support)
             display_face_mask = face_mask
             display_rectangle_mask = rectangle_mask
             display_rectangle_overlay = rectangle_overlay
@@ -3748,7 +3774,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 current_head_display_snapshot = HeadDisplaySnapshot(
                     frame=frame,
                     mask=display_mask,
-                    edges=edges,
+                    edges=display_edges,
                     face_mask=face_mask,
                     rectangle_mask=rectangle_mask,
                     rectangle_overlay=rectangle_overlay,
@@ -4334,8 +4360,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                           for p in metric_estimate.corners]
                 cv2.polylines(annotated, [numpy.asarray(points, numpy.int32)], True, (0, 190, 255), 2)
                 text_cursor.draw(cv2, annotated,
-                    border_diagnostic["state"]+"; display only; pose="+metric_estimate.reason,
+                    "Head frame detected; yaw uncertain; "+border_diagnostic["state"]+"; "+metric_estimate.reason,
                     font_face=cv2.FONT_HERSHEY_SIMPLEX, font_scale=.45, color=(0, 190, 255), thickness=1)
+            search_info = ((metric_artifacts.head_acquisition_diagnostics or {}).get("candidate_screen")
+                           if metric_artifacts is not None else None)
+            size_info = None if search_info is None else search_info.get("pixel_size")
+            if size_info is not None:
+                text_cursor.draw(cv2, annotated,
+                    f"Depth {size_info['depth_m']:.3f} m; expected head height {size_info['height_px']:.0f} px "
+                    f"[{size_info['min_height_px']:.0f}, {size_info['max_height_px']:.0f}]",
+                    font_face=cv2.FONT_HERSHEY_SIMPLEX, font_scale=.45, color=(220, 220, 220), thickness=1)
             if (
                 edge_artifacts.predicted_corners is not None
                 and estimate.evidence_state != "predicted_only"

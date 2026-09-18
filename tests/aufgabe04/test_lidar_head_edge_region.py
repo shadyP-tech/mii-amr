@@ -142,7 +142,8 @@ def test_tracked_fit_cannot_bypass_candidate_region(profile):
     assert artifacts.model_pose is None and artifacts.head_outer_recovery is None
 
 
-def test_recorded_displaced_head_survives_early_background_filtering(profile):
+@pytest.mark.parametrize("metric_size", (False, True))
+def test_recorded_displaced_head_survives_early_background_filtering(profile, metric_size):
     from scripts.aufgabe04.perception.camera_calibration import CameraCalibration, rectify_bgr_frame
     from scripts.aufgabe04.perception.stand_axis_handoff.geometry import transform_point
     from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
@@ -185,10 +186,18 @@ def test_recorded_displaced_head_survives_early_background_filtering(profile):
         scan_from_camera=tf("base_scan", "camera"), scan=scan,
         cone_half_angle_rad=a["cone_half_angle_rad"], min_cluster_sample_count=1,
         max_camera_map_bearing_delta_rad=math.radians(12), **common)
+    search = CandidateHeadSearch((proj["u_px"], proj["v_px"]),
+        data["profile"]["expected_head_size_px"], edge_region=region)
+    if metric_size:
+        from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
+        from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
+        search = metric_head_search(model_profile=profile, depth_m=z,
+            fx=k[0], fy=k[1], cx=k[2], cy=k[3], image_shape=frame.shape, center=search.center,
+            depth_uncertainty_m=.08, edge_region=region,
+            camera_vertical=rotate_vector((0., 0., 1.), tf("camera", "map").rotation_xyzw))
     estimate, debug = estimate_current_head_geometry(cv2, frame, model_profile=profile,
         camera_fx_px=k[0], camera_fy_px=k[1], camera_cx_px=k[2], camera_cy_px=k[3],
-        candidate_search=CandidateHeadSearch((proj["u_px"], proj["v_px"]),
-            data["profile"]["expected_head_size_px"], edge_region=region), proposal_filter=filtering)
+        candidate_search=search, proposal_filter=filtering)
     assert estimate.usable, estimate.reason
     # Broad image-location check: no fitted yaw/corners supplied to the solver.
     assert 250 < sum(p.u_px for p in estimate.corners)/4 < 290

@@ -34,6 +34,7 @@ def test_nearest_current_target_projects_floor_height_and_physical_scale(profile
     assert result is not None,info
     assert result.center[0]==pytest.approx(400.,abs=1.)
     assert result.height==pytest.approx(640*.078/.45,abs=1.)
+    assert result.pixel_size.depth_m==pytest.approx(.45,abs=.005)
     assert result.center[1]==pytest.approx(300-640*(.171-.12)/.45,abs=1.)
     assert info["policy"]=="nearest_current_scan_head"
     assert not info["supplies_corners"] and not info["motion_authorized"]

@@ -4,7 +4,7 @@ import math
 
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
 from scripts.aufgabe04.perception.models import LidarStandDetectorConfig
-from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector, transform_point
 
 
@@ -61,17 +61,24 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
         if not (0. <= u < image_shape[1] and 0. <= v < image_shape[0] and height >= 8.):
             continue
         distance = math.hypot(*center_base[:2])
-        projected.append((distance, u, v, height, cluster))
+        projected.append((distance, u, v, height, cluster, point[2]))
     projected.sort(key=lambda p: p[0])
     info["candidates"] = [{"range_m": d, "center_u_px": u, "center_v_px": v,
                            "height_px": h, "scan_indices": c.source_indices}
-                          for d, u, v, h, c in projected]
+                          for d, u, v, h, c, depth in projected]
     if not projected:
         return fail("nearest_head_no_visible_scan_candidate")
     if len(projected) > 1 and projected[1][0]-projected[0][0] < .03:
         return fail("nearest_head_scan_candidates_ambiguous")
-    distance, u, v, height, cluster = projected[0]
-    search = CandidateHeadSearch((u, v), height, max_center_offset_ratio=.70)
+    distance, u, v, height, cluster, depth = projected[0]
+    x, y, z, w = base_from_camera.rotation_xyzw
+    try:
+        search = metric_head_search(model_profile=model_profile, depth_m=depth,
+            fx=fx, fy=fy, cx=cx, cy=cy, image_shape=image_shape, center=(u, v),
+            camera_vertical=rotate_vector((0., 0., 1.), (-x, -y, -z, w)),
+            max_center_offset_ratio=.70)
+    except ValueError:
+        return fail("nearest_head_metric_context_invalid")
     info.update(reason="nearest_head_current_scan_hint", search=search.diagnostics(),
                 scan_stamp_sec=scan.scan_stamp_sec, image_stamp_sec=image_stamp_sec)
     return search, info

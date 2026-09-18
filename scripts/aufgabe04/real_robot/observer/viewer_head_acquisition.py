@@ -11,6 +11,8 @@ import time
 
 from scripts.aufgabe04.perception.stand_axis.head_geometry_acquisition import estimate_current_head_geometry
 from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
+from scripts.aufgabe04.perception.stand_axis.head_frame_detection import head_frame_detection
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
 from scripts.aufgabe04.perception.stand_axis.marker_work_schedule import (
     MIN_NATIVE_MARKER_BUDGET_SEC, current_head_available_for_markers,
@@ -76,6 +78,8 @@ def evaluate_viewer_head(
     source_support=None,
     lidar_edge_region=None,
     lidar_edge_region_diagnostics=None,
+    depth_uncertainty_m=.02,
+    camera_vertical=(0., 1., 0.),
 ):
     """Measure full-frame geometry once, returning neutral side classification.
 
@@ -96,6 +100,15 @@ def evaluate_viewer_head(
         candidate_search = None
     if candidate_search is not None and lidar_edge_region is not None:
         candidate_search = replace(candidate_search, edge_region=lidar_edge_region)
+    if candidate_search is not None:
+        try:
+            candidate_search = metric_head_search(model_profile=model_profile, depth_m=depth,
+                fx=intrinsics.fx_px, fy=intrinsics.fy_px, cx=intrinsics.cx_px, cy=intrinsics.cy_px,
+                image_shape=frame.shape, center=candidate_search.center,
+                depth_uncertainty_m=depth_uncertainty_m, camera_vertical=camera_vertical,
+                max_center_offset_ratio=max_center_offset_ratio, edge_region=lidar_edge_region)
+        except ValueError:
+            candidate_search = None
     estimate, debug = estimate_current_head_geometry(
         cv2, frame, model_profile=model_profile,
         camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
@@ -120,6 +133,7 @@ def evaluate_viewer_head(
     observations, qr_detected, marker_verified, detection_scale = None, None, None, None
     marker_reason = "head_unavailable_marker_unchecked" if not complete_head else "qr_marker_processing_budget_exhausted"
     metadata = dict(performed=False, geometry_first=True, geometry_scope="full_image",
+        head_frame_detection=head_frame_detection(estimate, debug),
         candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
         current_scan_proposal_filter_applied=proposal_filter is not None,
         lidar_edge_region=lidar_edge_region_diagnostics,

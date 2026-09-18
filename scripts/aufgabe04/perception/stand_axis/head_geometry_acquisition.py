@@ -61,6 +61,7 @@ def estimate_current_head_geometry(
     """Run the same full-image cold/tracked metric path in both consumers.
 
     The optional candidate screen rejects incompatible cold-search locations;
+    metric pixel bounds also check final cold and tracked measurements.
     it supplies no rectangle and does not crop or alter the input pixels.
     A proposal filter may preview rough locators conservatively and associate
     completed current borders before selection. It supplies no border pixels.
@@ -106,7 +107,8 @@ def estimate_current_head_geometry(
         **({"edge_exclusion_mask": edge_exclusion_mask}
            if edge_exclusion_mask is not None else {}),
     )
-    if source_support is None and edge_region is None:
+    metric_search = candidate_search if getattr(candidate_search, "pixel_size", None) is not None else None
+    if source_support is None and edge_region is None and metric_search is None:
         return result
     estimate, debug = result
     diagnostics = dict(debug.head_acquisition_diagnostics or {})
@@ -114,6 +116,8 @@ def estimate_current_head_geometry(
         diagnostics["source_support"] = source_support.diagnostics()
     if edge_region is not None:
         diagnostics["lidar_edge_region"] = edge_region.diagnostics()
+    if metric_search is not None:
+        diagnostics["candidate_screen"] = metric_search.diagnostics()
     debug = replace(debug, head_acquisition_diagnostics=diagnostics)
     # Tracked fits bypass cold proposal callbacks, and raw refinement can move
     # a border. Recheck final pixels before any geometry can leave this facade.
@@ -121,10 +125,13 @@ def estimate_current_head_geometry(
                       and not source_support.accepts(estimate.corners))
     outside_candidate = (edge_region is not None and estimate.corners is not None
                          and not edge_region.contains(estimate.corners))
-    if outside_source or outside_candidate:
+    outside_metric = (metric_search is not None and estimate.corners is not None
+                      and not metric_search.accepts_measurement(estimate.corners))
+    if outside_source or outside_candidate or outside_metric:
         from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
         reason = ("head_border_outside_source_image" if outside_source
-                  else "head_border_outside_lidar_candidate_region")
+                  else "head_border_outside_lidar_candidate_region" if outside_candidate
+                  else "head_border_outside_metric_pixel_bounds")
         estimate = replace(_unusable(reason, source=estimate.source),
             evidence_state="unobservable", model_profile_sha256=estimate.model_profile_sha256,
             model_measurement_status=estimate.model_measurement_status)

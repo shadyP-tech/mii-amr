@@ -13,6 +13,7 @@ from scripts.aufgabe04.perception.stand_axis.head_proposal import _extent
 from scripts.aufgabe04.perception.stand_axis.head_outer_border import OUTER_HEAD_SEARCH_GROWTH_FACTORS
 from scripts.aufgabe04.perception.stand_axis.geometry import _distance, order_corners
 from scripts.aufgabe04.perception.stand_axis.lidar_head_edge_region import LidarHeadEdgeRegion
+from scripts.aufgabe04.perception.stand_axis.metric_head_search import ProjectedHeadSize
 
 
 # Match observer.head_model_admission.head_scale_gate. Tests compare these
@@ -28,6 +29,8 @@ class CandidateHeadSearch:
     height: float
     max_center_offset_ratio: float = 1.5
     edge_region: LidarHeadEdgeRegion | None = None
+    pixel_size: ProjectedHeadSize | None = None
+    center_tolerance_px: float | None = None
 
     def __post_init__(self):
         if (len(self.center) != 2
@@ -35,6 +38,24 @@ class CandidateHeadSearch:
                                                              self.max_center_offset_ratio))
                 or self.height <= 0. or not 0. < self.max_center_offset_ratio <= 1.5):
             raise ValueError("candidate head search requires a finite current projection")
+        if self.center_tolerance_px is not None and (
+                not math.isfinite(self.center_tolerance_px) or self.center_tolerance_px <= 0):
+            raise ValueError("candidate centre tolerance must be finite and positive")
+
+    @property
+    def center_limit_px(self):
+        return (self.max_center_offset_ratio*self.height if self.center_tolerance_px is None
+                else self.center_tolerance_px)
+
+    def image_bounds(self, shape):
+        if self.edge_region is not None:
+            return self.edge_region.bounds
+        extent = self.height*1.35 if self.pixel_size is None else max(
+            self.pixel_size.max_height_px, self.pixel_size.max_width_px)
+        radius = self.center_limit_px + extent + 10.
+        u, v = self.center
+        return (max(0, math.floor(u-radius)), max(0, math.floor(v-radius)),
+                min(shape[1], math.ceil(u+radius)+1), min(shape[0], math.ceil(v+radius)+1))
 
     @classmethod
     def optional(cls, u, v, height, *, max_center_offset_ratio=1.5):
@@ -52,7 +73,10 @@ class CandidateHeadSearch:
         Outer searches grow about the same hint center by at most 1.25. Their
         additional center gate can only narrow this ten-pixel envelope.
         """
-        _width, height, center = _extent(corners)
+        width, height, center = _extent(corners)
+        if self.pixel_size is not None:
+            return (self.pixel_size.accepts(width, height, refinement_allowance=True)
+                    and math.dist(center, self.center) <= self.center_limit_px+10.)
         largest_growth = max((1., *OUTER_HEAD_SEARCH_GROWTH_FACTORS))
         # Coordinates reconstructed at an envelope endpoint can lose a few ulps.
         roundoff = 1.e-12 * max(height, self.height, 1.)
@@ -63,20 +87,24 @@ class CandidateHeadSearch:
 
     def accepts_measurement(self, corners):
         """Apply the existing candidate size/center bounds to measured pixels."""
-        _width, height, center = _extent(corners)
+        width, height, center = _extent(corners)
         tl, tr, br, bl = order_corners(corners)
         left, right = _distance(tl, bl), _distance(tr, br)
         return ((self.edge_region is None or self.edge_region.contains(corners))
-                and MIN_MEASURED_HEIGHT_RATIO <= height / self.height <= MAX_MEASURED_HEIGHT_RATIO
+                and (self.pixel_size.accepts(width, height) if self.pixel_size is not None
+                     else MIN_MEASURED_HEIGHT_RATIO <= height / self.height <= MAX_MEASURED_HEIGHT_RATIO)
                 and min(left, right) / max(left, right, 1.e-9) >= MIN_MEASURED_SIDE_BALANCE
-                and math.dist(center, self.center) / self.height <= self.max_center_offset_ratio)
+                and math.dist(center, self.center) <= self.center_limit_px)
 
     def diagnostics(self):
         return {"policy": "conservative_candidate_head_screen", "image_scope": "full_image",
                 "edge_region": None if self.edge_region is None else self.edge_region.diagnostics(),
                 "center_u_px": self.center[0], "center_v_px": self.center[1],
                 "height_px": self.height, "max_center_offset_ratio": self.max_center_offset_ratio,
+                "center_tolerance_px": self.center_limit_px,
+                "pixel_size": None if self.pixel_size is None else self.pixel_size.diagnostics(),
                 "hint_center_refinement_allowance_px": 10.,
-                "measured_height_ratio": (MIN_MEASURED_HEIGHT_RATIO, MAX_MEASURED_HEIGHT_RATIO),
+                "measured_height_ratio": ((MIN_MEASURED_HEIGHT_RATIO, MAX_MEASURED_HEIGHT_RATIO)
+                                          if self.pixel_size is None else None),
                 "minimum_measured_side_balance": MIN_MEASURED_SIDE_BALANCE,
                 "supplies_corners": False, "qr_used": False, "motion_authorized": False}

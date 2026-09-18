@@ -92,6 +92,7 @@ from scripts.aufgabe04.real_robot.configuration.geometry import (
     project_optical_point,
     transform_point,
 )
+from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256,
     camera_info_mismatches,
@@ -1774,6 +1775,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 canny_high=resolved_stand_axis_profile.canny_high,
                 proposal_filter=current_scan_proposal_filter,
                 lidar_edge_region=lidar_edge_region,
+                depth_uncertainty_m=self.args.stand_uncertainty_m+self.args.stand_radius_m,
+                camera_vertical=rotate_vector((0., 0., 1.), camera_rotation),
                 lidar_edge_region_diagnostics=lidar_edge_region_diagnostics,
                 source_support=ImageSourceSupport(self.cv2, rectified_source_support(
                     camera_calibration_from_info(camera_info.value), self.cv2, self.numpy,

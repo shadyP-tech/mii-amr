@@ -101,7 +101,7 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
                          search_bounds=None, rail_groups_out=None,
                          preferred_head_height_px=None, all_rail_groups_out=None,
                          candidate_search=None, guidance_diagnostics=None, source_support=None,
-                         edge_region=None, edge_region_diagnostics=None):
+                         edge_region=None, edge_region_diagnostics=None, metric_search=None):
     """Pair current line segments, using candidate scale only to order hints."""
     import numpy as np
 
@@ -137,6 +137,14 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
             continue
         if source_support is not None and not source_support.segment(first, last):
             continue
+        if metric_search is not None:
+            bx0, by0, bx1, by1 = metric_search.image_bounds(gray.shape)
+            midpoint = ((first[0]+last[0])/2., (first[1]+last[1])/2.)
+            size = metric_search.pixel_size
+            upper = size.max_width_px if direction == 0 else size.max_height_px
+            if (not bx0 <= midpoint[0] < bx1 or not by0 <= midpoint[1] < by1
+                    or length > 1.8*upper):
+                continue
         if search_bounds is not None:
             # Before the fixed rail quota: remote room boundaries cannot displace
             # the selected candidate's rails simply by being longer.
@@ -296,6 +304,20 @@ def acquire_cold_head_proposal(
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contours")
     contours = cv2.findContours(locator_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
     diagnostics["input_contours"] = len(contours)
+    metric_search = candidate_search if getattr(candidate_search, "pixel_size", None) is not None else None
+    if metric_search is not None:
+        bx0, by0, bx1, by1 = metric_search.image_bounds(raw_edges.shape)
+        def metric_relevant(contour):
+            x, y, w, h = cv2.boundingRect(contour)
+            size = metric_search.pixel_size
+            # A contour is only a locator. Leave refinement margin and keep
+            # short texture loops available in the untouched raw evidence.
+            return (x >= bx0 and y >= by0 and x+w <= bx1 and y+h <= by1
+                    and h >= .85*size.min_height_px/(1.15*1.25)
+                    and h <= 1.5*size.max_height_px
+                    and w <= 1.5*size.max_width_px)
+        contours = [contour for contour in contours if metric_relevant(contour)]
+        diagnostics["metric_contours_rejected"] = diagnostics["input_contours"]-len(contours)
     if search_bounds is not None:
         x0, y0, x1, y1 = search_bounds.image_bounds(raw_edges.shape)
         def relevant(contour):
@@ -340,7 +362,9 @@ def acquire_cold_head_proposal(
     hints, rail_counts = _rail_endpoint_hints(cv2, gray, raw_edges,
                                             deadline_monotonic_sec=deadline_monotonic_sec,
                                             search_bounds=search_bounds, rail_groups_out=rail_groups,
-                                            preferred_head_height_px=_preferred_rail_height_px,
+                                            preferred_head_height_px=(metric_search.height if metric_search is not None
+                                                                      else _preferred_rail_height_px),
+                                            metric_search=metric_search,
                                             all_rail_groups_out=all_rail_groups,
                                             candidate_search=candidate_search if _guided_rail_search else None,
                                             source_support=getattr(proposal_filter, "source_support", None),
