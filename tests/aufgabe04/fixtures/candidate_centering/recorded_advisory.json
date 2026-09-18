@@ -1,0 +1,82 @@
+{
+  "anchor_odom_pose": {
+    "x_m": 0.9565960440294239,
+    "y_m": 0.08085072877455768,
+    "yaw_rad": -3.0033416782248183
+  },
+  "anchor_pose": {
+    "x_m": -0.5776098652296793,
+    "y_m": -0.3839827810313183,
+    "yaw_rad": -3.056620945064009
+  },
+  "associated_range_m": 0.5575000047683716,
+  "association_source": "current_measured_head_unique_lidar_cluster",
+  "base_from_camera": {
+    "child_frame": "camera",
+    "parent_frame": "base_footprint",
+    "rotation_xyzw": [
+      -0.46711361711467086,
+      0.4831412431691034,
+      -0.5243683107682289,
+      0.5228931846153061
+    ],
+    "translation_xyz_m": [
+      0.04553724525972719,
+      -0.004971307208605384,
+      0.12574663531904093
+    ]
+  },
+  "calibration_profile_sha256": "ef9251020036e0ab201ae6dc599594dfc382bd83a995bafdee6b194123b1b2c7",
+  "camera_centering_advisory_sha256": "0a60e1aede8f50988f942a28c1322ae8b37647ee4ba9d4f4447406ef686debf7",
+  "candidate_uid": "survey_candidate_0001",
+  "completed_turn_count": 0,
+  "completion_authorized": false,
+  "consumed_rotation_rad": 0.0,
+  "created_at_sec": 1789738548.9836018,
+  "deadband_px": 11.188300685876186,
+  "eligible_cluster_count": 1,
+  "image_stamp_sec": 1789738548.702989,
+  "image_width_px": 800,
+  "intrinsics": {
+    "cx_px": 405.8708878028196,
+    "cy_px": 300.7059996561025,
+    "fx_px": 640.977317007246,
+    "fy_px": 641.1612206204627,
+    "height_px": 600,
+    "width_px": 800
+  },
+  "measured_center_px": [
+    334.2420668740405,
+    290.10007286496034
+  ],
+  "motion_authorized": false,
+  "motion_epoch": 0,
+  "odom_stamp_sec": 1789738548.702989,
+  "planning_frame": "map",
+  "remaining_rotation_budget_rad": 0.20943951023931956,
+  "requested_yaw_rad": 0.09393989324205324,
+  "required_yaw_rad": 0.09393989324205324,
+  "robot_profile_sha256": "3cb6c9c3a07c10d7b1220c66b8ccc016d216d4e0230592a8366cad19961a3cac",
+  "scan_from_camera": {
+    "child_frame": "camera",
+    "parent_frame": "base_scan",
+    "rotation_xyzw": [
+      -0.46711361711467086,
+      0.4831412431691034,
+      -0.5243683107682289,
+      0.5228931846153061
+    ],
+    "translation_xyz_m": [
+      0.07753724525972719,
+      -0.004971307208605384,
+      -0.05625336468095905
+    ]
+  },
+  "scan_stamp_sec": 1789738548.7111156,
+  "schema_version": 1,
+  "selected_cluster_sample_count": 4,
+  "stand_model_profile_sha256": "56fe19dcbfc8aa58682ea460e702a499c65cc719423940e6a892ca581e6d0b5f",
+  "stream_id": "stand_explore_exact2_camera_all5_20260918T132946Z_survey_candidate_0001",
+  "target_key": "stand_explore_exact2_camera_all5_20260918T132946Z_survey_candidate_0001:survey_candidate_0001:-1.117459661:-0.413061514",
+  "target_u_px": 400.0
+}

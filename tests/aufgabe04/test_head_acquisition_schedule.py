@@ -101,7 +101,14 @@ class AcquisitionFailureObserverTests(unittest.TestCase):
                 adapter = fixture.make_adapter()
                 adapter.stand_model_profile.environment = "physical"
                 adapter.stand_model_profile.committable = True
+                adapter.stand_model_profile.head_depth_m = .006
+                adapter.stand_model_profile.tolerance_m = .002
                 frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
+                # Geometry is injected below; keep the colour hint independent
+                # of this scheduling test's deliberately minimal camera stub.
+                stack.enter_context(patch(
+                    "scripts.aufgabe04.perception.stand_color_support.color_edge_support",
+                    return_value=numpy.zeros(frame.shape[:2], numpy.uint8)))
                 module = "scripts.aufgabe04.real_robot.observer.node."
                 for name in ("camera_info_mismatches", "transform_mismatches"):
                     stack.enter_context(patch(module + name, return_value=()))

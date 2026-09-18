@@ -1776,6 +1776,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 proposal_filter=current_scan_proposal_filter,
                 lidar_edge_region=lidar_edge_region,
                 depth_uncertainty_m=self.args.stand_uncertainty_m+self.args.stand_radius_m,
+                position_uncertainty_m=(self.args.stand_uncertainty_m+self.args.stand_radius_m
+                    if lidar_edge_region is not None else None),
                 camera_vertical=rotate_vector((0., 0., 1.), camera_rotation),
                 lidar_edge_region_diagnostics=lidar_edge_region_diagnostics,
                 source_support=ImageSourceSupport(self.cv2, rectified_source_support(

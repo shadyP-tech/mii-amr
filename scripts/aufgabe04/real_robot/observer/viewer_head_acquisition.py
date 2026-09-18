@@ -79,6 +79,7 @@ def evaluate_viewer_head(
     lidar_edge_region=None,
     lidar_edge_region_diagnostics=None,
     depth_uncertainty_m=.02,
+    position_uncertainty_m=None,
     camera_vertical=(0., 1., 0.),
 ):
     """Measure full-frame geometry once, returning neutral side classification.
@@ -106,6 +107,7 @@ def evaluate_viewer_head(
                 fx=intrinsics.fx_px, fy=intrinsics.fy_px, cx=intrinsics.cx_px, cy=intrinsics.cy_px,
                 image_shape=frame.shape, center=candidate_search.center,
                 depth_uncertainty_m=depth_uncertainty_m, camera_vertical=camera_vertical,
+                position_uncertainty_m=position_uncertainty_m,
                 max_center_offset_ratio=max_center_offset_ratio, edge_region=lidar_edge_region)
         except ValueError:
             candidate_search = None

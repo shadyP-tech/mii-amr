@@ -96,6 +96,7 @@ def estimate_stand_axis_from_metric_model(
     deadline_monotonic_sec: float | None = None,
     qr_marker_policy: str = "auto",
     edge_exclusion_mask=None,
+    color_support_mask=None,
 ) -> tuple[StandAxisImageEstimate, StandAxisEdgeDebugArtifacts]:
     """Fit physical head angles from current pixels independently of QR.
 
@@ -173,6 +174,10 @@ def estimate_stand_axis_from_metric_model(
         return edges
 
     physical_head = bool(model_profile.committable and model_profile.environment == "physical")
+    if color_support_mask is not None and (
+            color_support_mask.ndim != 2 or color_support_mask.shape != frame.shape[:2]
+            or str(color_support_mask.dtype) != "uint8"):
+        raise ValueError("colour support must be a uint8 mask of the exact processing image")
     head_result = None
     if physical_head:
         def fit_current_head():
@@ -195,6 +200,7 @@ def estimate_stand_axis_from_metric_model(
                 current_head_refinement=current_head_refinement,
                 candidate_search=candidate_search,
                 proposal_filter=proposal_filter,
+                color_support_mask=color_support_mask,
                 pose_hint=pose_hint,
                 expected_head_center_u_px=expected_head_center_u_px,
                 expected_head_center_v_px=expected_head_center_v_px,
@@ -207,7 +213,7 @@ def estimate_stand_axis_from_metric_model(
         # A callback can depend on a changing scan, clock or persistence state.
         # Even the same callable and image cannot certify that context again.
         if (current_image_head_fit is None or proposal_filter is not None
-                or edge_exclusion_mask is not None):
+                or edge_exclusion_mask is not None or color_support_mask is not None):
             raw_edges, head_result = fit_current_head()
         else:
             raw_edges, head_result = current_image_head_fit.compute(

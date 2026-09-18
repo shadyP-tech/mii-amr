@@ -51,3 +51,59 @@ def test_missing_floor_extrinsic_and_tied_ranges_stay_unavailable(profile):
     assert search(profile,base_from_camera=None)[0] is None
     result,info=search(profile,scan(((-.25,.5),(.25,.5))))
     assert result is None and info["reason"]=="nearest_head_scan_candidates_ambiguous"
+
+
+def seam_scan(**changes):
+    step = math.tau/360
+    ranges = [math.inf]*360
+    for index in (-3, -2, -1, 0, 1, 2, 3):
+        ranges[index] = .5/math.cos(index*step)
+    return replace(PlainLaserScan(tuple(ranges), 0., step, .08, 3.5,
+        "base_scan", 10., 10.01, 359*step, "full_rotation"), **changes)
+
+
+def test_validated_scan_seam_is_joined_before_nearest_target_comparison(profile):
+    prior, info = search(profile, seam_scan())
+    assert prior is not None, info
+    assert info["scan_topology"]["circular_adjacency_enabled"]
+    assert len(info["candidates"]) == 1
+    assert info["candidates"][0]["scan_indices"] == (357, 358, 359, 0, 1, 2, 3)
+    assert info["candidates"][0]["wraps_scan_seam"]
+    assert prior.edge_region is not None and prior.center_bounds_px is not None
+
+
+@pytest.mark.parametrize("changes", ({"scan_topology_profile": "linear"},
+    {"angle_max": None}, {"angle_max": 358*math.tau/360},
+    {"angle_increment": math.pi/360, "angle_max": 359*math.pi/360}))
+def test_partial_or_unproven_scan_seam_never_merges(profile, changes):
+    _, info = search(profile, seam_scan(**changes))
+    assert not info["scan_topology"]["circular_adjacency_enabled"]
+    assert not any(c["wraps_scan_seam"] for c in info["candidates"])
+
+
+def test_full_rotation_does_not_bridge_a_missing_endpoint(profile):
+    current = seam_scan()
+    ranges = list(current.ranges)
+    ranges[-1] = math.inf
+    _, info = search(profile, replace(current, ranges=tuple(ranges)))
+    assert not any(c["wraps_scan_seam"] for c in info["candidates"])
+
+
+def test_viewer_preserves_original_scan_geometry_and_recording_values():
+    from collections import deque
+    import threading
+    from types import SimpleNamespace
+    from scripts.aufgabe04.perception.debug.stand_axis_viewer import RosLaserScanRangeSource
+    from scripts.aufgabe04.perception.debug.recording_metadata import recording_metadata
+    source = object.__new__(RosLaserScanRangeSource)
+    source._lock, source._scans = threading.Lock(), deque(maxlen=80)
+    source.scan_topology_profile = "full_rotation"
+    source._on_scan(SimpleNamespace(ranges=(.5, math.inf, .6), angle_min=0.,
+        angle_increment=math.tau/3, angle_max=2*math.tau/3, range_min=.08, range_max=3.5,
+        header=SimpleNamespace(frame_id="base_scan", stamp=SimpleNamespace(sec=10, nanosec=0))))
+    scan = source.latest_scan()
+    assert scan.angle_max == 2*math.tau/3 and scan.scan_topology_profile == "full_rotation"
+    metadata = recording_metadata(scan)
+    assert metadata["ranges"] == [.5, None, .6]
+    assert metadata["angle_increment"] == math.tau/3
+    assert metadata["scan_stamp_sec"] == 10.

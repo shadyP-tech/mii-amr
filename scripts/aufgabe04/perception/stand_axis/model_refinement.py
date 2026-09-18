@@ -95,6 +95,8 @@ def refine_projected_head_border(
     *,
     maximum_parallel_side_length_ratio: float = 1.30,
     corridor_half_width_px: float | None = None,
+    prefer_outer_metric_rail: bool = False,
+    color_support_mask=None,
 ) -> RefinedHeadMeasurement:
     """Fit the four physical rails using only current raw-Canny pixels."""
 
@@ -123,6 +125,8 @@ def refine_projected_head_border(
         # the independently fitted top/bottom and side lines instead of growing
         # side runs along aligned background structure.
         recover_parallel_endpoints=False,
+        prefer_outer_metric_rail=prefer_outer_metric_rail,
+        color_support_mask=color_support_mask,
     )
     if corners is None:
         return RefinedHeadMeasurement(

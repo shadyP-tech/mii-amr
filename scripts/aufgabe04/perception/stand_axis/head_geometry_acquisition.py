@@ -56,6 +56,8 @@ def estimate_current_head_geometry(
     proposal_filter=None,
     source_support=None,
     edge_exclusion_mask=None,
+    color_support_mask=None,
+    use_color_prior=True,
     estimator=None,
 ):
     """Run the same full-image cold/tracked metric path in both consumers.
@@ -71,6 +73,9 @@ def estimate_current_head_geometry(
     filter disables geometry reuse because scan/clock context can change.
     An optional uint8 edge exclusion removes Canny evidence before acquisition
     and fitting, while leaving source pixels available for QR decoding.
+    Colour support is separate: it only ranks existing coherent rails, and
+    leaves all raw edge pixels intact. Metric searches use the shared stand
+    palette by default; callers can override the mask or disable this hint.
     ``estimator`` is an injection seam for consumer tests; production uses the
     shared metric fitter.
     """
@@ -81,6 +86,13 @@ def estimate_current_head_geometry(
     edge_region = getattr(candidate_search, "edge_region", None)
     if edge_region is not None and edge_region.shape != frame.shape[:2]:
         raise ValueError("LiDAR head region must match the exact processing image")
+    if (use_color_prior and color_support_mask is None
+            and getattr(candidate_search, "pixel_size", None) is not None):
+        import numpy as np
+        from scripts.aufgabe04.perception.stand_color_support import color_edge_support
+        color_support_mask = color_edge_support(cv2, np, frame)
+    if not use_color_prior:
+        color_support_mask = None
     result = fit(
         cv2,
         frame,
@@ -106,6 +118,8 @@ def estimate_current_head_geometry(
                          source_support.filter(proposal_filter)),
         **({"edge_exclusion_mask": edge_exclusion_mask}
            if edge_exclusion_mask is not None else {}),
+        **({"color_support_mask": color_support_mask}
+           if color_support_mask is not None else {}),
     )
     metric_search = candidate_search if getattr(candidate_search, "pixel_size", None) is not None else None
     if source_support is None and edge_region is None and metric_search is None:

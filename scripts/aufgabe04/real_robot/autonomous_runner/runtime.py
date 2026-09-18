@@ -125,6 +125,9 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
     load_real_robot_profile,
     real_robot_profile_sha256,
 )
+from scripts.aufgabe04.real_robot.execution.candidate_centering import (
+    CandidateCenteringChildRequest, run_candidate_centering_child, validate_candidate_centering_dependencies,
+)
 from scripts.aufgabe04.real_robot.autonomous_runner.camera_inspection_binding import (
     load_bound_camera_inspection,
 )
@@ -1951,9 +1954,6 @@ def _run_camera_centering_turn(*, profile, args, master_authorization_path,
         minimum_clearance_m, candidate, advisory_path, output_dir, view_id,
         turn_index, remaining_travel_rad, previous_result_path):
     from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
-    from scripts.aufgabe04.real_robot.execution.candidate_centering import (
-        CandidateCenteringChildRequest, run_candidate_centering_child,
-    )
     payload = json.loads(Path(advisory_path).read_text())
     stream_id = f"{args.session_id}_{candidate.candidate_uid}"
     advisory = validate_camera_centering_advisory(
@@ -2163,6 +2163,8 @@ def main(argv=None) -> int:
         parser.error(f"refusing to reuse existing session: {session_root}")
     try:
         profile = load_real_robot_profile(args.robot_profile)
+        if resolved_run_mode.camera_phase_enabled:
+            validate_candidate_centering_dependencies()
         calibration = load_camera_calibration(args.camera_calibration)
         site_contract = validate_physical_site_contract(
             args.physical_site,
@@ -3095,6 +3097,7 @@ def main(argv=None) -> int:
 
     except (
         AssertionError,
+        ImportError,
         KeyError,
         OSError,
         RuntimeError,

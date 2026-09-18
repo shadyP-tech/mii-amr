@@ -21,6 +21,8 @@ from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import chec
 def refine_current_physical_head(
     cv2, raw_edges, *, model_profile, proposal_corners,
     deadline_monotonic_sec=None,
+    prefer_outer_metric_rail=False,
+    color_support_mask=None,
 ) -> tuple[RefinedHeadMeasurement, HeadOuterBorderEvidence, HeadBorderSeed]:
     """Apply the metric fitter's unchanged raw-border policy to a valid proposal.
 
@@ -35,12 +37,15 @@ def refine_current_physical_head(
     check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_raw_refinement")
     refinement = refine_projected_head_border(
         cv2, raw_edges, seed.corners, corridor_half_width_px=seed.corridor_half_width_px,
+        color_support_mask=color_support_mask,
     )
     check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_raw_refinement")
     refinement, outer_recovery = select_current_outer_head_border(
         cv2, raw_edges, model_profile=model_profile, refinement=refinement,
         corridor_half_width_px=seed.corridor_half_width_px,
         neutral_proposal_corners=seed.corners,
+        prefer_outer_metric_rail=prefer_outer_metric_rail,
+        color_support_mask=color_support_mask,
         deadline_monotonic_sec=deadline_monotonic_sec,
     )
     return refinement, outer_recovery, seed

@@ -182,6 +182,7 @@ class CandidateCenteringRuntimeMixin:
             if error * direction < 0:
                 return finish("stopped", "centering overshot the requested angle")
             speed = centering_angular_command(error)
+            speed = math.copysign(min(abs(speed), self.follower_config.controller.max_angular_radps), speed)
             # Reserve one control cycle plus the tight stop margin before the
             # absolute travel boundary. Actual stop motion is checked again.
             if travel + abs(speed) * period + STOP_TOLERANCE_RAD >= remaining:

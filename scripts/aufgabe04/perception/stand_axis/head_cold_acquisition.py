@@ -130,8 +130,9 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
         if direction is None:
             continue
         first, last = (float(x0), float(y0)), (float(x1), float(y1))
-        if edge_region is not None and not edge_region.contains(
-                (ImagePoint(*first), ImagePoint(*last))):
+        if (getattr(metric_search, "center_bounds_px", None) is None
+                and edge_region is not None and not edge_region.contains(
+                (ImagePoint(*first), ImagePoint(*last)))):
             if edge_region_diagnostics is not None:
                 edge_region_diagnostics["rejected_line_segments"] += 1
             continue
@@ -142,8 +143,8 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
             midpoint = ((first[0]+last[0])/2., (first[1]+last[1])/2.)
             size = metric_search.pixel_size
             upper = size.max_width_px if direction == 0 else size.max_height_px
-            if (not bx0 <= midpoint[0] < bx1 or not by0 <= midpoint[1] < by1
-                    or length > 1.8*upper):
+            if (length > 1.8*upper or (metric_search.center_bounds_px is None
+                    and (not bx0 <= midpoint[0] < bx1 or not by0 <= midpoint[1] < by1))):
                 continue
         if search_bounds is not None:
             # Before the fixed rail quota: remote room boundaries cannot displace
@@ -192,6 +193,15 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
                 strata.setdefault(key, []).append(item)
             groups[direction][:] = [bucket[index] for index in range(max(map(len, strata.values()), default=0))
                                     for _key, bucket in sorted(strata.items()) if index < len(bucket)][:MAX_RAILS_PER_DIRECTION]
+        if getattr(metric_search, "center_bounds_px", None) is not None and edge_region is not None:
+            # Do not refill slots vacated by the volume gate with ever more
+            # inset/printed rails. That makes a tighter mask increase the
+            # number of competing rectangles despite fewer input edge pixels.
+            retained = [item for item in groups[direction] if edge_region.contains(
+                (ImagePoint(*item[1]), ImagePoint(*item[2])))]
+            if edge_region_diagnostics is not None:
+                edge_region_diagnostics["rejected_line_segments"] += len(groups[direction])-len(retained)
+            groups[direction][:] = retained
         group = groups[direction]
         cross = 1 - direction
         for index, (length, first, last) in enumerate(group):
@@ -233,6 +243,7 @@ def acquire_cold_head_proposal(
     expected_head_height_px=None, max_center_offset_ratio=.70,
     expected_head_height_tolerance_ratio=.35, proposal_filter=None,
     model_profile=None, refinement_out=None, candidate_search=None,
+    color_support_mask=None,
     _preferred_rail_height_px=None, _verification_limit=None, _attempt_diagnostics=None,
     _guided_rail_search=False,
 ) -> HeadProposalResult:
@@ -267,6 +278,8 @@ def acquire_cold_head_proposal(
         "resolved_hint_aliases": 0, "raw_border_refinements": 0,
         "candidate_screen": None if candidate_search is None else candidate_search.diagnostics(),
         "candidate_screen_hint_rejections": 0, "candidate_screen_measurement_rejections": 0,
+        "color_prior": {"applied": color_support_mask is not None,
+                        "policy": "coherent_rail_ranking_only", "raw_edges_unchanged": True},
     })
 
     def result(reason, proposal=None):
@@ -295,6 +308,10 @@ def acquire_cold_head_proposal(
         )
     if raw_edges.ndim != 2 or raw_edges.shape != frame_bgr.shape[:2]:
         raise ValueError("raw_edges must match the cold search image")
+    if color_support_mask is not None and (
+            color_support_mask.ndim != 2 or color_support_mask.shape != raw_edges.shape
+            or str(color_support_mask.dtype) != "uint8"):
+        raise ValueError("colour support must be a uint8 mask of the exact processing image")
     edge_region = getattr(candidate_search, "edge_region", None)
     locator_edges = raw_edges if edge_region is None else edge_region.locator_edges(raw_edges)
     if edge_region is not None:
@@ -518,6 +535,8 @@ def acquire_cold_head_proposal(
             else:
                 measured, outer, _seed = refine_current_physical_head(
                     cv2, raw_edges, model_profile=model_profile, proposal_corners=corners,
+                    prefer_outer_metric_rail=getattr(metric_search, "center_bounds_px", None) is not None,
+                    color_support_mask=color_support_mask,
                     deadline_monotonic_sec=deadline_monotonic_sec)
                 diagnostics["raw_border_refinements"] += 1 + outer.attempted_raw_refinements
             diagnostics["strict_verifications"].append({
@@ -642,6 +661,7 @@ def acquire_cold_head_proposal(
             canny_low=canny_low, canny_high=canny_high,
             deadline_monotonic_sec=deadline_monotonic_sec, proposal_filter=proposal_filter,
             model_profile=model_profile, refinement_out=refinement_out, candidate_search=candidate_search,
+            color_support_mask=color_support_mask,
             _preferred_rail_height_px=candidate_search.height,
             _verification_limit=verification_limit-used, _attempt_diagnostics=retry_diagnostics,
             _guided_rail_search=_preferred_rail_height_px is not None)

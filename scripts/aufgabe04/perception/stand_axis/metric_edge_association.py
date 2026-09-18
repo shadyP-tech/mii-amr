@@ -17,6 +17,8 @@ def coherent_metric_rail_points(
     expected_length_px: float,
     minimum_coverage: float,
     fixed_direction=None,
+    outward_sign=0.,
+    color_support_mask=None,
 ):
     """Associate whole raw-edge rails before selecting one pixel per bin.
 
@@ -26,6 +28,10 @@ def coherent_metric_rail_points(
     Coverage of a coherent rail takes precedence over isolated pixels closer
     to the prediction. Comparable rails use projection distance to break ties;
     indistinguishable, spatially separate rails remain unobservable.
+    A position-bounded physical head may instead request the enclosing rail,
+    requiring at least 80 percent raw coverage in the same finite corridor.
+    Colour support is a soft ranking cue worth at most one pixel, never a mask
+    on returned evidence or a replacement for the raw corner checks.
     """
 
     import numpy
@@ -113,7 +119,19 @@ def coherent_metric_rail_points(
             continue
         # Ignore a few rasterization bins when comparing complete alternatives.
         coverage_rank = round(min(1.0, coverage) * 20.0) / 20.0
-        rank = (coverage_rank, -distance, -float(numpy.median(residuals[selected])))
+        colour = 0.
+        if color_support_mask is not None:
+            locations = numpy.rint(candidates[selected]).astype(numpy.int32)
+            colour = float(numpy.mean(color_support_mask[locations[:, 1], locations[:, 0]] > 0))
+        if outward_sign and coverage >= .80:
+            signed_offset = float((point-midpoint) @ reference_normal)*outward_sign
+            # A soft hint worth at most one pixel of outward displacement.
+            # Missing grey/overexposed mask support cannot delete a raw rail.
+            rank = (1., signed_offset+colour, coverage_rank, -float(numpy.median(residuals[selected])))
+        elif outward_sign:
+            continue
+        else:
+            rank = (coverage_rank, -distance+colour, -float(numpy.median(residuals[selected])))
         hypotheses.append((rank, point, normal, selected))
 
     if not hypotheses:

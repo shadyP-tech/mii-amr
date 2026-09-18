@@ -364,11 +364,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--color", choices=labels, default="green")
     parser.add_argument(
         "--edge-color", choices=("all", *labels), default="all",
-        help="Color-filter the edge preview and legacy detector. Metric head fitting preserves raw borders. --tune overrides the palette with the live HSV range.",
+        help="Color-filter the edge preview and legacy detector; softly rank metric head rails while preserving raw borders. --tune overrides the palette with the live HSV range.",
     )
     parser.add_argument(
         "--no-color-edge-mask", dest="color_edge_mask", action="store_false",
-        default=True, help="Disable HSV filtering of stand edges for comparison.",
+        default=True, help="Disable HSV preview filtering and metric rail ranking for comparison.",
     )
     parser.add_argument(
         "--axis-source",
@@ -531,6 +531,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Known optical-camera Z depth of the head in metres. With --head-target unique, constrain pixel size without assuming image location. Nearest mode uses calibrated LiDAR depth.")
     parser.add_argument("--head-depth-uncertainty-m", type=float, default=.02,
         help="Uncertainty of manually supplied --head-depth-m (default: 0.02 m).")
+    parser.add_argument("--head-position-uncertainty-m", type=float, default=.02,
+        help="Camera-frame lateral/vertical uncertainty of the calibrated nearest head centre (default: 0.02 m). Increase for uncertain stand registration.")
     parser.add_argument(
         "--camera-fx-px",
         type=float,
@@ -686,6 +688,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional ROS 2 sensor_msgs/LaserScan topic used to estimate stand distance.",
     )
+    parser.add_argument("--scan-topology-profile", choices=("linear", "full_rotation"),
+        default="linear", help="Scanner topology contract. Full rotation joins endpoints only when original angular metadata and physical spacing validate the seam.")
     parser.add_argument(
         "--odom-topic",
         default="/odom",
@@ -1290,9 +1294,11 @@ class RosLaserScanRangeSource:
         *,
         topic: str,
         max_scan_age_sec: float,
+        scan_topology_profile: str = "linear",
     ) -> None:
         self.topic = topic
         self.max_scan_age_sec = max_scan_age_sec
+        self.scan_topology_profile = scan_topology_profile
         self._lock = threading.Lock()
         self._latest_scan: PlainLaserScan | None = None
         self._scans: deque[PlainLaserScan] = deque(maxlen=80)
@@ -1365,6 +1371,8 @@ class RosLaserScanRangeSource:
             scan_frame_id=frame_id,
             scan_stamp_sec=scan_stamp_sec,
             receipt_sec=time.time(),
+            angle_max=float(msg.angle_max),
+            scan_topology_profile=self.scan_topology_profile,
         )
         with self._lock:
             self._latest_scan = scan
@@ -2392,6 +2400,8 @@ def _validate_runtime_args(args) -> None:
             raise ValueError("--head-depth-m requires --stand-model-profile")
     if not math.isfinite(args.head_depth_uncertainty_m) or args.head_depth_uncertainty_m < 0:
         raise ValueError("--head-depth-uncertainty-m must be finite and nonnegative")
+    if not math.isfinite(args.head_position_uncertainty_m) or args.head_position_uncertainty_m < 0:
+        raise ValueError("--head-position-uncertainty-m must be finite and nonnegative")
     if args.diagnostic_window_size_px <= 0:
         raise ValueError("--diagnostic-window-size-px must be positive")
     if args.stand_model_profile is not None and args.axis_source != "edges":
@@ -2704,6 +2714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         lidar_source = RosLaserScanRangeSource(
             topic=args.scan_topic,
             max_scan_age_sec=args.max_scan_age_sec,
+            scan_topology_profile=args.scan_topology_profile,
         )
         lidar_source.start()
     handoff_config = AxisHandoffConfig(
@@ -2964,6 +2975,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             axis_camera_cx_px = camera_cx_px
             axis_camera_cy_px = camera_cy_px
             target_roi = None
+            scan_for_head = None
             candidate_search_roi = None
             detected_head_roi = None
             diagnostic_head_roi = None
@@ -3411,12 +3423,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             scan_from_camera=calibration_snapshot.scan_from_camera,
                             base_from_camera=calibration_snapshot.base_from_camera,
                             model_profile=stand_model_profile,
+                            position_uncertainty_m=args.head_position_uncertainty_m,
                             fx=camera_fx_px, fy=camera_fy_px,
-                            cx=query_camera_cx_px, cy=query_camera_cy_px, image_shape=frame.shape)
-                        if nearest_search is not None and target_roi is not None:
-                            nearest_search = replace(nearest_search, center=(
-                                nearest_search.center[0]-target_roi.x0,
-                                nearest_search.center[1]-target_roi.y0))
+                            cx=axis_camera_cx_px, cy=axis_camera_cy_px, image_shape=axis_frame.shape)
                         if (nearest_search is None or last_nearest_search is None
                                 or math.dist(nearest_search.center, last_nearest_search.center)
                                    > .5*nearest_search.height
@@ -3454,9 +3463,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 pose_hint=prediction.pose,
                                 candidate_search=nearest_search,
                                 source_support=image_source_support,
-                                # HSV filtering can erase the warm or desaturated
-                                # sides of a grey head. Fit original current edges;
-                                # metric location/size bounds suppress background.
+                                use_color_prior=args.color_edge_mask,
+                                color_support_mask=(edge_color_support if target_roi is None
+                                    else None if edge_color_support is None else edge_color_support[
+                                        target_roi.y0:target_roi.y1, target_roi.x0:target_roi.x1]),
+                                # HSV ranks existing rails; original current
+                                # pixels still verify desaturated grey borders.
                                 edge_preprocess=args.edge_preprocess.replace("-", "_"),
                                 blur_kernel=args.edge_blur_kernel,
                                 canny_low=args.canny_low,
@@ -3470,7 +3482,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     metric_artifacts = replace(metric_artifacts, head_acquisition_diagnostics={
                         **(metric_artifacts.head_acquisition_diagnostics or {}),
-                        "color_mask_scope": "preview_and_legacy_only",
+                        "color_mask_scope": "preview_legacy_and_soft_rail_ranking",
                         "target_selection": nearest_metadata})
 
                 fallback_estimate = None
@@ -4626,6 +4638,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "source_frame": decoded_source_frame,
                     "metadata": recording_metadata({
                         "border_diagnostic": border_diagnostic,
+                        "head_target_scan": scan_for_head,
                         "source_sequence": read.sequence,
                         "source_stamp_sec": read.stamp_sec,
                         "source_frame_id": read.frame_id,

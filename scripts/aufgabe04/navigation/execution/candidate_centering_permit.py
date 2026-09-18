@@ -59,6 +59,16 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
     validate_camera_centering_advisory(advisory)
     if advisory.get("motion_authorized") is not False:
         raise ValueError("observation must not itself authorize motion")
+    from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
+    config = permit.get("runtime_config")
+    if not isinstance(config, dict) or config.get("use_sim_time") is not False:
+        raise ValueError("centering requires a physical runtime configuration")
+    resolved = resolve_runtime_config(RuntimeConfig(**config))
+    if (resolved.namespace != permit["namespace"] or resolved.cmd_vel_topic != permit["cmd_vel_topic"]
+            or resolved.base_frame != advisory["base_from_camera"]["parent_frame"]):
+        raise ValueError("centering runtime topic/frame binding mismatch")
+    if finite_number(permit.get("maximum_angular_speed_radps"), "maximum angular speed") <= 0:
+        raise ValueError("centering angular speed must be positive")
     turn = finite_number(permit.get("signed_turn_rad"), "signed_turn_rad")
     requested = finite_number(advisory.get("requested_yaw_rad"), "requested_yaw_rad")
     if not STOP_TOLERANCE_RAD < abs(turn) <= MAX_TURN_RAD + 1e-12:
@@ -120,7 +130,8 @@ def load_candidate_centering_result(path: Path, *, permit_path: Path | None = No
                 or result["maximum_translation_m"] > 0.01
                 or result["total_angular_travel_rad"] > MAX_TOTAL_TRAVEL_RAD + 1e-12
                 or abs(finite_number(result.get("final_yaw_error_rad"), "final_yaw_error_rad")) > STOP_TOLERANCE_RAD
-                or int(result.get("zero_command_count", 0)) < 10):
+                or type(result.get("zero_command_count")) is not int
+                or result["zero_command_count"] < 10):
             raise ValueError("centering result lacks a bounded stopped pose")
     if permit_path is not None:
         permit = load_candidate_centering_permit(permit_path)
@@ -131,4 +142,10 @@ def load_candidate_centering_result(path: Path, *, permit_path: Path | None = No
                 raise ValueError(f"centering result {field} mismatch")
         if abs(result["total_angular_travel_rad"] - result["actual_angular_travel_rad"] - permit["previous_angular_travel_rad"]) > 1e-12:
             raise ValueError("centering result total travel mismatch")
+        if result.get("status") == "completed" and (
+                result["actual_angular_travel_rad"] > permit["remaining_travel_rad"] + 1e-12
+                or result["actual_angular_travel_rad"] < abs(permit["signed_turn_rad"])-STOP_TOLERANCE_RAD
+                or result["stopped_at_sec"] <= max(permit["advisory"]["image_stamp_sec"],
+                                                  permit["advisory"]["scan_stamp_sec"])):
+            raise ValueError("centering result exceeds its budget or predates observation")
     return result

@@ -31,6 +31,7 @@ class CandidateHeadSearch:
     edge_region: LidarHeadEdgeRegion | None = None
     pixel_size: ProjectedHeadSize | None = None
     center_tolerance_px: float | None = None
+    center_bounds_px: tuple[float, float, float, float] | None = None
 
     def __post_init__(self):
         if (len(self.center) != 2
@@ -41,6 +42,32 @@ class CandidateHeadSearch:
         if self.center_tolerance_px is not None and (
                 not math.isfinite(self.center_tolerance_px) or self.center_tolerance_px <= 0):
             raise ValueError("candidate centre tolerance must be finite and positive")
+        if self.center_bounds_px is not None:
+            x0, y0, x1, y1 = self.center_bounds_px
+            if not all(math.isfinite(v) for v in self.center_bounds_px) or x0 >= x1 or y0 >= y1:
+                raise ValueError("invalid metric centre bounds")
+
+    def accepts_center(self, center, margin=0.):
+        if self.center_bounds_px is None:
+            return True
+        x0, y0, x1, y1 = self.center_bounds_px
+        return x0-margin <= center[0] <= x1+margin and y0-margin <= center[1] <= y1+margin
+
+    @staticmethod
+    def projected_center(corners):
+        """The physical rectangle centre projects to its diagonal intersection.
+
+        Averaging image corners is biased toward the nearer side under yaw;
+        it can reject a correct close head at the position-uncertainty bound.
+        """
+        a, b, c, d = order_corners(corners)
+        vx, vy = c.u_px-a.u_px, c.v_px-a.v_px
+        wx, wy = d.u_px-b.u_px, d.v_px-b.v_px
+        denominator = vx*wy-vy*wx
+        if abs(denominator) < 1.e-9:
+            return (math.nan, math.nan)
+        fraction = ((b.u_px-a.u_px)*wy-(b.v_px-a.v_px)*wx)/denominator
+        return (a.u_px+fraction*vx, a.v_px+fraction*vy)
 
     @property
     def center_limit_px(self):
@@ -76,6 +103,7 @@ class CandidateHeadSearch:
         width, height, center = _extent(corners)
         if self.pixel_size is not None:
             return (self.pixel_size.accepts(width, height, refinement_allowance=True)
+                    and self.accepts_center(self.projected_center(corners), 10.)
                     and math.dist(center, self.center) <= self.center_limit_px+10.)
         largest_growth = max((1., *OUTER_HEAD_SEARCH_GROWTH_FACTORS))
         # Coordinates reconstructed at an envelope endpoint can lose a few ulps.
@@ -91,7 +119,11 @@ class CandidateHeadSearch:
         tl, tr, br, bl = order_corners(corners)
         left, right = _distance(tl, bl), _distance(tr, br)
         return ((self.edge_region is None or self.edge_region.contains(corners))
-                and (self.pixel_size.accepts(width, height) if self.pixel_size is not None
+                and self.accepts_center(self.projected_center(corners))
+                # These bounds describe each upright physical side. Averaging
+                # them can conceal one short rail ending in QR/background texture.
+                and (all(self.pixel_size.accepts(width, side) for side in (left, right))
+                     if self.pixel_size is not None
                      else MIN_MEASURED_HEIGHT_RATIO <= height / self.height <= MAX_MEASURED_HEIGHT_RATIO)
                 and min(left, right) / max(left, right, 1.e-9) >= MIN_MEASURED_SIDE_BALANCE
                 and math.dist(center, self.center) <= self.center_limit_px)
@@ -102,6 +134,7 @@ class CandidateHeadSearch:
                 "center_u_px": self.center[0], "center_v_px": self.center[1],
                 "height_px": self.height, "max_center_offset_ratio": self.max_center_offset_ratio,
                 "center_tolerance_px": self.center_limit_px,
+                "center_bounds_px": self.center_bounds_px,
                 "pixel_size": None if self.pixel_size is None else self.pixel_size.diagnostics(),
                 "hint_center_refinement_allowance_px": 10.,
                 "measured_height_ratio": ((MIN_MEASURED_HEIGHT_RATIO, MAX_MEASURED_HEIGHT_RATIO)

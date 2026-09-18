@@ -4,6 +4,7 @@ import math
 
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
 from scripts.aufgabe04.perception.models import LidarStandDetectorConfig
+from scripts.aufgabe04.perception.scan_topology import ScanTopology
 from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector, transform_point
 
@@ -16,7 +17,8 @@ def _inverse_point(point, transform):
 
 def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec,
                              scan_from_camera, base_from_camera, model_profile,
-                             fx, fy, cx, cy, image_shape, sync_tolerance_sec=.15):
+                             fx, fy, cx, cy, image_shape, sync_tolerance_sec=.15,
+                             position_uncertainty_m=.02):
     """Project the nearest isolated stand-sized scan cluster into the full image.
 
     Uses measured floor-relative extrinsics and model head height. This is a
@@ -42,11 +44,16 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
     if (not all(math.isfinite(v) for v in (fx, fy, cx, cy)) or min(fx, fy) <= 0.
             or not model_profile.committable or model_profile.environment != "physical"):
         return fail("nearest_head_metric_context_invalid")
+    topology = ScanTopology(len(scan.ranges), scan.angle_min, scan.angle_increment,
+                            scan.angle_max, scan.scan_topology_profile)
+    info["scan_topology"] = topology.evidence()
     config = LidarStandDetectorConfig(min_width_m=.012,
         max_width_m=1.5*model_profile.head_width_m + 2*model_profile.tolerance_m,
         max_cluster_gap_m=.04, min_cluster_points=2)
     clusters = detect_stand_candidates_from_scan(scan.ranges,
-        angle_min_rad=scan.angle_min, angle_increment_rad=scan.angle_increment, config=config)
+        angle_min_rad=scan.angle_min, angle_increment_rad=scan.angle_increment,
+        angle_max_rad=scan.angle_max, scan_topology_profile=scan.scan_topology_profile,
+        config=config)
     projected = []
     for cluster in clusters:
         surface_camera = _inverse_point((cluster.center_x_m, cluster.center_y_m, 0.), scan_from_camera)
@@ -64,7 +71,8 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
         projected.append((distance, u, v, height, cluster, point[2]))
     projected.sort(key=lambda p: p[0])
     info["candidates"] = [{"range_m": d, "center_u_px": u, "center_v_px": v,
-                           "height_px": h, "scan_indices": c.source_indices}
+                           "height_px": h, "scan_indices": c.source_indices,
+                           "wraps_scan_seam": c.wraps_scan_seam}
                           for d, u, v, h, c, depth in projected]
     if not projected:
         return fail("nearest_head_no_visible_scan_candidate")
@@ -76,6 +84,7 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
         search = metric_head_search(model_profile=model_profile, depth_m=depth,
             fx=fx, fy=fy, cx=cx, cy=cy, image_shape=image_shape, center=(u, v),
             camera_vertical=rotate_vector((0., 0., 1.), (-x, -y, -z, w)),
+            position_uncertainty_m=position_uncertainty_m,
             max_center_offset_ratio=.70)
     except ValueError:
         return fail("nearest_head_metric_context_invalid")

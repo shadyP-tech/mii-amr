@@ -6,6 +6,8 @@ live motion and stopped arrival admission. Every new capture owns a new epoch.
 from __future__ import annotations
 
 import math
+import json
+import os
 from pathlib import Path
 import time
 
@@ -33,17 +35,20 @@ def capture_with_centering(
     if not math.isfinite(timeout_sec) or timeout_sec <= 0:
         raise ValueError("camera timeout must be finite and positive")
     state_path = output_dir / "centering_progress.json"
-    if state_path.exists():
+    history_dir = output_dir / "centering_history"
+    if state_path.exists() or state_path.is_symlink() or history_dir.exists():
         raise RuntimeError("refusing to reset an existing inspection centering budget")
     deadline = monotonic() + timeout_sec
     history = []
     travel = 0.
     not_before = None
     previous_result_path = None
+    revision = 0
 
     def persist(phase):
+        nonlocal revision
         output_dir.mkdir(parents=True, exist_ok=True)
-        write_content_hashed_json(state_path, {
+        payload = {
             "schema_version": 1, "candidate_uid": candidate_uid,
             "physical_view_index": view_index, "phase": phase,
             "maximum_turn_count": MAX_CENTERING_TURNS,
@@ -51,7 +56,14 @@ def capture_with_centering(
             "actual_angular_travel_rad": travel,
             "observation_not_before_sec": not_before,
             "turn_history": history, "motion_authorized": False,
-        }, hash_field="candidate_centering_progress_sha256")
+        }
+        receipt = history_dir / f"revision_{revision:03d}.json"
+        digest = write_content_hashed_json(receipt, payload, hash_field="candidate_centering_progress_sha256")
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({**payload, "latest_revision_path": str(receipt),
+            "latest_revision_sha256": digest}, indent=2, sort_keys=True)+"\n")
+        os.replace(temporary, state_path)
+        revision += 1
 
     while True:
         remaining_sec = deadline - monotonic()
@@ -83,10 +95,15 @@ def capture_with_centering(
         history.append({"turn_index": turn_index, "state": "reserved",
                         "advisory_path": str(advisory_path)})
         persist("turn_reserved")  # A failed attempt must not renew authority.
-        frame, outcome = turn(
-            frame, advisory_path, output_dir / f"recenter_{turn_index + 1:02d}",
-            turn_index, MAX_CENTERING_TRAVEL_RAD - travel, previous_result_path,
-        )
+        try:
+            frame, outcome = turn(
+                frame, advisory_path, output_dir / f"recenter_{turn_index + 1:02d}",
+                turn_index, MAX_CENTERING_TRAVEL_RAD - travel, previous_result_path,
+            )
+        except Exception as exc:
+            history[-1].update(state="failed", reason=f"{type(exc).__name__}: {exc}")
+            persist("turn_failed")
+            raise
         result = outcome.result
         actual = result.get("actual_angular_travel_rad")
         stopped = result.get("stopped_at_sec")

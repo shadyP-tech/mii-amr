@@ -26,4 +26,7 @@ export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
 export LDS_MODEL="${LDS_MODEL:-LDS-02}"
 
 cd "${REPO_DIR}"
-python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer "$@"
+# This launcher configures the TurtleBot LDS full-rotation scanner. The viewer
+# still validates the original angular metadata and endpoint distance before
+# joining a seam; an explicit later CLI argument can select linear scans.
+python3 -m scripts.aufgabe04.perception.debug.stand_axis_viewer --scan-topology-profile full_rotation "$@"

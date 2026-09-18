@@ -915,6 +915,36 @@ def run_startup_active_localization_motion(
 ) -> StartupActiveLocalizationMotionResult:
     """Execute one bounded active-localization turn from the sole ROS edge."""
 
+    return _run_in_place_motion(runtime_config, follower_config,
+        controller_trace_path=controller_trace_path, route_kind="startup_active_localization",
+        stop_command_count=active_config.stop_command_count,
+        run_motion=lambda node: node.run_startup_active_localization(active_config, attempt_index=attempt_index))
+
+
+def run_candidate_centering_motion(permit):
+    """Use the existing follower publisher, live checks and exception stop."""
+    from scripts.aufgabe04.navigation.execution.candidate_centering_permit import validate_centering_permit
+    from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
+    from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
+    from scripts.aufgabe04.navigation.control.driving_behavior import CommandSmoothingConfig
+    permit = validate_centering_permit(permit)
+    runtime_config = resolve_runtime_config(RuntimeConfig(**permit["runtime_config"]))
+    follower_config = FollowerConfig(
+        controller=ControllerConfig(max_angular_radps=min(.12, permit["maximum_angular_speed_radps"])),
+        min_obstacle_distance_m=permit["minimum_clearance_m"],
+        max_scan_age_sec=.5, max_odom_age_sec=.5, control_rate_hz=20.,
+        # The yaw-only loop supplies its own proportional slowdown and never
+        # commands linear motion or uses the route-driving smoother.
+        command_smoothing=CommandSmoothingConfig(enabled=False))
+    return _run_in_place_motion(runtime_config, follower_config,
+        controller_trace_path=Path(permit["controller_trace_path"]), route_kind="candidate_centering",
+        stop_command_count=10, run_motion=lambda node: node.run_candidate_centering(permit))
+
+
+def _run_in_place_motion(runtime_config, follower_config, *, controller_trace_path,
+                         route_kind, stop_command_count, run_motion):
+    """Share ROS lifecycle and emergency zero commands for bounded rotations."""
+
     _require_ros()
     rclpy.init(args=None)
     node = None
@@ -929,7 +959,7 @@ def run_startup_active_localization_motion(
             controller_trace_path=Path(controller_trace_path),
             tf_buffer=object(),
         )
-        node.current_route_kind = "startup_active_localization"
+        node.current_route_kind = route_kind
         follower_executor = MultiThreadedExecutor(
             num_threads=FOLLOWER_EXECUTOR_NUM_THREADS,
         )
@@ -946,14 +976,11 @@ def run_startup_active_localization_motion(
         )
         follower_executor_thread.start()
         try:
-            return node.run_startup_active_localization(
-                active_config,
-                attempt_index=attempt_index,
-            )
+            return run_motion(node)
         except BaseException:
             try:
                 node.publish_repeated_zero(
-                    count=active_config.stop_command_count
+                    count=stop_command_count
                 )
             except BaseException:
                 pass

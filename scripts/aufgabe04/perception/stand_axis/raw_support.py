@@ -265,6 +265,7 @@ def _fit_raw_edge_side_in_band(
     fixed_direction: tuple[float, float] | None = None,
     minimum_coverage: float = 0.45,
     coherent_metric_rail: bool = False,
+    color_support_mask=None,
 ):
     """Fit one proposed side from nearby raw pixels without connectivity.
 
@@ -333,6 +334,8 @@ def _fit_raw_edge_side_in_band(
             expected_length_px=expected_length_px,
             minimum_coverage=minimum_coverage,
             fixed_direction=fixed_direction,
+            outward_sign=outward_sign,
+            color_support_mask=color_support_mask,
         )
         if len(candidates) == 0:
             return None, candidates
@@ -757,6 +760,8 @@ def _raw_side_evidence_and_corners(
     prefer_prediction: bool = False,
     maximum_band_px: float | None = None,
     recover_parallel_endpoints: bool = True,
+    prefer_outer_metric_rail: bool = False,
+    color_support_mask=None,
 ):
     """Refit a common-sided head trapezoid from outer raw-Canny evidence.
 
@@ -847,7 +852,7 @@ def _raw_side_evidence_and_corners(
 
     def fit_side(name: str, *, fixed_direction=None):
         start, end, intervals, outward_sign, minimum_coverage = side_specs[name]
-        if prefer_prediction:
+        if prefer_prediction and not prefer_outer_metric_rail:
             # A metric projection identifies which of several nearby parallel
             # rails belongs to the stand. Rank coherent raw rails first, then
             # select their nearest pixels instead of outermost heater/QR edges.
@@ -872,6 +877,7 @@ def _raw_side_evidence_and_corners(
             fixed_direction=fixed_direction,
             minimum_coverage=minimum_coverage,
             coherent_metric_rail=prefer_prediction,
+            color_support_mask=color_support_mask,
         )
 
     top, top_evidence = fit_side("top")

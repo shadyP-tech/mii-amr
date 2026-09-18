@@ -146,7 +146,8 @@ def current_head_boundary_eligible(estimate, debug):
 
 def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinement,
                                      corridor_half_width_px, neutral_proposal_corners=None,
-                                     deadline_monotonic_sec=None):
+                                     deadline_monotonic_sec=None, prefer_outer_metric_rail=False,
+                                     color_support_mask=None):
     """Prefer an enclosing complete border; missing outward pixels stay missing."""
     original = refinement.corners
     if not refinement.accepted or original is None:
@@ -201,6 +202,21 @@ def select_current_outer_head_border(cv2, raw_edges, *, model_profile, refinemen
                 and _encloses(corners, tuple(selected.corners))):
             selected, area = current, larger
             alternatives.append(corners)
+    if prefer_outer_metric_rail and attempted < 3:
+        # Resolve mixed rim sides with one coherent enclosing fit. A failed
+        # outward fit must NOT discard an already verified original: doing so
+        # can hide a competing boundary and falsely promote an inset frame.
+        check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_enclosing_rails")
+        attempted += 1
+        current = refine_projected_head_border(cv2, raw_edges, original,
+            corridor_half_width_px=min(8., corridor_half_width_px+2.), prefer_outer_metric_rail=True,
+            color_support_mask=color_support_mask)
+        check_head_acquisition_deadline(deadline_monotonic_sec, "current_head_enclosing_rails")
+        if (current.accepted and current.corners is not None
+                and _encloses(tuple(current.corners), tuple(selected.corners))
+                and 1.03*area <= _polygon_area(current.corners) <= 1.70*_polygon_area(original)):
+            selected, area = current, _polygon_area(current.corners)
+            alternatives.append(tuple(current.corners))
     recovered = selected is not refinement
     remaining_inward = _inward_shift(tuple(selected.corners), proposal)
     accepted = remaining_inward <= inward_allowance

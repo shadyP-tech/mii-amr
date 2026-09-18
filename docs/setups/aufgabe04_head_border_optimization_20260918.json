@@ -1,0 +1,1290 @@
+{
+  "runtime": {
+    "python": "3.10.12",
+    "opencv": "4.5.4",
+    "numpy": "1.21.5"
+  },
+  "scope": "Modified code replay of all 17 unique-target frames and conditional merged targets 0/128/256. Manual locations are a separate oracle diagnostic. No live deadlines, QR, tracker or production changes. Merged-target variants are hypotheses from recorded projected cluster centroids, not validated raw-scan merges.",
+  "all_hashes_unchanged": true,
+  "recording": "recording_20260918_153656_468438163",
+  "replay_sha256": "69ce2e58a003ee1d08ba02514799792bdad222662a6aa87fce96dd479445b5a1",
+  "code_and_input_hashes": {
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/metadata.jsonl": "7a66f237d5aea056f97fa9a1b9b0107bdebffeb1fcaed3c87771b23789b61631",
+    "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json": "b5f60d3908f0fa24365c37dbedfe5e8e4680931f964a6ab031aa30d64544693d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000110.png": "43933894fb13ae32d636cf32d324ed0433e213edbb184f842f9fe959ae9fb846",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000204.png": "1b49f06d521d10724574eeab862d33e97ac55d2cd3fed252cd937228c2aafa1e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000131.png": "c348e508714e32e8c8a0afc388a5cef8a33214aeb2d6e4dbd2ae1681f16ad1cf",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000248.png": "ae32c684492a7718bb42f1f475df53e1e630cb254536dd0354c5117c0a42d253",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000249.png": "353118239710f6257d969fe6929f51cc20a9d13c2a09566caceab725b0325ed5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000001.png": "b067096f85ddd0ed7193e6c61e741fecf9f42cfba4705c6207fc161a974bc2ce",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000066.png": "794320e5deefa5d1a2143c09c2dfab794a0eaa319a2e2880efcdd57453a18d0e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000165.png": "236198911876a74f145c366d385184cdb17db4047ef68ea7c43fcd9d1aa0b469",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000093.png": "9b2166c04b96c0f58a2dbeb6bdae62275f68c5ff89aeedb7596cdd6efae11fd9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000085.png": "fdf56b5986d1d990a80353846a9728926df01ece56f8e825e04c07fcb0fbb37a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000210.png": "0d8ebae6cd34fc7621972d5c9730334958d4de47e3644632be8fd607f946c5b5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000200.png": "2f351a6ddc145f9eb39bcadb077f100e7430965dbfa553653c7a1e069066a1cd",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000143.png": "ef20d2c605ab9cb0f5a7a672043ef8ab0c92b717c669e42739d7c0eab1eb4a3b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000057.png": "125390dee47762d0f4701e02aad59a4b4057e9dbe644d424b945b42436a42f72",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000225.png": "1771bb0faaf14a1de19c691a60a6e12745fde3771232dd1133a1d33d94a4be5b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000158.png": "69dd33aed96eacae605d8b22adf30b7bf2d382cd39f15c34a9cdce1c7c2da879",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000012.png": "bb7e6c9b4fc759e7b7650dc6ab7e066bef5bd46d86be521c413a05e88d9bd49f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000068.png": "3cc033ecba6d30f2c7a64e65444d90c58cafdbab75cde87a127998b3daa8b610",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000175.png": "ae8d085b74f4dc99e95d2ce2384299f5d08173e36037d963ae61ca2eee2fbf43",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000115.png": "d30d3f23aa3042ff1ab0ff856b20a31afee7cfc21996be406be689ba6415df1c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000142.png": "7ee35d2f34659fb4feac6033e1074a762dd8787cd8c4ef59f159716ad8a718cb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000240.png": "85ec5171132fd0c0994310fdf9889a559b92fe779536de9fc09a32ebdab7cf46",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000145.png": "de086ad98dc5a0425e8a3dede93472b7fd989a948c08ecf1bdcc925d170c2c5f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000061.png": "855676e873f71bb8859581c2ed0c431284089c8514b2f2a7d5e39d7b5e705444",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000234.png": "49a9b4ef67f73f8b811c6b13af2057e69a1658fac1dc12931777e9e01c0ae990",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000183.png": "1822894c3aa69bcf80b5ccb1a33428b1e4d485d19ad0b75aeb2cd74b25806f02",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000233.png": "3204f8f95c7817cf9ca57be0a7439a67bef913b1bb7e549a2029478ca6624a4e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000081.png": "b1780d4badab494f69dee6ee59b9c6e9b09c6f6a19db293cbf39f931a8bea21b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000202.png": "9d7683140c55b27b677c9469ec79e00cb23c4396af1b5a9b29d0577e42cad6f3",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000023.png": "830f6c9e9f2f42f97a0d45f20d3965192cb48d9962e4c9682dc85c5c7dd1b7fb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000026.png": "578b1b761f8394bc75d812814a9208a3a5cbffca398f429b310c67d9b796fe6b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000170.png": "8ed59252d33048d58159a7f0f48aec0444d723e1340a0b760a8ea408c46c071f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000004.png": "87c73acefcc78b865c3e91f027f027123a579c8cbaf9da8bb416fa53b94bb107",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000133.png": "5ea88dfbbc229b6515244f5e6e751f8532fa3a0ea0aba25dd2a5bc97e1551969",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000097.png": "6263c2891c271dd8fad3fd7ff7d4d97e56ef9723e34a06df96ac1c9e335dc58f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000189.png": "26734fae908464a4817058f87ba58ed4179e7bb825d11d6aee2aa247a04394ec",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000043.png": "2f6e9d04efcd3fc07d2fc7bd0681248220393a0a44ab002ed6ff096ebac66867",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000122.png": "c07e50e5aac0a5c68cfd50b3cdfa8e2617d2a249d47220b250266e92429c7e38",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000206.png": "24737379d5969ee91a3e4abb5b73eaacc7434631de916c5b16e780724c5cddd2",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000094.png": "178b259ccde777c6bc907a0f9a07f9ff3d8a4dcbc5fa09ec7daa59d301c1c4f2",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000213.png": "e0119ef3071e719cb4adbd0c45c6ef47d5c5afeca7fdcb678e3a27367655a632",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000157.png": "e3be997290525bbf6f908f4230a027b5fe4863ec600cf0582a29868f709540a9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000114.png": "10053eb359fc534f3cf05e2570a2a160a659dd06d7c3e7d04718f97e799d318f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000039.png": "cebaa97260f2156d6c31c5d44a0a51d6c5ca856e94f5be3ba63147b131fac924",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000220.png": "2cc872d9ae393e7085d546d6e1f4c258c75c3bffeb8cc97e08bce3a617f9dfd7",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000186.png": "d522a9a4c559851b9446d2017d9343e963436632c88e93b47b910b65b8830e65",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000218.png": "9ce6e8a496acd1ab4946dbf8dd8f049bf791417eab285a0f2b0c23acd7e89aeb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000223.png": "fafe46e1ddfb443d6b2a328ff8e3fcbd849de9a09e5e606ee939d2f9ac89efeb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000098.png": "78567e62891ec0456ddbf452fbad5e6fff830eebaf93d272a3b723e2bb6dea3c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000255.png": "6a5142565fc4ab3c432c603d1ea6f5f47c704570cacde8ff6de387bedd4bcf0f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000154.png": "8c24e449ac06aa63a802010172580d258729f24c733cc0d01f8be728053faae8",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000217.png": "29b8204e37b196963e3bb1d54cd1723529d1cb68947970186af8514760a86559",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000193.png": "185c10c69ad9feca5a20ddf98842f9770110340616966d60ec185e23fec859f6",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000015.png": "2083400e953695b16409a393a31e3d537d0e27d34664755d4508e60f8638358f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000105.png": "dc731522c7fc93f949da7e49d211d13ded6c90a8fc5a0b61f239b11609c70199",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000187.png": "4af2b77647e1812b44b0fb338918cfeec56f67fe2f74921fb6ba42344d28b369",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000139.png": "6901277a892e1e269dd990672e6264ac7caa6be1117d6616d8ca2f00c521be20",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000058.png": "2bd6bffb791ad38a30b2efbd48dd55608b6e321574bfb18f6a8c12d857b4cbef",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000149.png": "f0e1066ec536b9b159bc185cce25605b307dc5f991ec681351876bbb08d5f3a8",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000235.png": "0f4d21e727d06942276bf69ac5ce7e3b29b04f4af96df464df332895445e139a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000155.png": "0e5121326e1b8afa56a365152e88b55a87df8fe695d80304c71fb8dcb2e59100",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000208.png": "cd523c427cae29a513ac79b8f3b0868d901ca14d28626650951b0293694fee3f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000124.png": "eca969e87360ceee6c716d45ed5fd216cd9af1273ed09a674515ba5f22dc1ff9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000047.png": "b1b812f50aa8c366e465786a76a133b552622d459ba02a39813c5f8214271b56",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000013.png": "8496eff4ec672bd270987441945ef3fa267642c8038760e1b54742d6d0bfe823",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000059.png": "b806335e686c6078a70d313033aa4420b0091766343d8231e47379e810525f8a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000252.png": "77fff8238da8749f3f691846f22785975dfec6c02f4ba8af5d040508c34dad08",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000246.png": "d5daeb65c95c41d9ade13659a0b5e3fc04dc3e1f1bd713bd69dd51c891b8986a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000177.png": "5ef5a8271ef6ded191386e653447d6183bb1e5353cf847f249181db1ba81544b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000192.png": "dbc0d50779c6c1fd525fed67ba77bd2208ba7b6076c0b690a35f5b2758f110dc",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000088.png": "e34072c0a6cc1ca60296ef40214ab7ecb0d8637c2689cbcad16964828564105d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000003.png": "d392dde137a08b2f05e88dc2717759bf52dad840daf6331c2f5675a3be2f0533",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000162.png": "58680dde63af930fc64718e70339fd46a1d8199a6edfbed684e31a9b9eb48f22",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000054.png": "cccb76847310c2e8813dff881d53964e0cc7fdf8ad470407698acb4c10313c77",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000228.png": "3b31ef83e809c21143d1626120d3a7fd44e6b8097a873c6ac21fbd2fb9f1da1c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000237.png": "fee5fe1b7a7b913aba4738b3cbb540a8ec811e3aa5f326cc136f4fb0cdd35af1",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000044.png": "b5e13fde110ed45be3234695c6712becb32d33b98140b1d9f0b2594837745e2c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000174.png": "5add6696c2680cc9f44ea90041feaf27f1d53047396b585ba1dcbb2fa0c8dcf1",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000129.png": "35ed1c4325f126c6fab4c11da4b12fde943dfee939a6bc334d57192ba06755df",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000049.png": "96109500548d0a9e6416f8f563cc0d854cbf5f3012a57337c64a082008e2ca2e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000021.png": "de4a50e040725d1aea615ae6dbdefe9bed2bbf986e2f2c3f1c82a04c0ac4ebea",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000195.png": "0c28635623e2c53c0d927944939b5c0d40ecf9380d5bfd44d9d710032ed74536",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000025.png": "322fe7507fd4f8b05a7a25ff5452a94e99a33682b51e04f77201bb8a4be368d5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000009.png": "45d16aeefbdb336423e861c2bead40b6a99aaa9758d8a8b2f8e1e6b8656317e5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000048.png": "e9a513871d8ffa98adec16fc854b4ae8e870165fcd86c8c62b0a79fcaad83db9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000112.png": "7fb986c05dd3151566e665f512f86b6d783dd642112bf4ec45795b6eaaf257e2",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000102.png": "7b1bf69ceefc482c4abf375bfa0f08fa4389e2738a988577b15f32b21549c1ec",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000163.png": "450776073f9e3fa09069476c72e87ca25def74d1e1cf1e00453c61e215d8599e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000000.png": "b90887948fd3d4d0c0b771db99900703aa99508927629593a4fd35b2b620ca67",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000224.png": "dcf283046bb711e49bd439362d357908850a2966c4fb50528159a2936b69affc",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000134.png": "82140682a93d910a80758631f8d4740a975cb5c28320e6bbf3cee7f3b773134b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000117.png": "d6cecef99d3590f3cf9b6eddd7fc2f2d7b38a58f45b7a996e0e737e9aa6ec7db",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000099.png": "c3eab7a08f9849587f4d2d204794221d89e760e5346d8665bb40e45c4bfb6143",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000056.png": "53364da03779e9fdf6fde2f653ede3ab693ddd8d5e1f8bc015e79180826cc505",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000090.png": "d229a7627e994608e6a63e97903f9f3cd6a6f966e21242fd88babe515d9ccd44",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000100.png": "bae2f933eb90db55496fe495ab0da2d86eddeed45a5ea87c42299bef9ef4ec74",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000106.png": "325fcb912af6a7e1b74ef5728e6e9eeefe9a4a726cd39e717f8a48313678a672",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000130.png": "6ef2be517eb42e9aeda93533b3fc0bb46e91f1d72482260ea77db505d14ac548",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000173.png": "ba5928bda710e012be8abe10203169b9a53f829d55a05157c2441e1d0aef6224",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000116.png": "2919d3950fb09fedb39927adfdba71a2886348321db3743ec05c0d2c98f5258b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000190.png": "ed855eb67cb9206aacd6dbb69094361a4ea4549a095c8bac991784070b48fc00",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000045.png": "44140a5d36e2a3b1267378407399072cc5fa767f4a871ead2bb311a083c8a282",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000041.png": "8e13f929b607ccd288d389590646a137a94171b3ebc4dc4ace2356a23be47baa",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000064.png": "08d7ca448ea64069af0f2c1c2dbccd954ee2262f3405472541db856a3facd3fd",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000040.png": "35e7e4e5d9e00e8030663568ccd6c0d7d9e33ef68b6f9aff3844d86574ec6219",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000035.png": "c5ed3fdf704141a1e0316202420bde78adad0ecdba60a647dfb89b302bd35827",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000184.png": "789957b489e948bf6649d04d45ece20ac4f99c43b5783a24d58490e4af8c0035",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000069.png": "58d5fc41c2c86847e6f7ac8c5cb94397ec3395dacc05b4d3c0ca783f7d8a5fa3",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000171.png": "688d019583f2224a6aec4bc61df52d6b149cf947fecbb7988f7f3942cbb1a946",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000091.png": "db021c8d71a24b9cc35c0cb481ef2be0f41dc629430eb9b0c8815def8b4fb954",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000238.png": "d1093f1a36fd59a06362de8260235e7151c7f0de39e139e770622f6994cdceac",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000207.png": "af018e4322fd1ce0745a4d8af0bd024d63c10e611488d57d629b9f689648c771",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000073.png": "070419ff5647b8808e7ebe744d839852a7fec2224168b6960b7b579fd84fca6d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000182.png": "a15ad7b7480f012ad82b14a10c35d4d56edb4da2b2c8963ca85925470b5dbc75",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000053.png": "ba0dfbf5cab68a60a46bbbfb008098e217587dd19b4da7a6a1cc4daf3ac427e9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000084.png": "6f152ef2943e7fae34f9646a3db125d1c136f99c2279300c421d04865dfd2307",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000229.png": "6c70fba61868b9a599b3548054f266db7d55515d554ba7d3e89d2fd35cf00543",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000148.png": "e0b7126cb97b00431d2309450f8387854d4d2ac268631d04130b1ff4ad9fe9a7",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000251.png": "bc4cbf8645e5e9011bcf105220cef3136d5a5b781167b091148821db53473374",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000121.png": "fc9f1d32c835ad08dd4bc6e528eedc9d4ab94195d61427bfe7c4a8fe896bf696",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000247.png": "e23dcef523f091fee2690cc836384dc777851ce9e5ecc5c6168dd256aa6bfd02",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000168.png": "8cae4cbec04103305c49e2366b679eff3b8e9d426aa7953b95cbbf79fe469ae5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000031.png": "7886bc0f7738beacdb575f6bc58d62eed0de2067d1153a8ef1398265d40920f9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000188.png": "2cc7a8bcb947d86aa6f9c3dadb75df81eb4538ee9d96e12fe64a86000f75354c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000160.png": "370fa4bfdf0057d52e3ec47a0ab5290d3f494c351a9139845c2e92d1cd6aee2a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000214.png": "103e2cc6619f7530a9abb62eab91a2ab5997ee9eab2c4933f9f0269dbfb73c22",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000164.png": "3f3f7e38eddfd2de86fb94ac00c1784a0c82c5bec08d134cc9c5c3b2ef20204a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000007.png": "fa75661323ad514f6ef4317b030de7fe9999dc93676ac26478d438295ac0612e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000144.png": "63bd8159c10daf1fe40a090c1bcddc73b4b49ac77af302b4ab9d1a8a2dd4c7d3",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000109.png": "ad1807f7eeb4f0960b76114cf970411c39f856e311bbfb10d25e86f300610266",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000178.png": "b29fe6499ec912c8461bf7b014a6cd46268d3008d0a8ebe4de3052d8e875f3b1",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000146.png": "a666ed082136b2c4bb2187a9c125dad85bb9ac050939eb10bcf433452acd2f55",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000037.png": "12a6466640192bef013b9de8124b432b59e9614ba3c04a241b49bb7cfb9eee3c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000014.png": "d445a1f4a1a76d8c1573154ef4e3337387f50e73e267a9f7ec4913557e699b3c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000087.png": "015ae597d4f73a5ad5e55fd4a6501f461293ce0365754cdd942da30afb565b0d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000016.png": "05d243f72189ccc11d1eb2500c7e4f634e1ef797ec88db40446b95d37dcf0122",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000024.png": "a3016d6f483ec813490b063499650fa372dc4654b16ff0912ae950e2872e4ea9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000172.png": "bebbe278256df05b7dc60985577e858083975e8fceac2a83e26866b0e82615f1",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000135.png": "7feac3f0796eb42dc6be62a21ab5d716ac8b807f568b49c7c48f3cb22310f238",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000032.png": "cf7965903ac341d1099488e719b5766cde542040ae79392d0737db0e55632704",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000082.png": "5bb1361bffeabb5a69330d9c8187db7b2cc6c61173acceebc72db35e7e9fddc5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000179.png": "358e610e2b6cc27de0ca443f768ce4fa506330683eb08f1baab505b6ab266200",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000180.png": "48ddba38e6cbfa1dab8ed08b02a8c8cce7e4d7537d6758d60600f52d34ad65c9",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000002.png": "a2e2ec69aa7353e25fb6226213266fe5e2e074bdba660191e56d10028bca9b62",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000245.png": "2659e0dae1274cd342e7f71bd31f291b8d89fe87049f9785178c325a8ccbc893",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000089.png": "bc0e76b0174513beae03fd1536aecb44937e5a7f210e70534ebe1022100c6656",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000079.png": "df8eefab91c56c800c6585ddf3609ba0fdb9b8184677b8054bd95461ad588c27",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000128.png": "269bc3b140856364f23d41f622eec2d97be940b80f71ca2293f15d97a126a47f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000008.png": "b8b0137ac0a7d0dc312b81de8677b6d03c7dcbd252c554108d876c3c7d4bc513",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000222.png": "2b5b4a61dc2bf525cfd58763dbafb02f88585b0f5ad2568568e506a9b6a48ad4",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000107.png": "a284fc7003de6e8f88673931cbfe9f535232262d002fe778a5809f64b838ae8a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000006.png": "f41d2f734fdd0df3e47d88d97ffa884839ade7658f22d61641f7883a035d06c4",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000120.png": "96418fddd3f5148af232751757f8cccd0da2e21a2402dbe5b6053a17494a7bf0",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000028.png": "ba7308d285b6cd2cf935f3a68a5c946f3346028a8744a3d448c3bb4bc0b8445b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000074.png": "7d41af44008f62b1ae3b8d2f5dee7239425d32d2597a65d4893ae7a5efab8243",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000156.png": "f132c68a9a07ae881b6910dc09917021f6818075415b2b4e374b1b4a495aaaf6",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000036.png": "5522942bbccf105c65ca5d9e73223ec29fc4f94f900f669a5e1d125fd69d176a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000141.png": "45843d7bc88bc264a21338677842ebe002b03a3039b3d2b49139c3b58c6e56df",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000072.png": "2a2b0114596177d68fd6555efd7978e165ad44d817ab6c7b40d7eedf2a041a61",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000050.png": "2919e92e39ba204184df5ec089959e5fd573082506e0a055c198d61ffd5111b3",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000095.png": "4b1bd1f1bbcc11703f1e24772d051c29630f307491585d194a22a02d355f8739",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000227.png": "efefe2fac56b63808a4a10e96c0a57771f8ae8eb828376eb4573bf7219a60f8e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000092.png": "8e17b42d1d7b74befff1c1c8d9f0876f9e98530cbe60b1ac592c8d65bf756b24",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000126.png": "09689861de035fd48f16e21bb7742695b12fa3cb5296870278639cdf68f8accd",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000136.png": "e10f7b40f70317c31819de225932e0cd77e1ef0bb9bb3211bd1a6cecfdacd798",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000151.png": "0310016beccb0d38b53959be52a2210f77cfdacdcb0edf766af3d7be1c73caa2",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000137.png": "bf83711dbb4ba584b799f092cc15abd1387b60145a4e26a20166076c19c4083f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000065.png": "0f0b3f54bc82cc3b8cff1c36db9e8e1939695549226e6bad6827d9107868e9b8",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000191.png": "776d5676baec07097641f5f4e82ce9bd85c98ef6d4ae250ed8678ff862fc3f44",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000243.png": "4ffcef119fdec9fa60a9e3cc30cfaab776d60bb962cb11988726df2adeb1bea7",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000140.png": "933adb29adf77b6306d5693a011bfee827e6d528c92711490df41d1c2460e2fd",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000226.png": "b7d4b8328a738f46d5f37a8c22555dd8325fc881e2eedb03fb3fe862190507a5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000104.png": "019518a5ab5d07cd836dd769cf0fae4d466dfb4b8c57a919d40dd0f45fd1a980",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000075.png": "39364addad033b37635f2979f8218d9553cb40bf7a092a49f72932c56d057372",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000201.png": "e11d04e5f3508fffa17cd533d05783da8a726c3fd0069a556a188b1bfc28ac98",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000239.png": "af2b8b889dfe9007b0900e477529b10a0584e1223d8faa2587ea591d2a43cf32",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000209.png": "d45fefddff8550fa779442d5b7c7f7b00ee230b18ae267d931d7540d74760e36",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000103.png": "a2e6fb2c5524600238d119ef02fc8b6b7853e26131d291cc9c3be3601193c913",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000194.png": "99303a98b663c06bafaa5dcd73d54e1dce2bacc45ecf7b6cf3b48109f78d99bc",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000221.png": "5e1c9f219eccff7ddb732159ac0f0b947aa13bca93edbb7e2d0ef976dca7cce3",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000063.png": "f73cdf7f357eb95436e03e647b7ca58aa1dc12984e4191608b5c7d95bb3b8540",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000108.png": "f2ef915a3feacf57110bb67a105d4bf5bd5293550bb0bd8325f7b5362554edac",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000046.png": "5d71e3f62da91e8c691d0351eb0d8dc885a2953668a1ef9ef7d91081aec36398",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000005.png": "39c04c73b85fde6ebd1e40dc2632303e64a35f15382fdba3dff5b6da286ebd68",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000017.png": "a01752dcab7b6e837d0c850bf714b225f8fac8c3f775d878c57dab9447139d63",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000250.png": "0ea360b0943ac2ca6343bd764a33532aaa4544a435d9a866f113f8d92dd9afbd",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000167.png": "c34dc4fd5119a6feb258e5d86660b2c4f89fad6d097c70625eed87e13a3d98cc",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000113.png": "26b9f922d2a99695b6558b22c35d9decae779558612c7a3f480fa89858ec1b74",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000101.png": "c5ce53fd94200c201380b9cce222f5b6dca7edb16898278b228a9266da3cf003",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000219.png": "778f0a86089b79cc155ba0b4b7584d8e22db5403765326a6713130bcdd98b045",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000030.png": "edb9a842fb95af91a3e0abb8788ff25cab0de5ccf905996ea74ffa01f3d38476",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000185.png": "203acf1348433fd57088afb02ae7bee8622afde3b6f3d156a0965ca2e146fe06",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000020.png": "997054a7a26b3ceca5de26b261c7b770529077762e33d9e419cb5f7883449d71",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000018.png": "37161ff70a2aa17b8a7a772b7439bb8ebb20264e93208e03d0f4aa1be7364978",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000038.png": "f78af1659e441c56f99db0b065cee0bd93d6d3a57d4ae9e17f11f808fec9bdbc",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000159.png": "0bbaed0a552d6fbe4829542794aef0520aadb10b26e651c5465452d757a74adb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000198.png": "d102d00fa415a433d5008d49972a29fc7fb41275f221ce41a0b4842bd68f4f79",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000230.png": "310b4ff87d742aa27d2af15e37269a74fa93215ddf0eca6f3b8cd39b46453251",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000236.png": "42272beeaeb58409eeb081ef08c8d278719ec0d3845defad768d430af34e3586",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000199.png": "c18eb2d9d10127f32be6902f1abeb2c87d59f14999589b95a402ac1a67d13197",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000011.png": "483889bb39dc7ef9861be44cf337e19a3b5071c96dba970503d61c55000725ad",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000042.png": "9efbaee1f56eec85be0be15bf0f40fb1c40aa12e6761305e85009eeb378cfc54",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000196.png": "3500475461abc4294c80e3b30bd89019d75eb3ca41f7c7bc87830a29532a26fe",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000034.png": "daca97d967449b3722447d4b08bf28e9b9e3505dbe6e90dd4ce10895864e8c1d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000062.png": "7e1abad3fbcc663da0ff8f47d9ba2f6bf341c8f090998cdec82201b1bc874da0",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000019.png": "e362bdf43d1f3eb992072a98fb0a33d0e0a45ea7e72d635287a42be6ff47cebc",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000027.png": "a8aa101de3f161d5570aa59894d6a6da1238b2a0b931f568f4ffab78b685fd8b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000077.png": "9d007d25960c094b6abd86d6a0cfebcb26dd52720751695ec4c03034ae3e9890",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000231.png": "8531b25f2254a214ea5522d68744a375334e018224fbdfb2b77c01cae8b2be4f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000132.png": "4aa0044d2f93db9fa9aa8e282db586f73c93f96481fbf2a0c5f148115eeeec9e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000076.png": "b34fca97caaede023d1bc3a80c992fc1f00da60a764683319e1f6be10742041a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000176.png": "45f20ebffcd913ae1392180f9e9398223d71193fef0757e6c5ed6071f0531780",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000083.png": "542be81f3566eb69d451b7358760226a692832efa700f24562f8de1a4990d725",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000169.png": "f6bb99bed057e16f1850aab8c7ba9994ba55d260b102a38971641fad9ef5c6d7",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000070.png": "2b4ade99afc4dc2e8d6c50cdde7a35a5eff01be0b9fe0d6787de58a61842a85e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000215.png": "ac4a85cd59192da974726f7eafdbd635ef87e206559ba5eb54d51aabd540cebb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000254.png": "b3748b58480775fa27e3f464ed0ce9dd1aa04e835f0808e0b9a387fab192571d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000119.png": "d571f13ae237b2efb6928b0ee59e560a77d1dc8b0e5b07adb785c3482dd4d308",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000152.png": "e859f098459f9ff63e08ad841f78ca242bde09343ffbd866964e4fb456a42328",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000203.png": "13159d8424e42ff6bef1117e618130bafee782008765de538a5c6b1587be0a1b",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000181.png": "5afeff8fd700baa9111ff9f918ba1057c3e9911aa4914052c8da7ffa912f26be",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000244.png": "95141623a2f7afbb3d1f48515ae48ca0029a7033d771b0b1f2021f0867c8b0c4",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000010.png": "05380f6bc0180e4e0664f389312cf237d8b7997a8a55f70ec858b224ddf58d3a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000111.png": "2b4fbb7ff4ac16ca926279d49d0f4f75382ad10fa74cf3569a299abfa5201f54",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000166.png": "791c6188f5762a438770e1a2a9a11150027724e355e229e74de583c538c4a4ab",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000080.png": "843ddfd2f35a41434650cb5c66f7ea79ab8e33a4b3f8bf9bd7acb9addc3f5756",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000127.png": "af6f440fce818db26c81e0598ee6f25254a87879a692efb22385c32caa9a0570",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000216.png": "63b6342b322d78aae87b209e079c6cf2bd9f37610648e32918265a8e79c7fd33",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000212.png": "6a31d3550ac441661c18159e0fe76b66c7d93944a792e0b75fecf774671ee8a7",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000078.png": "7fbd618de6dcb96f6b0c6419cefc69c54ab6561e62aa596594bbfd979c75f5a8",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000232.png": "544c7a9b12c5b70f0a439e786a12355b28da2b5498014101e6f98b43a87eb329",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000125.png": "a994706f772eb125ca1b18f4d0da46be2eabe4ee6fd1674a943f12352992ec9f",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000197.png": "f3d40d85e0ad6d9e3e51b5529d0fc6f993680b46e69d6915966b9c3b3a4c8e4d",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000096.png": "257d05b65e3ae40fff7b53e7c011931d79c4e9aca11b8d90633f6a1469a6d66e",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000067.png": "510784f465a1e2b90928bf456518b7def082f3f224a5df9fe420b21c231e8a2a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000256.png": "efd5365439b59758f48703215d63cd54d42ff7c01996f92d2dcb0e7aa637bede",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000118.png": "ce824f011e78f509af1acf53a4b7c6b2460f1eedbc4d278a08fd0ce61c235284",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000022.png": "ecdb9b764508b96c681af0c808e574101b7700318589ffdbb666b970de5f86cb",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000055.png": "f259785d2b5ab648a685e225966bcb95e42826c77f7dfacb5a857b2cf9ea99a5",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000071.png": "2215331d496868bbb544de146b7daa02889db4190efe99a29eb6d5644482d49a",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000147.png": "956296f7c8f4f98962d39514768ab0a2bfad60fba93773060bbef1c1ee375e39",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000241.png": "77bcd4cb803daa1ef9677baac33e25a964144415ce9e393c2cc5bb7767fa0d7c",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000138.png": "41414d3bc60e29776d569637a5aaaa8257d353284b0ee19fe7bd9eb2d51f0453",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000205.png": "39a797c5bea3335224c8fd4e6812b284fa6a704493d1fa14233d8abfafe09826",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000150.png": "9e4566eb672eec0d520d405ba1c0850304eef2253c031f653a036cb0b5696069",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000033.png": "86e214e1959a57c8b0ba26e53d41b6d2bfc811b4662249cff11f9ef7a7c9e009",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000060.png": "e586780961c7e9fe5ad409d04765dfe7495b7666bd4aa8a4e3210dc623b6c721",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000253.png": "09bfeeda85a1615ba244a382024717bef5f700ce487817153dff6b32f38f5338",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000211.png": "3cdf7d52ee8ee027c43b8ec1b91273550ad526fdf41c267b58b41150a12f4922",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000161.png": "446602eec332c744769f01c5022ebd7588f9ec8498a28f08d91aa9fa16731f42",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000052.png": "bbfc0c1572abe27c884b0842ad27aae4261919fa1aab5f2c10131749ebf01c49",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000051.png": "7d2a1e99a91fe49670ae08ed24b137bab890d982e7fe437e8d0dc6a09b755290",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000029.png": "4d1590776a0846b204265ca9f4f635f32114daed7b984739e70c08c4611bc6a8",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000153.png": "51c76eae428b8d611d072c22cd0e0e69c4d51d5b5531b62bb0c7e11eef2444a4",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000086.png": "9b767f094e5060a263afd34bdb4870063964852c3a565ab07fc89fd2cfd87ac3",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000242.png": "ed72f95682eb75c3746ceadbb9d2e817aa93a27b23dec549a71baec1a1de9b43",
+    "results/aufgabe04/stand_axis_debug_recordings/recording_20260918_153656_468438163/source_000123.png": "7bbf929e3fec2e315460befd13c2175221b224f44cca0475278fee3582cbeb82",
+    "scripts/aufgabe04/perception/stand_structure_hypothesis.py": "07c036eb051be859dc94f1636d3f03e949ff48b881b59494242e00feff73be70",
+    "scripts/aufgabe04/perception/__init__.py": "40f268f5873dd7a4ef1603920044ee9a6b5d20a3f7cd77a685bb5ccb6a4f8236",
+    "scripts/aufgabe04/perception/._stand_structure_hypothesis.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._stand_axis_tracking.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/lidar_stand_morphology.py": "2c3a9abe9bdea9ab14ab7b1a8ab9056ebceb1ded9e847577f5cfa935b4b69565",
+    "scripts/aufgabe04/perception/._lidar_visibility_evidence.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/color_classifier.py": "7a695fda146835f75a893ff461038f086a283a5b3f7ced7cb212d0ceaebcbe7d",
+    "scripts/aufgabe04/perception/._roi.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/arrival_pose_estimator.py": "2b8a431c9cd9a817cb002c6e9a72bc4e167a67f486af03df05a7c0bae88c7698",
+    "scripts/aufgabe04/perception/mask_processing.py": "f0bdfdf1f13c32d0985dd5936b3a7b0e75458faf198bece33dfbc3369a183c87",
+    "scripts/aufgabe04/perception/._stand_confirmation.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/ros_image_adapter.py": "2b6513ac13aedf7fdfd50a390e1f6ec5ad483e1e38f8e3760b9d6d0539195c3e",
+    "scripts/aufgabe04/perception/lidar_stand_detector.py": "5a69722760e944cd0f58df36d9388dec50b1b64f21171aae4c1d3c3773ed3945",
+    "scripts/aufgabe04/perception/lidar_observer_runtime.py": "1b4432b409bbd41cb0ac4ee4e40a9930b977bd506cc82736007e726a16c7be87",
+    "scripts/aufgabe04/perception/scan_topology.py": "0a275cf68433a33e58a6bbf95ab310d641a1f05d0cddb98921bafd4f9aca3ad4",
+    "scripts/aufgabe04/perception/stand_axis_analysis.py": "5503062bdd849a87ea4568f4f511c35a88efebb20f3389105d288faf423e6b4d",
+    "scripts/aufgabe04/perception/._sim_wall_edge_mask.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._lidar_stand_detector.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/._color_classifier.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_explorer_node.py": "5f5158e0ee28b41659e672d9d03dcf09f240b76644eda9c49bd185bbb63f313d",
+    "scripts/aufgabe04/perception/._models.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis_image.py": "140ca248738ba5456e8ac10ea958836993eed368b1cf12463ca69b9f271868b0",
+    "scripts/aufgabe04/perception/stand_side_classification.py": "87977f950e756cbd07f242f4d007c53f59eede700dfe0f912cf47440121af0b5",
+    "scripts/aufgabe04/perception/lidar_visibility_evidence.py": "4545e016ad78b71dd68242e7cbd6ed793efdf635239e6adbc2698e4c53714fca",
+    "scripts/aufgabe04/perception/._stand_color_support.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/stand_color_support.py": "9c13050fb209ad5269ce42c3a7e981790dd1910e2e4457dc19fb971ea5c52938",
+    "scripts/aufgabe04/perception/._arrival_pose_estimator.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/._ros_image_adapter.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._camera_calibration.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/._stand_axis_analysis.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._lidar_visibility_frames.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/._stand_axis_lidar_roi.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/._candidate_lidar_association.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis_consensus.py": "391a9a55ca09f84823c1c915631a0ff6c009e8776ddbdd6d4e93ad1c64b75e95",
+    "scripts/aufgabe04/perception/._lidar_observer_runtime.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/sim_wall_edge_mask.py": "4e60564a1a31e8e99e82d3d84b2fea4c9cc7e8c35092eefa9caf440bfdc8fd09",
+    "scripts/aufgabe04/perception/._stand_axis_consensus.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/candidate_lidar_association.py": "cbc185cf84ae3d47a8741914ed9c0753b17fae1f08b56aad7fb4661a2b64673e",
+    "scripts/aufgabe04/perception/camera_calibration.py": "a2e1b5f06b69aa64a745f6ffe13ea61fb57a57242136f3705384e9169bac3124",
+    "scripts/aufgabe04/perception/._stand_axis_image.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._lidar_visibility_session.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_confirmation.py": "a2febd7ceb31344027366777265ba56a799e2b787e3768aaed60463c3049b8a7",
+    "scripts/aufgabe04/perception/stand_axis_tracking.py": "6c7b7cfd91b81fb76b44b12fe0c3560226dc4716e324f9603d33575d32abcf14",
+    "scripts/aufgabe04/perception/._scan_topology.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/.___init__.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/create_stand_model_profile.py": "33b6804bb84e026561d410f83b36842dd8638da7c1e62173d617ec5c24c7cf58",
+    "scripts/aufgabe04/perception/lidar_visibility_frames.py": "62e9ba51dc5c9e67e6b088bf1aba36c89bc0c6b113abc6b0aba16a488c892fba",
+    "scripts/aufgabe04/perception/._create_stand_model_profile.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/models.py": "341045e282ea21dcd11582cf98bc9e0933cabb4e88c5933b2070c07a627c895f",
+    "scripts/aufgabe04/perception/._mask_processing.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_observation.py": "2482a2e8a924dd9aa0cf9cde41f9fc3d745555e901b3cc048f12b3fd539509ee",
+    "scripts/aufgabe04/perception/._stand_observation.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._lidar_stand_morphology.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/._stand_explorer_node.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/._camera_stand_observation.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis_lidar_roi.py": "f1be9108923131ed45ea37a5f0dd6e1b53575d07056e12612799effb6ad053ad",
+    "scripts/aufgabe04/perception/text_overlay.py": "8d219118a17ed70e0a3d9a97b2a3192cae52a8e683387da2f1b63f21483f73d7",
+    "scripts/aufgabe04/perception/lidar_visibility_session.py": "27cf0ae9674f896f1f5ee92483411f8f19c1443f9d6ae634eab82142d20f8a16",
+    "scripts/aufgabe04/perception/._stand_side_classification.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/camera_stand_observation.py": "dd6bab574a6608f7c382b4a0a3b895b1aa25a6bd2b2d3b6253375bf064de2c6a",
+    "scripts/aufgabe04/perception/roi.py": "6845906c8d1710daac680acc1cda5a21a3115f9dd546d8b87f70ed5f60535b12",
+    "scripts/aufgabe04/perception/._text_overlay.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/__init__.py": "072b76b7e54003044e6127194f1060b5f3aa8fbbf4d03b59712491c261626ffd",
+    "scripts/aufgabe04/perception/stand_axis/._model_diagnostics.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/raw_support.py": "43f94475e428f898e1467a52d0b52490f1a5837bd455b79c3f9e63d6ad0fc043",
+    "scripts/aufgabe04/perception/stand_axis/head_cold_acquisition.py": "a9b00e8a5337ab789a772937736ea2f3ea2ad8e6bc9943c6fae9f5463f8087a9",
+    "scripts/aufgabe04/perception/stand_axis/._model_pipeline.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/._head_frame_resolution.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_neck_connectivity.py": "cce67d639d5aeb777fef3465137129f2e4625c15bd85c4716933cd3a53cdc704",
+    "scripts/aufgabe04/perception/stand_axis/._image_source_support.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_backside_appearance.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._candidate_rail_hints.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/model_diagnostics.py": "eaafb9400efb13323ab9cc084bb90b257be8e145d5eab7460ae33df7aa30c2d5",
+    "scripts/aufgabe04/perception/stand_axis/qr_pose_seed.py": "8c7511976ac7ca474a3f3a9b54a6dd022cd5cda485b6511130061d3e837ed34f",
+    "scripts/aufgabe04/perception/stand_axis/._pose_fit_diagnostics.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/adaptive_foreground_gate.py": "ded6a020f7e44e6822429fb6a13856e7e93af4a7e9a1ad0c2ce6d39ec7e4803b",
+    "scripts/aufgabe04/perception/stand_axis/image_source_support.py": "2aa2a37fe4519dc07fa7244c5761e150f17bde68da95704ec1414a938d3a3639",
+    "scripts/aufgabe04/perception/stand_axis/head_orientation_bounds.py": "b4bf309929cd18959fdf1a7c8e6a72da01cca31affacc4e1be499fafc2073c07",
+    "scripts/aufgabe04/perception/stand_axis/head_backside_classification.py": "854ec4d935c2a6e0bed98df0e8b51ab85d488ce5fa43a7e41fcbf0240f1a45e7",
+    "scripts/aufgabe04/perception/stand_axis/current_head_refinement.py": "ba75f9415145997a9df9cb55f8151c612cd9394433c142524760d48e5e6c89f1",
+    "scripts/aufgabe04/perception/stand_axis/._model_input_cache.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/candidate_rail_hints.py": "4e2773ff6a22084eb1b8261b7b92e1701fe12c270139762edab42cdcfb4f5caa",
+    "scripts/aufgabe04/perception/stand_axis/._pose_tracking.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/._head_border_seed.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/stand_axis/._model_refinement.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/._raw_support.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/preprocessing.py": "e5803d8bd26738d00ae92ea71ad71b63ef07e296c41410b601afedf5c29eea35",
+    "scripts/aufgabe04/perception/stand_axis/._head_model_admission.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._lidar_head_edge_region.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/stand_axis/model_input_cache.py": "b5435bbd698969ca7173106b124310a997a34576cdba481d76380e37461c7ed2",
+    "scripts/aufgabe04/perception/stand_axis/head_acquisition_budget.py": "7c7237b474de1e206d8ef784b5be2c92b4d2a1e47bc5dcd221400bf390b0fb31",
+    "scripts/aufgabe04/perception/stand_axis/head_backside_appearance.py": "298115ef2dcd7434681d55446f149ec9856e30aba7069e7442fd3b65be5fdcb2",
+    "scripts/aufgabe04/perception/stand_axis/candidate_head_search.py": "65236be89c9fbe0d453e0ee65ced7846d005fad150475db3775c1240aec36500",
+    "scripts/aufgabe04/perception/stand_axis/._model_projection.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/geometry_contract.py": "b8d2b80f46326ec144d3d6a173c1af1ad9e43415b6152a955f4898dfdb2317f1",
+    "scripts/aufgabe04/perception/stand_axis/real_camera_profile.py": "0d8feea55368df3cd4462f11c5b800424ffb48da5e6ee158f56b81de9ba499dd",
+    "scripts/aufgabe04/perception/stand_axis/head_search_bounds.py": "c0473f2370f3ce90cd9feec72347822509b12d4455fbc2362c11a1f9c39e6010",
+    "scripts/aufgabe04/perception/stand_axis/._current_head_refinement_proof.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_outer_border.py": "cac5432e2e133944488ad0cbfbee20278c1b2f9aacbbad9f90435ebdceaf4911",
+    "scripts/aufgabe04/perception/stand_axis/._model_backside_acquisition.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/stand_axis/._head_proposal.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/stand_axis/current_head_refinement_proof.py": "6eb475b31893b42b0d318e11ed93065c4df7ae6b0e10f403a58ef1a3a75b64eb",
+    "scripts/aufgabe04/perception/stand_axis/._head_acquisition_budget.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._models.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/._candidate_head_search.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_rail_intersections.py": "d0f3942143f57b24941722493b23274998c3274dc1bf5ab11b3bb0efd69098ec",
+    "scripts/aufgabe04/perception/stand_axis/joint_head_borders.py": "5835056ad2cb7041767f2c4740a40dc01fc60de07561fb147783f4977b34a0a2",
+    "scripts/aufgabe04/perception/stand_axis/model_refinement.py": "7604af3351cc9c8dd6ea3df6ba9579aa59dc77dcd35cdde57697135421272255",
+    "scripts/aufgabe04/perception/stand_axis/._geometry.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/._physical_head_pipeline.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._current_head_refinement.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_model_neck.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/model_backside_acquisition.py": "388b2c8172ed61014b76dac95aab60deb3e021c88be534c43a65ba7cd2a70eb7",
+    "scripts/aufgabe04/perception/stand_axis/._real_camera_profile.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/raw_neck_support.py": "ccedcd019d1ca4ce681a50fe317daa01510e867872c0299502978e90bed7437c",
+    "scripts/aufgabe04/perception/stand_axis/._metric_edge_association.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/geometry.py": "92093729ad6f4f9bde0038b0fa67f0e8fd2ce2e5bc8e36b382f1ca27c037b900",
+    "scripts/aufgabe04/perception/stand_axis/current_image_head_fit.py": "31ccd937e76db19162a23e76462c95187398ef0de9fd5b11075b60dff6511c40",
+    "scripts/aufgabe04/perception/stand_axis/head_model_quality.py": "a2fb04c60ac427766448fab725015a249168a1643559edd8238fdcf562ea6d40",
+    "scripts/aufgabe04/perception/stand_axis/pose_tracking.py": "ff4017e093c0d12a287a62848339e7aceeb4b9d4b927c860fc786c0df5e65245",
+    "scripts/aufgabe04/perception/stand_axis/pose_fit_diagnostics.py": "a801bee0dc57e5b0afd85fcc729036cba77d984818191822433329f695529488",
+    "scripts/aufgabe04/perception/stand_axis/._head_outer_border.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/temporal_geometry.py": "1ed5e9c6f56f934d69a912a56254290877c2c54bb29f368f1b7643ca43cba443",
+    "scripts/aufgabe04/perception/stand_axis/._head_cold_acquisition.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._preprocessing.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/._head_neck_connectivity.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_candidates.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/nearest_scan_head.py": "b3a9b1a5154a5ed5a80c3353fe48ab2a0c434ccb5df5aa7701e5c7bbbe05c082",
+    "scripts/aufgabe04/perception/stand_axis/._qr_pose_seed.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/stand_axis/._head_hint_neighborhood.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_backside_classification.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/marker_work_schedule.py": "14fa198e3aafc085484b2a6eee55972c46b147f6644e35fe29dbec5f3d025eca",
+    "scripts/aufgabe04/perception/stand_axis/._head_model_fit.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_frame_detection.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/model_profile.py": "2d974abfc7590734e74e876a043bac9fd271d6c59c457ef35b926c189a126611",
+    "scripts/aufgabe04/perception/stand_axis/head_border_families.py": "4b2505e242a2a17b11e8fe8e32977ca66ee62dbc70b9752871a55633bf2f7ac9",
+    "scripts/aufgabe04/perception/stand_axis/observation_freshness.py": "8d483f8f2061ae1247c02ef3ea52161c0f4a9af378200b2ae70d555b5af12dc2",
+    "scripts/aufgabe04/perception/stand_axis/._temporal_geometry.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/.___init__.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/._head_model_outer_recovery.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_frame_detection.py": "ea60482c85b496cd9972648505d9158fd108d03880d6bac4b71596a0d11599d6",
+    "scripts/aufgabe04/perception/stand_axis/._qr_marker_validation.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/stand_axis/model_backside_topology.py": "6493cc2461d02e7b17b0b244d4c1f3809d426ee064602992b0cd73c8b3efee98",
+    "scripts/aufgabe04/perception/stand_axis/._marker_work_schedule.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_model_quality.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/metric_edge_association.py": "18f4e0cbbd439ce6d4e5dd46a49ff391a35cd398066115911e0b88c8aedd6cc2",
+    "scripts/aufgabe04/perception/stand_axis/models.py": "bd2b31824e560286cbc29a2876048908031ef1e37f243e3410ae5208060217a6",
+    "scripts/aufgabe04/perception/stand_axis/head_model_outer_recovery.py": "82c94fc1f43c99aacefe0307cfa1622f39dbb43866008e864518d2aed4a650a0",
+    "scripts/aufgabe04/perception/stand_axis/head_model_neck.py": "2b6ea96f44e4bf098a0cfd85977981f477a095fa92b3b464ad1eb8630e07799f",
+    "scripts/aufgabe04/perception/stand_axis/current_head_border_binding.py": "5a8c11e32e1e3dee35b6a759ab8daed03a6217c7cd7e89cbcf5d518f676ca002",
+    "scripts/aufgabe04/perception/stand_axis/._current_head_border_binding.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_candidates.py": "27e9ce57e7e24108113f7f6d2577b23792f6687958e92da206b2b78947ad6d34",
+    "scripts/aufgabe04/perception/stand_axis/head_border_seed.py": "518a7f191d72f14e880b9ffaa13cf4973fa68cfa3bb7f674f73a43da40595efb",
+    "scripts/aufgabe04/perception/stand_axis/._current_image_head_fit.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_model_fit.py": "58e19c11d939352bd99829212dfa2a4de4470790f0fd84e8a7ac961ca6bbb76a",
+    "scripts/aufgabe04/perception/stand_axis/physical_head_pipeline.py": "2e0023ccdf15c7148813e871e7cb6fd4309c5bff600364e8774ea82d295c1db5",
+    "scripts/aufgabe04/perception/stand_axis/._raw_neck_support.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_rail_intersections.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_proposal.py": "582e5e1ac31f12c4b61c6a0a8997677366f7239c11e7808690b6c90ce95f4b4a",
+    "scripts/aufgabe04/perception/stand_axis/._metric_head_search.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._observation_freshness.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._model_stage_timing.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/metric_head_search.py": "d31e228876b1f9d8925f8d6bc2a0f06e69820edac9a608e18a254350adb15033",
+    "scripts/aufgabe04/perception/stand_axis/qr_marker_validation.py": "daa571446e240cf5e0ffe037b11240ab783a44a9335139b4c6d9b1e14fe2cfc4",
+    "scripts/aufgabe04/perception/stand_axis/head_frame_resolution.py": "db63239bfc29d7c51a26c8798765c1c8f55b756bcdecc7cd2d965a050195e3b1",
+    "scripts/aufgabe04/perception/stand_axis/._head_geometry_acquisition.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._radiator_rib_mask.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/head_proposal_selection.py": "f547a64294cf4a6b8c6c33a7604b0e6bd651493d9f9115d21738e27bd9bef54c",
+    "scripts/aufgabe04/perception/stand_axis/._nearest_scan_head.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/head_hint_neighborhood.py": "781cef0646893b8cebbee5d9b60c7780ce0444a67ca84ae5bf011eb7a4868170",
+    "scripts/aufgabe04/perception/stand_axis/._model_profile.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/stem_candidates.py": "f0626c2c16670b434fc0a3be7b148caac41270f9881a781ab411c3d71c6cf06b",
+    "scripts/aufgabe04/perception/stand_axis/model_stage_timing.py": "5f68f7a4ffd9b2e15e93ab109849f35ca5531de4c258fa4cc34cc11f416eb922",
+    "scripts/aufgabe04/perception/stand_axis/._head_proposal_selection.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._stem_candidates.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/head_model_admission.py": "7c644b2b217f9cf30d9b5ad3d10a523b2b4a8f4569c54c454b96512f531fea3b",
+    "scripts/aufgabe04/perception/stand_axis/._geometry_contract.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._adaptive_foreground_gate.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis/._head_orientation_bounds.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_border_families.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._head_search_bounds.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/._model_backside_topology.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/model_projection.py": "cb15ad23bb3859ebd8498878e29e30dcaac22a302ba5acb97f97e5c37ef5ccd0",
+    "scripts/aufgabe04/perception/stand_axis/model_pipeline.py": "8f710e8c1960a1fd50593ac621d20ddc806a0106915e3ad897a5c76b2da0d72d",
+    "scripts/aufgabe04/perception/stand_axis/lidar_head_edge_region.py": "8ce9f694986ab93f242a4f3ace24dc74e396e262866d5771547ae3399c8bf86b",
+    "scripts/aufgabe04/perception/stand_axis/head_geometry_acquisition.py": "c39eb28d8d9520182a8ecdb59be9ebcbc331df1c88e514d3da701bdce62a1963",
+    "scripts/aufgabe04/perception/stand_axis/._joint_head_borders.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/stand_axis/radiator_rib_mask.py": "c9ea0a591eef4f36a14d05a3a1963959602bcdecfb71598e876dacbb66873e72",
+    "scripts/aufgabe04/perception/debug/__init__.py": "caeb0b7aa9e669ea727c402552f8014db8309bf57d504b9be2b2cfb286f309db",
+    "scripts/aufgabe04/perception/debug/._viewer_color_edges.py": "74d2e7fff7c2920c3b96b6e5b2c2269690ee33f49158e2090cd234f8335800cc",
+    "scripts/aufgabe04/perception/debug/._scan_probe.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/debug/stand_axis_viewer.py": "9d74af39a1350a82a45766a3cc0d7d5985a312df19daffa0bd2f48f8a86f0c6b",
+    "scripts/aufgabe04/perception/debug/._color_mask_viewer.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/debug/._recording_metadata.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/debug/._stand_axis_recording.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/debug/._viewer_model_overlay_policy.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/debug/recording_metadata.py": "3eeed18f75a65a3c00832c566124dd6d0801abde46614718a1214714abc0cec7",
+    "scripts/aufgabe04/perception/debug/._viewer_frame_timing.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/debug/stand_axis_recording.py": "ac5e3aabd170f021ef6c7cf8f7986ebf16939c3186fd2d7b91ab50aa91726c4e",
+    "scripts/aufgabe04/perception/debug/stand_model_overlay.py": "cf037574bc435a8229a01f80de4c78100a8749c6832259e6d48e90e9ea8da447",
+    "scripts/aufgabe04/perception/debug/viewer_color_edges.py": "885a76621b116bdcfa261727931a3584144746501eba002015eb50642055bc4e",
+    "scripts/aufgabe04/perception/debug/frame_receipt_diagnostics.py": "14f84082b01abed6c54c4a1b344c9258d8cb7489d9cfa2bc45df3997dff6efcc",
+    "scripts/aufgabe04/perception/debug/calibrated_handoff_runtime.py": "ba41c50cd081a04b0c6ea6d74671e4f1bb203a11e7e8d4a47620d168955cb981",
+    "scripts/aufgabe04/perception/debug/stand_axis_capture_store.py": "2c0b46679a994b0a158c7cbb9fa5daf40f8ddc5a3126200e361c8a1f039b66e3",
+    "scripts/aufgabe04/perception/debug/scan_probe.py": "4a71db0b9e02eb6df6a1b9364617aa60870013ea26e002d0bff4d1d767b9b190",
+    "scripts/aufgabe04/perception/debug/._frame_receipt_diagnostics.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/debug/.___init__.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/debug/._calibrated_handoff_runtime.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/debug/._stand_model_overlay.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/debug/viewer_frame_timing.py": "e10c0f015a13d7f23a9f7f5de6740c2103e0a915abcc2788e98a4f6df4405d1a",
+    "scripts/aufgabe04/perception/debug/._stand_axis_viewer.py": "9b62df27255c1b98d8b1d18a192eb35365b46ac42856d5b6c1104ecaac0f52fb",
+    "scripts/aufgabe04/perception/debug/color_mask_viewer.py": "07ee5c0e3900940d388c0d6b2e0e87dfa3a61beb57c3dcc833239700578f97a3",
+    "scripts/aufgabe04/perception/debug/viewer_model_overlay_policy.py": "9176daa37bd0303be34e20e8009faeed2f7d8c1ff5dda1a2837aadb526871df3",
+    "scripts/aufgabe04/perception/debug/._stand_axis_capture_store.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/debug/viewer_axis_admission.py": "b7133f3c3de320549662dae238ed3cd0d61c27590222d820c4191a5cd5df1357",
+    "scripts/aufgabe04/perception/debug/text_overlay.py": "b52ad4c9f456b0b4bacf7248400ec67b31b448f26ba8f614dc19af6cde6730e6",
+    "scripts/aufgabe04/perception/debug/._viewer_axis_admission.py": "5cb78e09ba53039bccb8adb4b94c72518db8d63b0a2fb48f71c549b2ad89aa43",
+    "scripts/aufgabe04/perception/debug/._text_overlay.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/__init__.py": "4c2b04084d8d990db1681336f5760a2b1abf35452434b72b716503e0e8fcb9be",
+    "scripts/aufgabe04/perception/stand_axis_handoff/._consensus.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/decision.py": "52fd72f593f30fed3ceb6a06f0734dca1342c3e51ae7793a2fa2881fc9c5dbb8",
+    "scripts/aufgabe04/perception/stand_axis_handoff/._lidar_axis.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/._models.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/._geometry.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/geometry.py": "8f0168a3811643c4007dbea881a8ad53e75cee15e976228214be19b4f15cf2d6",
+    "scripts/aufgabe04/perception/stand_axis_handoff/._overlay.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/consensus.py": "e655fb647aa98b8a686895d6ce09ba908a1b58921df5a35cf8a1290cb3f01ff9",
+    "scripts/aufgabe04/perception/stand_axis_handoff/lidar_axis.py": "32f4113fe5dbb53def53a92615384ce849219cf9f96519cb407167b423098c8e",
+    "scripts/aufgabe04/perception/stand_axis_handoff/.___init__.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d",
+    "scripts/aufgabe04/perception/stand_axis_handoff/overlay.py": "341469432f2f01afa537109836226c0ee9484c32ac5e682f4fb9d275bafdf4ca",
+    "scripts/aufgabe04/perception/stand_axis_handoff/models.py": "3188c37a9a9259c3aeb87bd924604559d872cce1d8598629cb09e68c371c7046",
+    "scripts/aufgabe04/perception/stand_axis_handoff/._decision.py": "d0ec23e64cffdee3610ff20fec889ee1e697b35214278448934e70f0c1ab999d"
+  },
+  "frames": [
+    {
+      "index": 0,
+      "recorded_reason": "nearest_head_scan_candidates_ambiguous",
+      "unique_scan_recorded": false,
+      "variants": {
+        "merged_with_colour_HYPOTHETICAL": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 170.19462899770588
+        },
+        "merged_without_colour_HYPOTHETICAL": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 139.9577069969382
+        }
+      }
+    },
+    {
+      "index": 3,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 157.7043209981639
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 144.31770599912852
+        }
+      }
+    },
+    {
+      "index": 4,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 93.3163840090856
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 85.87756600172725
+        }
+      }
+    },
+    {
+      "index": 31,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 158.5639630065998
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 156.74688800936565
+        }
+      }
+    },
+    {
+      "index": 42,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 136.29751100961585
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 124.86891400476452
+        }
+      }
+    },
+    {
+      "index": 47,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_planar_axis_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_model_planar_axis_ambiguous",
+          "corners": [
+            {
+              "u_px": 303.7363468200848,
+              "v_px": 197.47707038248723
+            },
+            {
+              "u_px": 439.8932029090632,
+              "v_px": 199.46255298417216
+            },
+            {
+              "u_px": 442.4438287035126,
+              "v_px": 331.4703890097129
+            },
+            {
+              "u_px": 306.2932346904132,
+              "v_px": 329.80900063133606
+            }
+          ],
+          "yaw_deg": null,
+          "elapsed_ms": 97.34278199903201
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_planar_axis_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_model_planar_axis_ambiguous",
+          "corners": [
+            {
+              "u_px": 303.7363468200848,
+              "v_px": 197.47707038248723
+            },
+            {
+              "u_px": 439.8932029090632,
+              "v_px": 199.46255298417216
+            },
+            {
+              "u_px": 442.4438287035126,
+              "v_px": 331.4703890097129
+            },
+            {
+              "u_px": 306.2932346904132,
+              "v_px": 329.80900063133606
+            }
+          ],
+          "yaw_deg": null,
+          "elapsed_ms": 90.97608999582008
+        }
+      }
+    },
+    {
+      "index": 109,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 166.15946899401024
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 150.8250670012785
+        }
+      }
+    },
+    {
+      "index": 110,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 160.31817099428736
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 149.55774901318364
+        }
+      }
+    },
+    {
+      "index": 128,
+      "recorded_reason": "nearest_head_scan_candidates_ambiguous",
+      "unique_scan_recorded": false,
+      "variants": {
+        "merged_with_colour_HYPOTHETICAL": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 120.17018299957272
+        },
+        "merged_without_colour_HYPOTHETICAL": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 112.38840500300284
+        }
+      }
+    },
+    {
+      "index": 131,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 120.69800299650524
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 110.42389000067487
+        }
+      }
+    },
+    {
+      "index": 152,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 121.81014899397269
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 111.59945400140714
+        }
+      }
+    },
+    {
+      "index": 162,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 119.73913399560843
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 110.39956400054507
+        }
+      }
+    },
+    {
+      "index": 176,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_pose_rejected",
+            "motion_authorized": false
+          },
+          "reason": "head_model_pose_rejected",
+          "corners": [
+            {
+              "u_px": 303.2909235595279,
+              "v_px": 198.804559566874
+            },
+            {
+              "u_px": 439.2195119901648,
+              "v_px": 199.2058027743816
+            },
+            {
+              "u_px": 442.85128308949413,
+              "v_px": 331.3705191826764
+            },
+            {
+              "u_px": 306.8846865907706,
+              "v_px": 329.58611459122875
+            }
+          ],
+          "yaw_deg": null,
+          "elapsed_ms": 115.45829499664251
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_pose_rejected",
+            "motion_authorized": false
+          },
+          "reason": "head_model_pose_rejected",
+          "corners": [
+            {
+              "u_px": 303.2909235595279,
+              "v_px": 198.804559566874
+            },
+            {
+              "u_px": 439.2195119901648,
+              "v_px": 199.2058027743816
+            },
+            {
+              "u_px": 442.85128308949413,
+              "v_px": 331.3705191826764
+            },
+            {
+              "u_px": 306.8846865907706,
+              "v_px": 329.58611459122875
+            }
+          ],
+          "yaw_deg": null,
+          "elapsed_ms": 104.06938499363605
+        }
+      }
+    },
+    {
+      "index": 178,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 129.17046499205753
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 114.53018500469625
+        }
+      }
+    },
+    {
+      "index": 183,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 114.16736600222066
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 106.06643299979623
+        }
+      }
+    },
+    {
+      "index": 190,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 118.09365900990088
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "reason": "head_proposal_ambiguous",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 110.01439399842639
+        }
+      }
+    },
+    {
+      "index": 191,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "model_current_head_border_unavailable",
+            "motion_authorized": false
+          },
+          "reason": "model_current_head_border_unavailable",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 663.3986129891127
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "model_current_head_border_unavailable",
+            "motion_authorized": false
+          },
+          "reason": "model_current_head_border_unavailable",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 656.0394719999749
+        }
+      }
+    },
+    {
+      "index": 218,
+      "recorded_reason": "model_current_head_border_unavailable",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "model_current_head_border_unavailable",
+            "motion_authorized": false
+          },
+          "reason": "model_current_head_border_unavailable",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 563.8693729997613
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "model_current_head_border_unavailable",
+            "motion_authorized": false
+          },
+          "reason": "model_current_head_border_unavailable",
+          "corners": null,
+          "yaw_deg": null,
+          "elapsed_ms": 539.6196179935941
+        }
+      }
+    },
+    {
+      "index": 221,
+      "recorded_reason": "head_proposal_ambiguous",
+      "unique_scan_recorded": true,
+      "variants": {
+        "current_with_colour": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": true,
+            "reason": "axis_estimated_current_measured_head",
+            "motion_authorized": false
+          },
+          "reason": "axis_estimated_current_measured_head",
+          "corners": [
+            {
+              "u_px": 303.2374617848745,
+              "v_px": 201.09683603422113
+            },
+            {
+              "u_px": 438.74425316152616,
+              "v_px": 197.7968282572988
+            },
+            {
+              "u_px": 443.23514553014707,
+              "v_px": 330.04447030039876
+            },
+            {
+              "u_px": 307.77485414439616,
+              "v_px": 334.7138081896643
+            }
+          ],
+          "yaw_deg": 3.044716556042869,
+          "elapsed_ms": 125.74908800888807
+        },
+        "current_without_colour": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": true,
+            "reason": "axis_estimated_current_measured_head",
+            "motion_authorized": false
+          },
+          "reason": "axis_estimated_current_measured_head",
+          "corners": [
+            {
+              "u_px": 303.2374617848745,
+              "v_px": 201.09683603422113
+            },
+            {
+              "u_px": 438.74425316152616,
+              "v_px": 197.7968282572988
+            },
+            {
+              "u_px": 443.23514553014707,
+              "v_px": 330.04447030039876
+            },
+            {
+              "u_px": 307.77485414439616,
+              "v_px": 334.7138081896643
+            }
+          ],
+          "yaw_deg": 3.044716556042869,
+          "elapsed_ms": 112.65689099673182
+        }
+      }
+    },
+    {
+      "index": 256,
+      "recorded_reason": "nearest_head_scan_candidates_ambiguous",
+      "unique_scan_recorded": false,
+      "variants": {
+        "merged_with_colour_HYPOTHETICAL": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_pose_rejected",
+            "motion_authorized": false
+          },
+          "reason": "head_model_pose_rejected",
+          "corners": [
+            {
+              "u_px": 303.7916676860839,
+              "v_px": 201.53533335825355
+            },
+            {
+              "u_px": 439.887210749149,
+              "v_px": 197.47424889380645
+            },
+            {
+              "u_px": 442.48763245861693,
+              "v_px": 331.3429273386193
+            },
+            {
+              "u_px": 306.28194583974334,
+              "v_px": 329.7338652258333
+            }
+          ],
+          "yaw_deg": null,
+          "elapsed_ms": 79.49445200210903
+        },
+        "merged_without_colour_HYPOTHETICAL": {
+          "border_detection": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_pose_rejected",
+            "motion_authorized": false
+          },
+          "reason": "head_model_pose_rejected",
+          "corners": [
+            {
+              "u_px": 303.7916676860839,
+              "v_px": 201.53533335825355
+            },
+            {
+              "u_px": 439.887210749149,
+              "v_px": 197.47424889380645
+            },
+            {
+              "u_px": 442.48763245861693,
+              "v_px": 331.3429273386193
+            },
+            {
+              "u_px": 306.28194583974334,
+              "v_px": 329.7338652258333
+            }
+          ],
+          "yaw_deg": null,
+          "elapsed_ms": 74.83482199313585
+        }
+      }
+    }
+  ],
+  "comparison": {
+    "current_with_colour": {
+      "frames": 17,
+      "head_frame_detected": 3,
+      "yaw_reliable": 1,
+      "reasons": {
+        "head_proposal_ambiguous": 12,
+        "head_model_planar_axis_ambiguous": 1,
+        "head_model_pose_rejected": 1,
+        "model_current_head_border_unavailable": 2,
+        "axis_estimated_current_measured_head": 1
+      },
+      "median_elapsed_ms": 125.74908800888807
+    },
+    "current_without_colour": {
+      "frames": 17,
+      "head_frame_detected": 3,
+      "yaw_reliable": 1,
+      "reasons": {
+        "head_proposal_ambiguous": 12,
+        "head_model_planar_axis_ambiguous": 1,
+        "head_model_pose_rejected": 1,
+        "model_current_head_border_unavailable": 2,
+        "axis_estimated_current_measured_head": 1
+      },
+      "median_elapsed_ms": 112.65689099673182
+    }
+  }
+}

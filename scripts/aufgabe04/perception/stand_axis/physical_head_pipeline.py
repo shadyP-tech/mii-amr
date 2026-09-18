@@ -55,6 +55,7 @@ def fit_physical_head_in_frame(
     cv2, frame, raw_edges, *, model_profile, camera, timing,
     current_head_proposal_corners=None, current_head_proposal_verified=False, pose_hint=None,
     current_head_refinement=None, candidate_search=None, proposal_filter=None,
+    color_support_mask=None,
     expected_head_center_u_px=None, expected_head_center_v_px=None,
     expected_head_height_px=None, max_reprojection_rmse_px=2., min_edge_height_px=8.,
     deadline_monotonic_sec=None,
@@ -149,6 +150,7 @@ def fit_physical_head_in_frame(
             model_profile=model_profile,
             refinement_out=refinement_out,
             candidate_search=candidate_search,
+            color_support_mask=color_support_mask,
             proposal_filter=proposal_filter,
             expected_head_center_u_px=acquisition_expected[0],
             expected_head_center_v_px=acquisition_expected[1],
@@ -161,6 +163,7 @@ def fit_physical_head_in_frame(
                                                model_profile=model_profile,
                                                refinement_out=refinement_out,
                                                candidate_search=candidate_search,
+                                               color_support_mask=color_support_mask,
                                                proposal_filter=proposal_filter,
                                                deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics["acquisition"] = asdict(acquisition)

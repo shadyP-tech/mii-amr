@@ -136,7 +136,7 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
             return adapter
         with patch.object(processing.CameraObserverProcessingTest, "make_adapter", make_adapter):
             adapter, recommendation = measured_fixtures.MeasuredHeadObserverProcessingTests().run_view(
-                "shifted_registered_" + scenario, publish_immediate=True)
+                "physical_shifted_registered_" + scenario, publish_immediate=True)
         return adapter, recommendation, output
 
     def test_real_processing_stages_center_after_current_crop_and_stopped_frame(self):

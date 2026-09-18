@@ -93,3 +93,10 @@ tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/*
 !tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/raw_edges.png
 !tests/aufgabe04/fixtures/head_neck_junction_20260911T142702Z/inputs.json
 !tests/test_run_with_bundle.py
+!tests/aufgabe04/fixtures/candidate_centering/
+tests/aufgabe04/fixtures/candidate_centering/*
+!tests/aufgabe04/fixtures/candidate_centering/recorded_advisory.json
+!tests/aufgabe04/fixtures/head_border_clutter_20260918/
+tests/aufgabe04/fixtures/head_border_clutter_20260918/*
+!tests/aufgabe04/fixtures/head_border_clutter_20260918/inputs.json
+!tests/aufgabe04/fixtures/head_border_clutter_20260918/source_000003.png

@@ -1,0 +1,380 @@
+{
+  "frame_count": 257,
+  "duration_sec": 13.130753993988037,
+  "model_reasons": {
+    "nearest_head_scan_candidates_ambiguous": 240,
+    "head_proposal_ambiguous": 8,
+    "model_current_head_border_unavailable": 9
+  },
+  "border_detected": 0,
+  "result_freshness": {
+    "observation_too_old": 61,
+    "observation_fresh": 196
+  },
+  "unique_target_frames": [
+    3,
+    4,
+    31,
+    42,
+    47,
+    109,
+    110,
+    131,
+    152,
+    162,
+    176,
+    178,
+    183,
+    190,
+    191,
+    218,
+    221
+  ],
+  "ambiguous_endpoint_pairs": 240,
+  "receipt_age_ms": {
+    "min": 133.99243354797363,
+    "median": 226.49431228637695,
+    "max": 248.97122383117676
+  },
+  "start_age_ms": {
+    "min": 136.64181854983326,
+    "median": 233.4566831414122,
+    "max": 342.78444047959056
+  },
+  "detector_ms": {
+    "min": 3.7571270077023655,
+    "median": 4.255325999110937,
+    "max": 182.74731498968322
+  },
+  "unique_detector_ms": {
+    "min": 120.30217700521462,
+    "median": 149.8122519988101,
+    "max": 182.74731498968322
+  },
+  "height_bounds": {
+    "depth_m": {
+      "min": 0.36154206803629096,
+      "median": 0.36357375975991035,
+      "max": 0.36543935981890474
+    },
+    "height_px": {
+      "min": 135.86756660868812,
+      "median": 136.55713847488926,
+      "max": 137.31420180222304
+    },
+    "min_height_px": {
+      "min": 74.96142656511688,
+      "median": 75.1510446434675,
+      "max": 75.3565074003429
+    },
+    "max_height_px": {
+      "min": 242.8610301934791,
+      "median": 244.76816519542325,
+      "max": 246.87538401364847
+    }
+  },
+  "local_source_hashes": {
+    "metadata.jsonl": "7a66f237d5aea056f97fa9a1b9b0107bdebffeb1fcaed3c87771b23789b61631",
+    "source_000256.png": "efd5365439b59758f48703215d63cd54d42ff7c01996f92d2dcb0e7aa637bede",
+    "source_000128.png": "269bc3b140856364f23d41f622eec2d97be940b80f71ca2293f15d97a126a47f",
+    "source_000003.png": "d392dde137a08b2f05e88dc2717759bf52dad840daf6331c2f5675a3be2f0533",
+    "source_000000.png": "b90887948fd3d4d0c0b771db99900703aa99508927629593a4fd35b2b620ca67",
+    "source_000004.png": "87c73acefcc78b865c3e91f027f027123a579c8cbaf9da8bb416fa53b94bb107"
+  },
+  "replay.json": {
+    "unique_targets": {
+      "recorded_prior": {
+        "count": 17,
+        "usable": 0,
+        "reasons": {
+          "head_proposal_ambiguous": 8,
+          "model_current_head_border_unavailable": 9
+        },
+        "elapsed_ms": {
+          "min": 109.6141760062892,
+          "median": 138.79852299578488,
+          "max": 162.37780700612348
+        }
+      },
+      "tighter_size": {
+        "count": 17,
+        "usable": 0,
+        "reasons": {
+          "head_proposal_ambiguous": 10,
+          "model_current_head_border_unavailable": 7
+        },
+        "elapsed_ms": {
+          "min": 111.60759700578637,
+          "median": 144.60953199886717,
+          "max": 163.25954798958264
+        }
+      },
+      "volume_mask": {
+        "count": 17,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 17
+        },
+        "elapsed_ms": {
+          "min": 179.9819430016214,
+          "median": 242.19902500044554,
+          "max": 337.07282500108704
+        }
+      },
+      "tighter_size_and_volume": {
+        "count": 17,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 17
+        },
+        "elapsed_ms": {
+          "min": 166.67015598795842,
+          "median": 225.53937300108373,
+          "max": 295.08596200321335
+        }
+      }
+    },
+    "hypothetical_merged_targets": {
+      "merged_prior_HYPOTHETICAL": {
+        "count": 3,
+        "usable": 0,
+        "reasons": {
+          "head_proposal_ambiguous": 2,
+          "head_model_pose_rejected": 1
+        },
+        "elapsed_ms": {
+          "min": 90.06482400582172,
+          "median": 125.33140000596177,
+          "max": 216.2972170044668
+        }
+      },
+      "tighter_size": {
+        "count": 3,
+        "usable": 0,
+        "reasons": {
+          "head_proposal_ambiguous": 2,
+          "head_model_pose_rejected": 1
+        },
+        "elapsed_ms": {
+          "min": 87.43125200271606,
+          "median": 125.05407900607679,
+          "max": 182.12836999737192
+        }
+      },
+      "volume_mask": {
+        "count": 3,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 3
+        },
+        "elapsed_ms": {
+          "min": 161.91585100023076,
+          "median": 239.3727840099018,
+          "max": 257.4728519975906
+        }
+      },
+      "tighter_size_and_volume": {
+        "count": 3,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 3
+        },
+        "elapsed_ms": {
+          "min": 155.67261099931784,
+          "median": 222.5372770044487,
+          "max": 236.1592480010586
+        }
+      }
+    },
+    "all_hashes_unchanged": true,
+    "runtime": {
+      "python": "3.10.12",
+      "opencv": "4.5.4",
+      "numpy": "1.21.5"
+    }
+  },
+  "guided_replay.json": {
+    "unique_targets": {
+      "guided_tighter_size": {
+        "count": 17,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 17
+        },
+        "elapsed_ms": {
+          "min": 395.0792590039782,
+          "median": 457.2596740035806,
+          "max": 566.0956109932158
+        }
+      },
+      "guided_tighter_size_and_volume": {
+        "count": 17,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 17
+        },
+        "elapsed_ms": {
+          "min": 328.69166899763513,
+          "median": 420.22297700168565,
+          "max": 554.739419996622
+        }
+      }
+    },
+    "hypothetical_merged_targets": {
+      "guided_tighter_size": {
+        "count": 3,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 3
+        },
+        "elapsed_ms": {
+          "min": 457.7552300033858,
+          "median": 508.20010200550314,
+          "max": 541.5933869953733
+        }
+      },
+      "guided_tighter_size_and_volume": {
+        "count": 3,
+        "usable": 0,
+        "reasons": {
+          "model_current_head_border_unavailable": 3
+        },
+        "elapsed_ms": {
+          "min": 434.7133419942111,
+          "median": 447.8770949936006,
+          "max": 449.39400799921714
+        }
+      }
+    },
+    "all_hashes_unchanged": true,
+    "runtime": {
+      "python": "3.10.12",
+      "opencv": "4.5.4",
+      "numpy": "1.21.5"
+    }
+  },
+  "border_replay": {
+    "all_hashes_unchanged": true,
+    "scope": "Supplemental separate border/yaw diagnostic on frames 0/3/4/128/256 with original acquisition ordering. Manual locations are a separate oracle diagnostic. No live deadlines, QR, tracker or production changes. Merged-target variants are hypotheses from recorded projected cluster centroids, not validated raw-scan merges.",
+    "frames": [
+      {
+        "index": 0,
+        "variants": {
+          "merged_prior_HYPOTHETICAL": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "tighter_size": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          }
+        },
+        "manual_location_diagnostic": {
+          "head_frame_detected": true,
+          "yaw_reliable": false,
+          "reason": "head_model_pose_rejected",
+          "motion_authorized": false
+        }
+      },
+      {
+        "index": 3,
+        "variants": {
+          "recorded_prior": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "tighter_size": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          }
+        },
+        "manual_location_diagnostic": {
+          "head_frame_detected": true,
+          "yaw_reliable": false,
+          "reason": "head_model_planar_axis_ambiguous",
+          "motion_authorized": false
+        }
+      },
+      {
+        "index": 4,
+        "variants": {
+          "recorded_prior": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "tighter_size": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          }
+        },
+        "manual_location_diagnostic": {
+          "head_frame_detected": true,
+          "yaw_reliable": false,
+          "reason": "head_model_planar_axis_ambiguous",
+          "motion_authorized": false
+        }
+      },
+      {
+        "index": 128,
+        "variants": {
+          "merged_prior_HYPOTHETICAL": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          },
+          "tighter_size": {
+            "head_frame_detected": false,
+            "yaw_reliable": false,
+            "reason": "head_proposal_ambiguous",
+            "motion_authorized": false
+          }
+        },
+        "manual_location_diagnostic": {
+          "head_frame_detected": true,
+          "yaw_reliable": false,
+          "reason": "head_model_pose_rejected",
+          "motion_authorized": false
+        }
+      },
+      {
+        "index": 256,
+        "variants": {
+          "merged_prior_HYPOTHETICAL": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_pose_rejected",
+            "motion_authorized": false
+          },
+          "tighter_size": {
+            "head_frame_detected": true,
+            "yaw_reliable": false,
+            "reason": "head_model_pose_rejected",
+            "motion_authorized": false
+          }
+        },
+        "manual_location_diagnostic": {
+          "head_frame_detected": true,
+          "yaw_reliable": false,
+          "reason": "head_model_planar_axis_ambiguous",
+          "motion_authorized": false
+        }
+      }
+    ]
+  },
+  "recording": "recording_20260918_153656_468438163",
+  "workstation_commit": "e0cbf5ebbbc1a99de3b5ced09c4d2c3f5d96a2d0",
+  "method": "Metadata census of all 257 frames; exact-runtime replay of all 17 unique-target frames and three conditional merged-target samples; five manual-location border diagnostics. No live deadlines, QR or tracking in replay. No production changes."
+}
