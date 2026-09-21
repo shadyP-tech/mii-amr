@@ -119,8 +119,9 @@ def register_current_tracked_head(
 ) -> CameraTargetRegistrationSelection:
     """Validate current geometry/association before any backside crop gate.
 
-    The association must have been computed against the original current map
-    projection, current exact-time scan and this selected fit. The observer
+    The association must retain the original map bearing and scale gates,
+    current exact-time scan and this selected fit. A scan search hint supplies
+    only a bounded spatial prior with the same final cluster. The observer
     still rechecks sensor freshness before publishing or accumulating evidence.
     """
     proof = CurrentMeasuredHeadRegistration(

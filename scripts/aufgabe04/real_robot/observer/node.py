@@ -189,6 +189,7 @@ from scripts.aufgabe04.real_robot.observer.head_proposal_registration import (
 from scripts.aufgabe04.real_robot.observer.current_scan_head_proposal_filter import (
     CurrentScanHeadProposalFilter,
 )
+from scripts.aufgabe04.real_robot.observer.stopped_target_search import reconcile_stopped_target_search
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, unavailable_head_evaluation,
 )
@@ -1709,7 +1710,26 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio)
         search_metadata = dict(candidate_search.last_metadata)
         tracking_evaluation = None
+        search_reconciliation = None
         if viewer_geometry:
+            search_reconciliation, reconciliation_metadata = reconcile_stopped_target_search(
+                scan=plain_scan, candidate_xy=(self.args.stand_x, self.args.stand_y),
+                original_projection=projection, map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                max_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                image_stamp_sec=image.stamp_sec, max_age_sec=self.args.max_sensor_age_sec,
+                sync_tolerance_sec=self.args.sync_tolerance_sec,
+                scan_from_map=RigidTransform(self.profile.scan_frame, self.profile.map_frame,
+                    scan_translation, scan_rotation),
+                camera_from_map=RigidTransform(self.profile.camera_optical_frame, self.profile.map_frame,
+                    camera_translation, camera_rotation),
+                intrinsics=intrinsics, model_profile=self.stand_model_profile,
+                stand_radius_m=self.args.stand_radius_m,
+                stand_uncertainty_m=self.args.stand_uncertainty_m)
+            head_search_projection = (projection if search_reconciliation is None
+                                      else search_reconciliation.projection)
             region_association = preliminary_lidar_association
             region_association_scope = "original_map_cone"
             if region_association.eligible_cluster_count == 0:
@@ -1727,7 +1747,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     min_cluster_sample_count=self.args.lidar_min_samples)
                 region_association_scope = "existing_registration_bearing_envelope"
             lidar_edge_region, lidar_edge_region_diagnostics = project_lidar_candidate_head_region(
-                candidate_xy=(self.args.stand_x, self.args.stand_y),
+                candidate_xy=((self.args.stand_x, self.args.stand_y) if search_reconciliation is None
+                              else search_reconciliation.search_xy),
                 camera_from_map=RigidTransform(
                     parent_frame=self.profile.camera_optical_frame,
                     child_frame=self.profile.map_frame,
@@ -1758,11 +1779,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 preview_lidar_association=lambda association, current_scan:
                     resolve_lidar_association(association, current_scan, preview=True),
                 current_ros_sec=lambda: self.node.get_clock().now().nanoseconds / 1e9,
+                optical_depth_m=(None if search_reconciliation is None else head_search_projection.depth_m),
+                depth_uncertainty_m=self.args.stand_uncertainty_m+self.args.stand_radius_m,
             )
             tracking_evaluation = evaluate_viewer_head(
                 self.cv2, frame, model_profile=self.stand_model_profile,
                 intrinsics=intrinsics, pose_hint=prediction.pose,
-                projection=projection, expected_head_height_px=expected_head_height_px,
+                projection=head_search_projection, expected_head_height_px=expected_head_height_px,
                 max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
                 fallback_attempt=roi_attempts[-1] if roi_attempts else None,
                 cache=qr_decode_cache, budget=qr_acquisition_budget,
@@ -1798,6 +1821,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     (tracking_evaluation.qr_decode_metadata or {}).get("candidate_screen")),
                 "current_scan_preview_before_cold_selection": current_scan_proposal_filter.metadata(),
                 "lidar_edge_region": lidar_edge_region_diagnostics,
+                "stopped_target_search": reconciliation_metadata,
                 "current_scan_association_after_geometry": True,
                 "measurement_reused": False, "motion_authorized": False,
             }
@@ -1856,6 +1880,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 max_camera_map_bearing_delta_rad=math.radians(
                     self.args.backside_registration_max_bearing_delta_deg),
                 resolve_lidar_association=resolve_lidar_association,
+                search_reconciliation=search_reconciliation,
             )
         if viewer_geometry or search_hint is not None:
             registration = register_current_tracked_head(

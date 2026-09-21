@@ -469,6 +469,15 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         adapter, payload = self.run_view("physical_offset_scan")
         self.assertTrue(all(item["candidate_search"].edge_region is not None
                             for item in adapter._test_metric_options))
+        self.assertTrue(all(item["candidate_search"].center[0] < 340.
+                            for item in adapter._test_metric_options))
+        self.assertTrue(all(value.optical_depth_m is not None
+                            for value in adapter._test_scan_filters))
+        model = adapter._write_status.call_args_list[0].kwargs["stand_axis_debug"]["metric_model"]
+        hint = model["candidate_head_search"]["stopped_target_search"]
+        self.assertTrue(hint["accepted"])
+        self.assertFalse(hint["candidate_geometry_updated"])
+        self.assertEqual((adapter.args.stand_x, adapter.args.stand_y), (.6, 0.))
         # The broad pre-search hint cannot authorize the deliberately mismatched
         # synthetic visual head; normal current-head association still governs.
         self.assertIsNone(payload)
@@ -478,6 +487,8 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         adapter, payload = self.run_view("physical_offset_scan_ambiguous")
         self.assertTrue(all(item["candidate_search"].edge_region is None
                             for item in adapter._test_metric_options))
+        self.assertTrue(all(value.optical_depth_m is None
+                            for value in adapter._test_scan_filters))
         self.assertIsNone(payload)
         self.assertFalse(adapter.completed)
 

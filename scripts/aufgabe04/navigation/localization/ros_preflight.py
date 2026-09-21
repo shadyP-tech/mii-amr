@@ -1020,6 +1020,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 self.config.odom_frame,
                 self.max_tf_age_sec,
                 max_future_sec=self.max_localization_tf_future_sec,
+                minimum_stamp_sec=(
+                    float(self.stationary_map_from_odom_samples[-1]["stamp_sec"])
+                    if self.stationary_map_from_odom_samples else None
+                ),
             )
         self._observe_localization_ownership(
             observations,
@@ -1730,6 +1734,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         max_age_sec: float,
         *,
         max_future_sec: float | None = None,
+        minimum_stamp_sec: float | None = None,
     ) -> Tuple[bool, Dict[str, object]]:
         name = f"tf {target_frame}->{source_frame}"
         try:
@@ -1739,6 +1744,18 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 Time(),
                 timeout=Duration(seconds=0.2),
             )
+            # Direct /tf capture can lead the Buffer callback by one update.
+            # Service callbacks and reacquire; never relabel an older sample
+            # or relax the certificate's stationary-window ordering check.
+            retries = 0
+            while (minimum_stamp_sec is not None
+                   and Time.from_msg(transform.header.stamp).nanoseconds / 1e9 < minimum_stamp_sec
+                   and retries < 5):
+                rclpy.spin_once(self, timeout_sec=0.05)
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, Time(), timeout=Duration(seconds=0.2),
+                )
+                retries += 1
         except TransformException as exc:
             data = {"available": False, "error": str(exc)}
             observations.append(RosObservation(name, False, str(exc), data))
@@ -1811,7 +1828,11 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             and frame_identity_ok
             and quaternion_ok
             and pose_values_ok
+            and (minimum_stamp_sec is None or data["stamp_sec"] >= minimum_stamp_sec)
         )
+        if minimum_stamp_sec is not None:
+            data.update(minimum_stamp_sec=minimum_stamp_sec,
+                        stationary_window_reacquisition_count=retries)
         observations.append(RosObservation(name, ok, f"age={age:.3f}s", data))
         if not ok:
             if not frame_identity_ok:
@@ -1820,6 +1841,8 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 failure = "invalid transform quaternion"
             elif not pose_values_ok:
                 failure = "non-finite transform"
+            elif minimum_stamp_sec is not None and data["stamp_sec"] < minimum_stamp_sec:
+                failure = "transform predates stationary sample window after bounded reacquisition"
             elif age < -accepted_future_sec:
                 failure = "future-dated transform"
             else:

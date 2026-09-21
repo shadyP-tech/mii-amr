@@ -75,6 +75,7 @@ def rectified_pixel_bearing_in_scan(
     cx_px: float,
     cy_px: float,
     scan_from_camera: RigidTransform,
+    optical_depth_m: float | None = None,
 ) -> float:
     values = (u_px, v_px, fx_px, fy_px, cx_px, cy_px)
     if not all(math.isfinite(float(value)) for value in values):
@@ -87,6 +88,14 @@ def rectified_pixel_bearing_in_scan(
         1.0,
     )
     scan_ray = rotate_vector(camera_ray, scan_from_camera.rotation_xyzw)
+    if optical_depth_m is not None:
+        if not math.isfinite(optical_depth_m) or optical_depth_m <= 0:
+            raise ValueError("optical depth must be finite and positive")
+        if (len(scan_from_camera.translation_xyz_m) != 3 or not
+                all(math.isfinite(t) for t in scan_from_camera.translation_xyz_m)):
+            raise ValueError("camera translation must contain three finite values")
+        scan_ray = tuple(optical_depth_m*v+t for v, t in
+                         zip(scan_ray, scan_from_camera.translation_xyz_m))
     horizontal_norm = math.hypot(scan_ray[0], scan_ray[1])
     if horizontal_norm <= 1.0e-9:
         raise ValueError("camera ray has no stable scan-plane bearing")

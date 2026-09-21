@@ -40,6 +40,8 @@ class CurrentScanHeadProposalFilter:
     max_camera_map_bearing_delta_rad: float
     preview_lidar_association: object = None
     current_ros_sec: object = None
+    optical_depth_m: float | None = None
+    depth_uncertainty_m: float = 0.
     _diagnostics: dict = field(default_factory=lambda: {
         "rough_previews": 0, "rough_rejections": 0, "rough_envelope_fallbacks": 0,
         "measured_scan_previews": 0, "measured_scan_rejections": 0,
@@ -50,11 +52,12 @@ class CurrentScanHeadProposalFilter:
         self.max_camera_map_bearing_delta_rad = normalize_certified_camera_map_bearing_limit(
             self.max_camera_map_bearing_delta_rad)
 
-    def _bearing(self, u, v):
+    def _bearing(self, u, v, depth=None):
         return rectified_pixel_bearing_in_scan(
             u_px=u, v_px=v, fx_px=self.intrinsics.fx_px, fy_px=self.intrinsics.fy_px,
             cx_px=self.intrinsics.cx_px, cy_px=self.intrinsics.cy_px,
-            scan_from_camera=self.scan_from_camera)
+            scan_from_camera=self.scan_from_camera,
+            optical_depth_m=self.optical_depth_m if depth is None else depth)
 
     def preview(self, proposal):
         """Reject only centers whose whole refinement envelope misses the map gate.
@@ -69,9 +72,13 @@ class CurrentScanHeadProposalFilter:
         u, v = proposal.center_u_px, proposal.center_v_px
         try:
             center = self._bearing(u, v)
-            angles = tuple(_angle_delta(self._bearing(u+du, v+dv), center)
+            depths = ((None,) if self.optical_depth_m is None else
+                      (self.optical_depth_m-self.depth_uncertainty_m,
+                       self.optical_depth_m+self.depth_uncertainty_m))
+            angles = tuple(_angle_delta(self._bearing(u+du, v+dv, depth), center)
                            for du in (-MAX_HINT_CENTER_SHIFT_PX, MAX_HINT_CENTER_SHIFT_PX)
-                           for dv in (-MAX_HINT_CENTER_SHIFT_PX, MAX_HINT_CENTER_SHIFT_PX))
+                           for dv in (-MAX_HINT_CENTER_SHIFT_PX, MAX_HINT_CENTER_SHIFT_PX)
+                           for depth in depths)
             if any(abs(value) >= math.pi/2 for value in angles):
                 raise ValueError("bearing envelope is not in one open half-plane")
             lower, upper = min(angles), max(angles)
@@ -120,6 +127,7 @@ class CurrentScanHeadProposalFilter:
 
     def metadata(self):
         return {**self._diagnostics,
+                "optical_depth_m": self.optical_depth_m,
                 "measured_associations": list(self._diagnostics["measured_associations"]),
                 "policy": "current_scan_measured_proposal_preview",
                 "rough_policy": "conservative_map_bearing_envelope",

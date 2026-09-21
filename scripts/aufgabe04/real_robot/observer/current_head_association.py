@@ -25,6 +25,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
     validate_backside_registration_center_offset_ratio,
 )
 from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_detection_admission
+from scripts.aufgabe04.real_robot.observer.stopped_target_search import StoppedTargetSearch
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class CurrentHeadCandidateAssociation:
     fitted_head_bearing_rad: float | None = None
     lidar_association: CameraRegisteredCandidateLidarAssociation | None = None
     head_orientation_bounds: CurrentHeadOrientationBounds | None = None
+    search_reconciliation: dict | None = None
 
     def metadata(self) -> dict:
         return {**asdict(self), "schema_version": 1,
@@ -61,11 +63,13 @@ def associate_current_measured_head(
     accepted_range_m, now_sec, max_scan_age_sec, min_cluster_sample_count,
     max_center_offset_ratio, max_camera_map_bearing_delta_rad,
     resolve_lidar_association=None,
+    search_reconciliation=None,
 ) -> CurrentHeadCandidateAssociation:
     """Require current geometry, original projection bounds and a unique scan target.
 
-    ``projection`` and ``expected_head_height_px`` must be the original map/TF
-    projection, not the selected attempt's potentially recentered expectation.
+    ``projection`` and scale remain the original map/TF values. A separately
+    bounded current-scan search hint may supply the spatial comparison center;
+    the original bearing/range gates and that same cluster remain mandatory.
     Intrinsics describe the full rectified image; the ROI offset is added once.
     The caller checks image freshness before this call and again at publication.
     """
@@ -81,6 +85,15 @@ def associate_current_measured_head(
         return result
     if estimate.model_profile_sha256 != profile_sha256:
         return replace(result, reason="current_head_profile_mismatch")
+    spatial_projection = projection
+    if search_reconciliation is not None:
+        hint = search_reconciliation
+        if (not isinstance(hint, StoppedTargetSearch) or hint.scan is not scan
+                or hint.original_projection != projection
+                or hint.map_bearing_rad != map_bearing_rad):
+            return replace(result, reason="current_head_search_hint_context_mismatch")
+        spatial_projection = hint.projection
+        result = replace(result, search_reconciliation=hint.metadata())
     try:
         # Unusable single-angle estimates deliberately have zero edge-height
         # fields. A bounded detection uses its bound current corners instead.
@@ -121,8 +134,8 @@ def associate_current_measured_head(
             raise ValueError("original projection must be finite and in front of the camera")
         center = (sum(p.u_px for p in corners) / 4 + roi.x0,
                   sum(p.v_px for p in corners) / 4 + roi.y0)
-        ratio = math.hypot(center[0] - projection.u_px,
-                           center[1] - projection.v_px) / expected_head_height_px
+        ratio = math.hypot(center[0] - spatial_projection.u_px,
+                           center[1] - spatial_projection.v_px) / expected_head_height_px
         result = replace(result, full_image_center_px=center, center_offset_ratio=ratio)
         if ratio > limit:
             return replace(result, reason="current_head_outside_registration_window")
@@ -130,6 +143,7 @@ def associate_current_measured_head(
             u_px=center[0], v_px=center[1], fx_px=intrinsics.fx_px,
             fy_px=intrinsics.fy_px, cx_px=intrinsics.cx_px, cy_px=intrinsics.cy_px,
             scan_from_camera=scan_from_camera,
+            optical_depth_m=(None if search_reconciliation is None else spatial_projection.depth_m),
         )
     except (TypeError, ValueError, ArithmeticError):
         return replace(result, reason="current_head_projection_invalid")
@@ -149,6 +163,10 @@ def associate_current_measured_head(
             cone_half_angle_rad=cone_half_angle_rad,
             registered_association=association,
         )
+        if (search_reconciliation is not None and not
+                set(association.search_association.selected_cluster_source_indices).intersection(
+                    search_reconciliation.source_indices)):
+            rejection = "current_head_differs_from_search_cluster"
     accepted = association.associated and not rejection
     return replace(
         result, accepted=accepted,
