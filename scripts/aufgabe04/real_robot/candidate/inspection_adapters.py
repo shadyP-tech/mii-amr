@@ -7,6 +7,7 @@ This module never publishes motion or bypasses a child preflight/permit.
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import contextmanager
 import json
 import math
 from pathlib import Path
@@ -58,6 +59,34 @@ def execute_local_candidate_inspection(
     candidate_uid = observation_frame.candidate.candidate_uid
     seen_normals: list[float] = []
     motion_serial = 0
+
+    @contextmanager
+    def phase(name, root, index, **details):
+        """Leave a durable boundary even when a live effect never returns."""
+        def emit(state, **extra):
+            effects.event_sink(candidate_root / "inspection_handoff_events.jsonl", {
+                "schema_version": 1, "event": name, "state": state,
+                "candidate_uid": candidate_uid, "view_index": index,
+                "output_dir": str(root), "timestamp_unix_sec": effects.clock(),
+                "motion_authorized": False, **details, **extra,
+            })
+        emit("started")
+        try:
+            yield
+        except BaseException as exc:
+            try:
+                emit("failed", exception_type=type(exc).__name__, detail=str(exc)[:1024])
+            except Exception as log_error:
+                if hasattr(exc, "add_note"):
+                    exc.add_note(f"Could not persist handoff failure: {log_error}")
+            raise
+        else:
+            emit("returned")
+
+    def capture_observation(request):
+        with phase("observer_capture", request.output_dir, request.attempt_index):
+            return effects.capture_observation(request)
+
     route_search = CandidateInspectionRouteSearch(
         candidate_uid,
         event_sink=lambda event: effects.event_sink(
@@ -164,14 +193,15 @@ def execute_local_candidate_inspection(
         motion_serial += 1
         run_id = f"{candidate_run_id}_inspection_{motion_serial:03d}"
         try:
-            execute_motion(
-                config=frame.config, effects=effects, candidate_root=root,
-                plan_request=request, initial_sealed=sealed, run_id=run_id,
-                leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
-                candidate_index=100000 + candidate_index * 1000 + motion_serial,
-                target_id=candidate_uid, frame_source_config=source_config,
-                source_registry=source_registry, plan_planning_frame=frame.planning_frame,
-            )
+            with phase("inspection_motion", root, index, purpose=purpose, run_id=run_id):
+                execute_motion(
+                    config=frame.config, effects=effects, candidate_root=root,
+                    plan_request=request, initial_sealed=sealed, run_id=run_id,
+                    leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH,
+                    candidate_index=100000 + candidate_index * 1000 + motion_serial,
+                    target_id=candidate_uid, frame_source_config=source_config,
+                    source_registry=source_registry, plan_planning_frame=frame.planning_frame,
+                )
         except CandidateStartupRecoveryError as exc:
             decision = evaluate_candidate_route_admission_deferral(
                 exc, expected_initial_run_id=run_id,
@@ -185,10 +215,12 @@ def execute_local_candidate_inspection(
         return frame
 
     def admit(root, fallback_frame, index):
-        result = admit_arrival(
-            source_config=source_config, effects=effects, source_registry=source_registry,
-            candidate_uid=candidate_uid, candidate_root=root, observation_attempt_index=0,
-        )
+        with phase("arrival_admission", root, index):
+            result = admit_arrival(
+                source_config=source_config, effects=effects, source_registry=source_registry,
+                candidate_uid=candidate_uid, candidate_root=root, observation_attempt_index=0,
+                allow_centering_acquisition=effects.run_centering_turn is not None,
+            )
         if result.planning_frame is None and result.observation_pose is None:
             result = replace(result, observation_pose=pose(fallback_frame))
         return result
@@ -323,7 +355,7 @@ def execute_local_candidate_inspection(
 
     def centered_capture(frame, output, index):
         def capture(current, destination, view, enabled, timeout, not_before):
-            return effects.capture_observation(observation_request_type(
+            return capture_observation(observation_request_type(
                 current.candidate, destination, view, allow_centering=enabled,
                 timeout_sec=timeout, observation_not_before_sec=not_before,
             ))
@@ -384,7 +416,7 @@ def execute_local_candidate_inspection(
         candidate_uid=candidate_uid, candidate_root=candidate_root, initial_frame=initial,
         max_views=source_config.max_candidate_inspection_views,
         effects=CandidateInspectionEffects(
-            capture=lambda frame, output, index: effects.capture_observation(
+            capture=lambda frame, output, index: capture_observation(
                 observation_request_type(frame.candidate, output, index)),
             canonical_normal=normal, move_view=move_view, move_opposite=move_opposite,
             progress_evidence=progress, route_search_evidence=route_search.to_dict,

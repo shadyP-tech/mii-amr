@@ -502,6 +502,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 admit_planning_frame=lambda _path: next(planning_frames),
                 select_initial_preapproach=self._nearest_selection,
                 plan_preapproach=plan, run_motion_leg=motion, capture_observation=capture,
+                run_centering_turn=Mock(side_effect=AssertionError("unexpected centering turn")),
                 validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
                 commit_decision=lambda _request: None,
             ))
@@ -516,9 +517,122 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             candidate_root = config.session_root / "candidates" / "000_candidate_a"
             rejected = json.loads((candidate_root / "candidate_arrival_admission.json").read_text())
             self.assertEqual(rejected["reasons"], ["bearing_error_above_maximum"])
-            self.assertEqual(rejected["thresholds"]["max_bearing_error_rad"], math.radians(3))
+            self.assertEqual(rejected["thresholds"]["max_bearing_error_rad"], math.radians(6))
+            self.assertEqual(rejected["strict_arrival"]["thresholds"]["max_bearing_error_rad"], math.radians(3))
             progress = json.loads((candidate_root / "inspection_progress.json").read_text())
             self.assertEqual(len(progress["view_history"]), 1)
+            events = [json.loads(row) for row in
+                      (candidate_root / "inspection_handoff_events.jsonl").read_text().splitlines()]
+            self.assertEqual([(e["event"], e["state"]) for e in events], [
+                ("arrival_admission", "started"), ("arrival_admission", "failed"),
+                ("inspection_motion", "started"), ("inspection_motion", "returned"),
+                ("arrival_admission", "started"), ("arrival_admission", "returned"),
+                ("observer_capture", "started"), ("observer_capture", "returned"),
+            ])
+
+    def test_recorded_bearing_misses_reach_centered_capture_without_route_alignment(self):
+        for bearing_deg in (3.2436418404, -3.7895860567):
+            with self.subTest(bearing_deg=bearing_deg), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = self._write_frame_registry(
+                    self._config(root, (self._candidate("candidate_a", 2.0, 0.0),)),
+                    frozen_map_from_odom=PlanarTransform2D(1.0, 0.0, 0.0),
+                )
+                frames = iter(CandidatePlanningFrame(p, PlanarTransform2D(0., 0., 0.))
+                              for p in (Pose2D(0., 0., 0.),
+                                        Pose2D(.30, 0., math.radians(bearing_deg))))
+                motion = Mock(side_effect=self._completed)
+                turn = Mock(side_effect=AssertionError("a readable head needs no map-only turn"))
+                captures = []
+
+                def capture(request):
+                    captures.append(request)
+                    return CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None)
+
+                outcome = execute_candidate_approach_phase(config, CandidateApproachEffects(
+                    read_current_pose=lambda: Pose2D(.30, 0., 0.),
+                    admit_planning_frame=lambda _path: next(frames),
+                    select_initial_preapproach=self._nearest_selection,
+                    plan_preapproach=lambda _request: {"route_csv": "route.csv"},
+                    run_motion_leg=motion, capture_observation=capture, run_centering_turn=turn,
+                    validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                    commit_decision=lambda _request: None,
+                ))
+                self.assertEqual(outcome.visit_order, ("candidate_a",))
+                self.assertEqual(motion.call_count, 1)  # Initial approach only.
+                turn.assert_not_called()
+                self.assertEqual(len(captures), 1)
+                self.assertTrue(captures[0].allow_centering)
+                self.assertEqual(captures[0].attempt_index, 0)
+                candidate_root = config.session_root / "candidates/000_candidate_a"
+                receipt = json.loads((candidate_root / "candidate_arrival_admission.json").read_text())
+                self.assertTrue(receipt["accepted"])
+                self.assertTrue(receipt["acquisition_only"])
+                self.assertFalse(receipt["motion_authorized"])
+                self.assertFalse(receipt["strict_arrival"]["accepted"])
+                self.assertAlmostEqual(receipt["thresholds"]["max_bearing_error_rad"], math.radians(6))
+                events = [json.loads(row) for row in
+                          (candidate_root / "inspection_handoff_events.jsonl").read_text().splitlines()]
+                self.assertEqual([(e["event"], e["state"]) for e in events], [
+                    ("arrival_admission", "started"), ("arrival_admission", "returned"),
+                    ("observer_capture", "started"), ("observer_capture", "returned"),
+                ])
+
+    def test_centering_acquisition_preserves_range_and_capability_gates(self):
+        from scripts.aufgabe04.real_robot.candidate.approach import _admit_camera_arrival_geometry
+        from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import load_stand_survey_registry
+
+        for distance, bearing, enabled, capable in (
+            (.7, 6.01, True, True), (.31, 4., True, True),
+            (.91, 4., True, True), (.7, 4., False, True), (.7, 4., True, False),
+        ):
+            with self.subTest(distance=distance, bearing=bearing, enabled=enabled, capable=capable), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = self._write_frame_registry(
+                    self._config(root, (self._candidate("candidate_a", 2., 0.),)),
+                    frozen_map_from_odom=PlanarTransform2D(1., 0., 0.),
+                )
+                effects = CandidateApproachEffects(
+                    read_current_pose=Mock(), plan_preapproach=Mock(), run_motion_leg=Mock(),
+                    capture_observation=Mock(), validate_facing=Mock(), commit_decision=Mock(),
+                    admit_planning_frame=lambda _path: CandidatePlanningFrame(
+                        Pose2D(1.-distance, 0., math.radians(bearing)), PlanarTransform2D(0., 0., 0.)),
+                    run_centering_turn=Mock() if capable else None,
+                )
+                with self.assertRaises(CandidateObservationUnavailableError):
+                    _admit_camera_arrival_geometry(
+                        source_config=config, effects=effects,
+                        source_registry=load_stand_survey_registry(config.survey_root / "stand_registry.json"),
+                        candidate_uid="candidate_a", candidate_root=root / "arrival",
+                        observation_attempt_index=0, allow_centering_acquisition=enabled,
+                    )
+                effects.capture_observation.assert_not_called()
+                effects.run_motion_leg.assert_not_called()
+
+    def test_arrival_tf_failure_and_interruption_leave_handoff_evidence(self):
+        for failure in (RuntimeError("TF transform unavailable: map <- odom"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = self._write_frame_registry(
+                    self._config(root, (self._candidate("candidate_a", 2., 0.),)),
+                    frozen_map_from_odom=PlanarTransform2D(1., 0., 0.),
+                )
+                capture = Mock()
+                with self.assertRaises(type(failure)):
+                    execute_candidate_approach_phase(config, CandidateApproachEffects(
+                        read_current_pose=lambda: Pose2D(.3, 0., 0.),
+                        admit_planning_frame=Mock(side_effect=[
+                            CandidatePlanningFrame(Pose2D(0., 0., 0.), PlanarTransform2D(0., 0., 0.)), failure]),
+                        select_initial_preapproach=self._nearest_selection,
+                        plan_preapproach=lambda _request: {"route_csv": "route.csv"},
+                        run_motion_leg=self._completed, capture_observation=capture,
+                        validate_facing=Mock(), commit_decision=Mock(), run_centering_turn=Mock(),
+                    ))
+                capture.assert_not_called()
+                path = config.session_root / "candidates/000_candidate_a/inspection_handoff_events.jsonl"
+                events = [json.loads(row) for row in path.read_text().splitlines()]
+                self.assertEqual([e["state"] for e in events], ["started", "failed"])
+                self.assertEqual(events[-1]["exception_type"], type(failure).__name__)
 
     def test_opposite_face_range_miss_rejects_second_camera_process(self):
         with tempfile.TemporaryDirectory() as tmp:

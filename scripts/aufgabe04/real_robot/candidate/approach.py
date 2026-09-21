@@ -1178,6 +1178,7 @@ def _admit_camera_arrival_geometry(
     candidate_uid: str,
     candidate_root: Path,
     observation_attempt_index: int,
+    allow_centering_acquisition: bool = False,
 ) -> _CandidateObservationFrame:
     """Reproject once more while stopped and gate camera startup geometry."""
 
@@ -1236,8 +1237,31 @@ def _admit_camera_arrival_geometry(
             ),
         ),
     )
+    strict_decision = decision
+    if allow_centering_acquisition and effects.run_centering_turn is not None:
+        from scripts.aufgabe04.real_robot.observer.candidate_centering import (
+            MAX_CENTERING_STEP_RAD,
+        )
+        # Admission to passive acquisition is distinct from being centered.
+        # The observer must still associate a current head before proposing
+        # a separately certified turn; no map-only correction is authorized.
+        decision = evaluate_candidate_arrival_admission(
+            planning_frame.current_pose,
+            target_x_m=candidate.geometry.x_m,
+            target_y_m=candidate.geometry.y_m,
+            config=replace(strict_decision.config, max_bearing_error_rad=max(
+                strict_decision.config.max_bearing_error_rad, MAX_CENTERING_STEP_RAD,
+            )),
+        )
     arrival_evidence = {
         **decision.to_evidence_dict(),
+        "strict_arrival": strict_decision.to_evidence_dict(),
+        "acquisition_only": decision.accepted and not strict_decision.accepted,
+        "camera_centered": False,
+        "requires_live_target_association": True,
+        "centering_acquisition_enabled": (
+            allow_centering_acquisition and effects.run_centering_turn is not None
+        ),
         "candidate_uid": candidate_uid,
         "observation_attempt_index": observation_attempt_index,
         "candidate_frame_projection_path": str(artifacts.evidence_path),
