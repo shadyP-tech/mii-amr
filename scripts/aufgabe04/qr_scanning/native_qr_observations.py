@@ -6,7 +6,7 @@ from scripts.aufgabe04.qr_scanning.opencv_qr_detector import _decoded_observatio
 from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 
 
-def detect_native_qr_observations_bgr(frame, cv2) -> tuple[DecodedQrObservation, ...]:
+def detect_native_qr_observations_bgr(frame, cv2, *, resources=None) -> tuple[DecodedQrObservation, ...]:
     """Decode this frame with native OpenCV only, without acquisition retries.
 
     Both text and corners come from the same native decoder result. A miss
@@ -15,8 +15,10 @@ def detect_native_qr_observations_bgr(frame, cv2) -> tuple[DecodedQrObservation,
     and text-only results retain the generic decoder's admission semantics.
     """
 
+    if resources is not None:
+        resources.check_owner(cv2)
     try:
-        detector = cv2.QRCodeDetector()
+        detector = cv2.QRCodeDetector() if resources is None else resources.decoder("native")
     except Exception:
         return ()
 

@@ -62,6 +62,9 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     write_mission_leg_motion_permit,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.localization.preflight_session import (
+    mission_preflight_session,
+)
 from scripts.aufgabe04.navigation.missions.plan_stand_coverage_survey import (
     main as plan_stand_coverage_survey,
 )
@@ -2111,6 +2114,11 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    with mission_preflight_session():
+        return _run_mission(parser, args)
+
+
+def _run_mission(parser, args) -> int:
     try:
         resolved_run_mode = resolve_autonomous_run_mode(
             run_mode=args.run_mode,

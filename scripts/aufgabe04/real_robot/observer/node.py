@@ -83,6 +83,7 @@ from scripts.aufgabe04.qr_scanning.opencv_qr_detector import (
     detect_qr_observations_bgr,
     detect_qr_texts_bgr,
 )
+from scripts.aufgabe04.qr_scanning.qr_decoder_resources import QrDecoderResources
 from scripts.aufgabe04.qr_scanning.native_qr_observations import (
     detect_native_qr_observations_bgr,
 )
@@ -192,6 +193,10 @@ from scripts.aufgabe04.real_robot.observer.current_scan_head_proposal_filter imp
 from scripts.aufgabe04.real_robot.observer.stopped_target_search import reconcile_stopped_target_search
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, unavailable_head_evaluation,
+)
+from scripts.aufgabe04.real_robot.observer.tf_startup import ObserverTfStartup
+from scripts.aufgabe04.real_robot.observer.debug_output import (
+    ObserverDebugWriter, debug_images, write_debug_snapshot,
 )
 from scripts.aufgabe04.real_robot.observer.capture_history import (
     BoundedObserverCapture,
@@ -412,6 +417,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             raise RuntimeError("real passive viewpoint node requires use_sim_time=false")
         self.args = args
         self.cv2 = cv2
+        self._qr_decoder_options = {"resources": QrDecoderResources(cv2)}
         self.numpy = numpy
         self.Duration = Duration
         self.Time = Time
@@ -465,6 +471,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         self.tf_buffer = create_observer_traced_buffer(Buffer, trace=self._tf_delivery_trace)
         self.tf_listener = TransformListener(self.tf_buffer, self.node)
+        self._tf_startup = ObserverTfStartup()
         self.completed = False
         self.axis_observation_committed = False
         self._camera_pipeline_counters = {}
@@ -505,6 +512,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         # The ROS executor only ingests sensor/TF receipts. All detector,
         # evidence and scan-persistence work stays on the main owner thread.
+        self._debug_writer = (None if args.debug_dir is None else
+                              ObserverDebugWriter(cv2, args.debug_dir))
         self._write_status(
             "waiting_for_sensors",
             resolved_runtime=self.runtime.as_log_dict(),
@@ -1170,6 +1179,23 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 retry_exhausted=retry_exhausted,
             )
 
+    def _observer_tf_ready(self):
+        startup = getattr(self, "_tf_startup", None)
+        if startup is None or startup.ready:
+            return True
+        edges = ((self.profile.map_frame, self.profile.base_frame),
+                 (self.profile.map_frame, self.profile.scan_frame),
+                 (self.profile.base_frame, self.profile.camera_optical_frame))
+        ready, report = startup.poll([
+            (f"{target}<-{source}", lambda target=target, source=source:
+                self.tf_buffer.can_transform(target, source, self.Time(),
+                    timeout=self.Duration(seconds=0.0)))
+            for target, source in edges])
+        if report is not None:
+            self._write_status("observer_tf_ready" if ready else "waiting_for_observer_tf",
+                               observer_tf_startup=report)
+        return ready
+
     def _process_latest(self) -> None:
         if self.completed:
             return
@@ -1181,6 +1207,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._qr_observation_pose_ready = None
         self._pending_candidate_centering = None
         self._candidate_centering_ready = None
+        if not self._observer_tf_ready():
+            return
         sensor_tuple = self._next_sensor_tuple()
         if sensor_tuple is None:
             return
@@ -1653,9 +1681,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 frame=attempt_frame,
                 roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
                 roi_source=attempt.source, cache=qr_decode_cache, budget=qr_acquisition_budget,
-                native_decoder=lambda crop: detect_native_qr_observations_bgr(crop, self.cv2),
+                native_decoder=lambda crop: detect_native_qr_observations_bgr(
+                    crop, self.cv2, **getattr(self, "_qr_decoder_options", {})),
                 full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
                     crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    **getattr(self, "_qr_decoder_options", {}),
                     **({"prefer_native_geometry": True} if (
                         current_head_proposal_corners is not None
                         or attempt.source == "candidate_tracked_head_search") else {}),
@@ -1789,9 +1819,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
                 fallback_attempt=roi_attempts[-1] if roi_attempts else None,
                 cache=qr_decode_cache, budget=qr_acquisition_budget,
-                native_decoder=lambda crop: detect_native_qr_observations_bgr(crop, self.cv2),
+                native_decoder=lambda crop: detect_native_qr_observations_bgr(
+                    crop, self.cv2, **getattr(self, "_qr_decoder_options", {})),
                 full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
                     crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    **getattr(self, "_qr_decoder_options", {}),
                     prefer_native_geometry=True),
                 deadline_monotonic_sec=head_budget.deadline_monotonic_sec,
                 edge_preprocess=resolved_stand_axis_profile.edge_preprocess,
@@ -1857,6 +1889,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 registration, cache=qr_decode_cache, budget=qr_acquisition_budget,
                 full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
                     crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    **getattr(self, "_qr_decoder_options", {}),
                     prefer_native_geometry=True), now=time.monotonic)
         current_head_association = None
         current = registration.selected
@@ -2904,32 +2937,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
     def _write_debug(self, frame, roi_frame, debug, *, metadata) -> None:
         if self.args.debug_dir is None:
             return
-        self.args.debug_dir.mkdir(parents=True, exist_ok=True)
-        image_artifacts = (
-            ("latest_frame.png", frame),
-            ("latest_head_roi.png", roi_frame),
-            ("latest_edges.png", debug.edges),
-            ("latest_raw_edges.png", debug.raw_edges),
-            ("latest_side_evidence.png", debug.face_mask),
-            ("latest_rectangle_mask.png", debug.rectangle_mask),
-            ("latest_rectangle_overlay.png", debug.rectangle_overlay),
-        )
-        written = []
-        for filename, image in image_artifacts:
-            artifact_path = self.args.debug_dir / filename
-            if image is not None and self.cv2.imwrite(str(artifact_path), image):
-                written.append(filename)
-            else:
-                artifact_path.unlink(missing_ok=True)
-        _atomic_json(
-            self.args.debug_dir / "latest_metadata.json",
-            {
-                "schema_version": 1,
-                "observed_unix_sec": time.time(),
-                "artifacts": written,
-                "stand_axis": metadata,
-            },
-        )
+        images = debug_images(frame, roi_frame, debug)
+        writer = getattr(self, "_debug_writer", None)
+        if writer is not None:
+            writer.submit(images, metadata)
+        else:
+            write_debug_snapshot(self.cv2, self.args.debug_dir, images, metadata)
 
     def _maybe_commit_inspection_progress(self, state: str, details: dict):
         """Publish a third, advisory result only after stronger paths declined."""
@@ -3125,6 +3138,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "publication_freshness": getattr(self, "_last_camera_publication_freshness", None),
             "capture_history": self._capture_snapshot(),
             "capture_error": getattr(self, "_capture_error", None),
+            "debug_writer": (None if getattr(self, "_debug_writer", None) is None
+                             else self._debug_writer.snapshot()),
             "tf_retry": asdict(self.tf_retry_scheduler.evidence),
             "tf_delivery": (None if getattr(self, "_tf_delivery_trace", None) is None
                             else self._tf_delivery_trace.snapshot()),
@@ -3505,6 +3520,8 @@ def main(argv=None) -> int:
         if executor is not None:
             executor.shutdown(timeout_sec=2.0)
         if adapter is not None:
+            if getattr(adapter, "_debug_writer", None) is not None:
+                adapter._debug_writer.close(timeout_sec=2.0)
             if getattr(adapter, "capture_history", None) is not None:
                 try:
                     adapter.capture_history.close(timeout_sec=2.0)

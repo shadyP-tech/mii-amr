@@ -45,6 +45,12 @@ from scripts.aufgabe04.navigation.foundation.ros_runtime_config import (
 from scripts.aufgabe04.navigation.foundation.observation_node_lifecycle import (
     observation_node,
 )
+from scripts.aufgabe04.navigation.localization.tf_snapshot_barrier import (
+    acquire_tf_snapshot,
+)
+from scripts.aufgabe04.navigation.localization.preflight_session import (
+    collect_from_session,
+)
 
 try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
@@ -688,6 +694,7 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         execution_pose_owner: str,
         global_consistency_monitor: str,
         frozen_map_transform_certified: bool,
+        tf_buffer=None,
     ) -> None:
         super().__init__(
             "aufgabe04_ros_preflight",
@@ -768,8 +775,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             else None
         )
 
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_buffer = Buffer() if tf_buffer is None else tf_buffer
+        self.tf_listener = (
+            TransformListener(self.tf_buffer, self) if tf_buffer is None else None
+        )
         self.dynamic_tf_topics = self._dynamic_tf_topic_candidates()
         dynamic_tf_qos = QoSProfile(
             depth=DIRECT_DYNAMIC_TF_QOS_DEPTH,
@@ -1737,27 +1746,35 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
         minimum_stamp_sec: float | None = None,
     ) -> Tuple[bool, Dict[str, object]]:
         name = f"tf {target_frame}->{source_frame}"
+        retries = 0
+        barrier_data = {}
         try:
-            transform = self.tf_buffer.lookup_transform(
-                target_frame,
-                source_frame,
-                Time(),
-                timeout=Duration(seconds=0.2),
-            )
-            # Direct /tf capture can lead the Buffer callback by one update.
-            # Service callbacks and reacquire; never relabel an older sample
-            # or relax the certificate's stationary-window ordering check.
-            retries = 0
-            while (minimum_stamp_sec is not None
-                   and Time.from_msg(transform.header.stamp).nanoseconds / 1e9 < minimum_stamp_sec
-                   and retries < 5):
-                rclpy.spin_once(self, timeout_sec=0.05)
+            if minimum_stamp_sec is None:
                 transform = self.tf_buffer.lookup_transform(
                     target_frame, source_frame, Time(), timeout=Duration(seconds=0.2),
                 )
-                retries += 1
+            else:
+                snapshot = acquire_tf_snapshot(
+                    lookup=lambda: self.tf_buffer.lookup_transform(
+                        target_frame, source_frame, Time(), timeout=Duration(seconds=0.0),
+                    ),
+                    stamp_sec=lambda item: Time.from_msg(item.header.stamp).nanoseconds / 1e9,
+                    service_callbacks=lambda wait: rclpy.spin_once(self, timeout_sec=wait),
+                    minimum_stamp_sec=minimum_stamp_sec,
+                    lookup_errors=(TransformException,),
+                )
+                retries = snapshot.retries
+                barrier_data = {
+                    "minimum_stamp_sec": minimum_stamp_sec,
+                    "stationary_window_reacquisition_count": retries,
+                    "stationary_window_wait_sec": snapshot.elapsed_sec,
+                    "stationary_window_wait_timed_out": snapshot.timed_out,
+                }
+                transform = snapshot.transform
+                if transform is None:
+                    raise TransformException(snapshot.last_error or "TF snapshot unavailable")
         except TransformException as exc:
-            data = {"available": False, "error": str(exc)}
+            data = {"available": False, "error": str(exc), **barrier_data}
             observations.append(RosObservation(name, False, str(exc), data))
             failures.append(f"{name}: unavailable")
             return False, data
@@ -1829,10 +1846,10 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
             and quaternion_ok
             and pose_values_ok
             and (minimum_stamp_sec is None or data["stamp_sec"] >= minimum_stamp_sec)
+            and not barrier_data.get("stationary_window_wait_timed_out", False)
         )
         if minimum_stamp_sec is not None:
-            data.update(minimum_stamp_sec=minimum_stamp_sec,
-                        stationary_window_reacquisition_count=retries)
+            data.update(barrier_data)
         observations.append(RosObservation(name, ok, f"age={age:.3f}s", data))
         if not ok:
             if not frame_identity_ok:
@@ -1843,6 +1860,8 @@ class RosPreflightNode(Node):  # pragma: no cover - requires ROS runtime.
                 failure = "non-finite transform"
             elif minimum_stamp_sec is not None and data["stamp_sec"] < minimum_stamp_sec:
                 failure = "transform predates stationary sample window after bounded reacquisition"
+            elif barrier_data.get("stationary_window_wait_timed_out", False):
+                failure = "TF snapshot catch-up deadline expired"
             elif age < -accepted_future_sec:
                 failure = "future-dated transform"
             else:
@@ -2082,11 +2101,7 @@ def run_ros_preflight(
         raise TypeError(
             "preflight_requirements must be a RosPreflightRequirements"
         )
-    _require_ros()
-    with observation_node(
-        rclpy,
-        RosPreflightNode,
-        config,
+    node_options = dict(
         max_scan_age_sec=max_scan_age_sec,
         max_odom_age_sec=max_odom_age_sec,
         max_tf_age_sec=max_tf_age_sec,
@@ -2118,7 +2133,12 @@ def run_ros_preflight(
         execution_pose_owner=execution_pose_owner,
         global_consistency_monitor=global_consistency_monitor,
         frozen_map_transform_certified=frozen_map_transform_certified,
-    ) as node:
+    )
+    session_result = collect_from_session(config, node_options)
+    if session_result is not None:
+        return session_result
+    _require_ros()
+    with observation_node(rclpy, RosPreflightNode, config, **node_options) as node:
         return node.collect()
 
 

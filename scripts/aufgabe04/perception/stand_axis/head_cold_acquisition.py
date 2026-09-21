@@ -42,6 +42,8 @@ from scripts.aufgabe04.perception.stand_axis.head_acquisition_budget import (
     bounded_head_acquisition, check_head_acquisition_deadline,
 )
 
+from scripts.aufgabe04.perception.stand_axis.head_search_inputs import HeadSearchInputs
+
 MAX_IMAGE_PIXELS = 1920 * 1080
 MAX_CONTOURS = 1024
 MAX_RAILS_PER_DIRECTION = 24
@@ -101,7 +103,7 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
                          search_bounds=None, rail_groups_out=None,
                          preferred_head_height_px=None, all_rail_groups_out=None,
                          candidate_search=None, guidance_diagnostics=None, source_support=None,
-                         edge_region=None, edge_region_diagnostics=None, metric_search=None):
+                         edge_region=None, edge_region_diagnostics=None, metric_search=None, frame_inputs=None):
     """Pair current line segments, using candidate scale only to order hints."""
     import numpy as np
 
@@ -109,12 +111,13 @@ def _rail_endpoint_hints(cv2, gray, raw_edges, *, deadline_monotonic_sec=None,
                         else preferred_head_height_px)
     # Preserve LSD's original sampling and endpoints: cropping gray changes
     # even interior subpixel lines. Screen its results before the rail quota.
-    detected = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0]
+    extract = lambda name, operation: operation() if frame_inputs is None else frame_inputs.get(name, operation)
+    detected = extract("lsd", lambda: cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(gray)[0])
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_hough")
     # Equal-luminance colour boundaries can be absent from grayscale LSD while
     # the caller's channel-union Canny has complete current evidence.
-    raw_lines = cv2.HoughLinesP(raw_edges, 1., np.pi / 180., threshold=8,
-                               minLineLength=16, maxLineGap=2)
+    raw_lines = extract("hough", lambda: cv2.HoughLinesP(raw_edges, 1., np.pi / 180., threshold=8,
+                               minLineLength=16, maxLineGap=2))
     groups = ([], [])
     segments = [segment for lines in (detected, raw_lines) if lines is not None
                 for segment in lines.reshape(-1, 4)]
@@ -245,7 +248,7 @@ def acquire_cold_head_proposal(
     model_profile=None, refinement_out=None, candidate_search=None,
     color_support_mask=None,
     _preferred_rail_height_px=None, _verification_limit=None, _attempt_diagnostics=None,
-    _guided_rail_search=False,
+    _guided_rail_search=False, _frame_inputs=None,
 ) -> HeadProposalResult:
     """Locate a unique complete head in a bounded image without a prior pose.
 
@@ -313,13 +316,17 @@ def acquire_cold_head_proposal(
             or str(color_support_mask.dtype) != "uint8"):
         raise ValueError("colour support must be a uint8 mask of the exact processing image")
     edge_region = getattr(candidate_search, "edge_region", None)
-    locator_edges = raw_edges if edge_region is None else edge_region.locator_edges(raw_edges)
+    frame_inputs = _frame_inputs or HeadSearchInputs(frame_bgr, raw_edges, edge_region)
+    frame_inputs.check_context(frame_bgr, raw_edges, edge_region)
+    locator_edges = frame_inputs.get("locator_edges",
+        lambda: raw_edges if edge_region is None else edge_region.locator_edges(raw_edges))
     if edge_region is not None:
         diagnostics["lidar_edge_region"] = dict(edge_region.diagnostics(),
             input_edge_pixels=int(np.count_nonzero(raw_edges)),
             retained_edge_pixels=int(np.count_nonzero(locator_edges)))
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_contours")
-    contours = cv2.findContours(locator_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    contours = frame_inputs.get("contours",
+        lambda: cv2.findContours(locator_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2])
     diagnostics["input_contours"] = len(contours)
     metric_search = candidate_search if getattr(candidate_search, "pixel_size", None) is not None else None
     if metric_search is not None:
@@ -371,7 +378,7 @@ def acquire_cold_head_proposal(
             quad = cv2.approxPolyDP(contour, fraction * perimeter, True)
             if len(quad) == 4 and cv2.isContourConvex(quad):
                 seeds.append((quad.reshape(-1, 2), "closed_contour"))
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = frame_inputs.get("gray", lambda: cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY))
     check_head_acquisition_deadline(deadline_monotonic_sec, "cold_line_detection")
     rail_groups = []
     all_rail_groups = []
@@ -387,7 +394,7 @@ def acquire_cold_head_proposal(
                                             source_support=getattr(proposal_filter, "source_support", None),
                                             edge_region=edge_region,
                                             edge_region_diagnostics=diagnostics.get("lidar_edge_region"),
-                                            guidance_diagnostics=guidance)
+                                            guidance_diagnostics=guidance, frame_inputs=frame_inputs)
     diagnostics["horizontal_rails"], diagnostics["vertical_rails"] = rail_counts
     seeds.extend((hint, "paired_current_rails") for hint in hints)
     if guidance:
@@ -414,7 +421,8 @@ def acquire_cold_head_proposal(
             "max_parents": MAX_GUIDED_NEIGHBOR_PARENTS,
             "variants": len(additions), "supplies_measurement": False}
         seeds.extend(additions)
-    distance = cv2.distanceTransform(np.where(raw_edges > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 3)
+    distance = frame_inputs.get("distance", lambda: cv2.distanceTransform(
+        np.where(raw_edges > 0, 0, 255).astype(np.uint8), cv2.DIST_L2, 3))
     fractions = np.linspace(.10, .90, 24)
     hypotheses = {}
     texture_hints = {}
@@ -664,7 +672,7 @@ def acquire_cold_head_proposal(
             color_support_mask=color_support_mask,
             _preferred_rail_height_px=candidate_search.height,
             _verification_limit=verification_limit-used, _attempt_diagnostics=retry_diagnostics,
-            _guided_rail_search=_preferred_rail_height_px is not None)
+            _guided_rail_search=_preferred_rail_height_px is not None, _frame_inputs=frame_inputs)
         # Retain completed checks even if a cooperative deadline interrupts the
         # retry inside refinement before its decorator can return full details.
         combined = {**retry_diagnostics, **(retried.joint_border_diagnostics or {})}

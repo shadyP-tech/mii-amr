@@ -13,7 +13,7 @@ from scripts.aufgabe04.qr_scanning.isolated_qr_views import (
 def decode_isolated_native_quad(
     frame, points, cv2, *, image_shape, scale, border_px,
     wechat_decoder=None, diagnostics: dict | None = None,
-    budget_exhausted=None,
+    budget_exhausted=None, work_budget=None,
 ) -> DecodedQrObservation | None:
     """Decode exactly one native quad without borrowing a full-crop payload.
 
@@ -44,8 +44,17 @@ def decode_isolated_native_quad(
                 if diagnostics is not None:
                     diagnostics["reason"] = "processing_budget_exhausted"
                 return None
-            isolated = rectify_isolated_qr_view(frame, raw, cv2, view)
-            result = decoder.detectAndDecode(isolated)
+            size = view.symbol_size_px + 2 * round(view.symbol_size_px * view.source_margin_ratio) + 2 * view.quiet_border_px
+            pixels = size * size
+            if work_budget is not None and not work_budget.allow("isolated_wechat", pixels):
+                if diagnostics is not None:
+                    diagnostics["reason"] = "processing_cost_budget_exhausted"
+                return None
+            def decode_view():
+                isolated = rectify_isolated_qr_view(frame, raw, cv2, view)
+                return isolated, decoder.detectAndDecode(isolated)
+            isolated, result = (decode_view() if work_budget is None else
+                                work_budget.measure("isolated_wechat", pixels, decode_view))
             decoded = result[0]
             texts = (decoded,) if isinstance(decoded, str) else tuple(decoded)
             texts = tuple(text.strip() for text in texts if isinstance(text, str) and text.strip())

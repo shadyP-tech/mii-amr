@@ -10,6 +10,7 @@ from scripts.aufgabe04.qr_scanning.qr_observation import (
 )
 from scripts.aufgabe04.qr_scanning.isolated_qr_identity import decode_isolated_native_quad
 from scripts.aufgabe04.qr_scanning.qr_decoder_runtime import QrDecoderRuntime
+from scripts.aufgabe04.qr_scanning.qr_work_budget import QrWorkBudget, QrWorkHistory, image_pixels
 
 
 MAX_DEFERRED_SINGLE_QUADS = 4
@@ -29,6 +30,7 @@ def detect_qr_observations_bgr(
     frame, cv2, *, diagnostics: dict | None = None,
     max_elapsed_sec: float | None = None,
     prefer_native_geometry: bool = False,
+    resources=None,
 ) -> tuple[DecodedQrObservation, ...]:
     """Share text and corners from the same decoder and bounded preprocessing.
 
@@ -40,15 +42,22 @@ def detect_qr_observations_bgr(
     tries native symbol geometry and isolated identity recovery before the
     whole-crop decoder or enlarged variants. This prioritizes spatial identity
     binding; it never substitutes the head rectangle for QR corners.
+    Optional single-owner resources retain backend instances and bounded cost
+    forecasts across calls, never pixels, payloads, corners or symbol counts.
     """
     if max_elapsed_sec is not None and (
         type(max_elapsed_sec) not in (int, float)
         or not math.isfinite(max_elapsed_sec) or max_elapsed_sec <= 0.0
     ):
         raise ValueError("QR processing budget must be finite and positive")
+    if resources is not None:
+        resources.check_owner(cv2)
     started = monotonic()
     deadline = None if max_elapsed_sec is None else started + max_elapsed_sec
-    runtime = QrDecoderRuntime(cv2, diagnostics)
+    work_budget = (None if deadline is None and resources is None else
+        QrWorkBudget(deadline=deadline, history=QrWorkHistory() if resources is None
+                     else resources.history, clock=monotonic))
+    runtime = QrDecoderRuntime(cv2, diagnostics, resources=resources, work_budget=work_budget)
     if diagnostics is not None:
         diagnostics["search_policy"] = (
             "current_head_native_geometry_first" if prefer_native_geometry else "default"
@@ -72,7 +81,14 @@ def detect_qr_observations_bgr(
 
     provisional = ()
     deferred_single = []
-    for candidate, scale, border in _qr_decode_candidates_with_geometry(frame, cv2):
+    candidates = iter(_qr_decode_candidates_with_geometry(frame, cv2,
+        **({"work_budget": work_budget} if resources is not None else {})))
+    while not exhausted():
+        # Check before advancing the generator: next() may resize/threshold.
+        try:
+            candidate, scale, border = next(candidates)
+        except StopIteration:
+            break
         if exhausted():
             return finish(provisional)
         for observations in _candidate_observations(
@@ -138,10 +154,12 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
 
 
 def _wechat_observations(candidate, cv2, *, image_shape, scale, border_px, runtime, **_kwargs):
+    if not runtime.allow_work("wechat", candidate):
+        return
     wechat = runtime.decoder("wechat")
     if wechat is not None:
         try:
-            result = wechat.detectAndDecode(candidate)
+            result = runtime.run_work("wechat", candidate, lambda: wechat.detectAndDecode(candidate))
             corner_validation = [] if runtime.diagnostics is not None else None
             observations = _decoded_observations(
                 result[0], result[1] if len(result) > 1 else None,
@@ -163,8 +181,10 @@ def _native_observations(candidate, cv2, *, image_shape, scale, border_px, runti
     if native is None:
         return
     multi_quad = None
+    if not runtime.allow_work("opencv_multi", candidate):
+        return
     try:
-        result = native.detectAndDecodeMulti(candidate)
+        result = runtime.run_work("opencv_multi", candidate, lambda: native.detectAndDecodeMulti(candidate))
         if result and len(result) > 2:
             runtime.observe_native_multi(result[2], image_shape=image_shape, scale=scale, border_px=border_px)
         corner_validation = [] if runtime.diagnostics is not None else None
@@ -186,8 +206,10 @@ def _native_observations(candidate, cv2, *, image_shape, scale, border_px, runti
         runtime.record("opencv_multi", scale=scale, border_px=border_px, reason="decoder_error")
     if budget_exhausted is not None and budget_exhausted():
         return
+    if not runtime.allow_work("opencv_single", candidate):
+        return
     try:
-        result = native.detectAndDecode(candidate)
+        result = runtime.run_work("opencv_single", candidate, lambda: native.detectAndDecode(candidate))
         corner_validation = [] if runtime.diagnostics is not None else None
         observations = _decoded_observations(
             result[0], result[1] if len(result) > 1 else None,
@@ -232,7 +254,7 @@ def _isolated_observations(candidate, points, cv2, *, image_shape, scale, border
     isolated = decode_isolated_native_quad(
         candidate, points, cv2, image_shape=image_shape, scale=scale,
         border_px=border_px, wechat_decoder=wechat, diagnostics=diagnostics,
-        budget_exhausted=budget_exhausted,
+        budget_exhausted=budget_exhausted, work_budget=runtime.work_budget,
     )
     # Ambiguous isolated decoding remains conservative conflict evidence,
     # including two physical symbols with identical text. It grants no quad.
@@ -267,27 +289,49 @@ def _decoded_observations(decoded, points, *, detector, image_shape, scale, bord
     return tuple(result)
 
 
-def _qr_decode_candidates_with_geometry(frame, cv2):
+def _qr_decode_candidates_with_geometry(frame, cv2, *, work_budget=None):
     yield frame, 1.0, 0
     try:
         height, width = frame.shape[:2]
     except (AttributeError, ValueError):
         return
+
+    def prepare(stage, pixels, operation):
+        if work_budget is None:
+            return operation()
+        if not work_budget.allow(stage, pixels):
+            return None
+        return work_budget.measure(stage, pixels, operation)
+
     scale = 4 if max(height, width) < 220 else 2
-    enlarged = _resize_for_qr(cv2, frame, scale=scale)
+    expanded_border = max(12, int(.08 * max(height, width) * scale))
+    expanded_pixels = (height * scale + 2 * expanded_border) * (width * scale + 2 * expanded_border)
+    # Do not allocate an enlarged variant if no measured decoder can fit.
+    if work_budget is not None and not any(work_budget.allow(stage, expanded_pixels)
+            for stage in ("opencv_multi", "opencv_single", "wechat")):
+        return
+    pixels = max(1, height * width * scale * scale)
+    if work_budget is not None and not work_budget.allow("resize", pixels):
+        return
+    enlarged = prepare("resize", pixels, lambda: _resize_for_qr(cv2, frame, scale=scale))
     image = enlarged if enlarged is not None else frame
     effective_scale = float(scale) if enlarged is not None else 1.0
+    pixels = image_pixels(image)
     border = max(12, int(0.08 * max(image.shape[:2])))
     if enlarged is not None:
-        bordered = _add_quiet_border(cv2, enlarged, border_px=border)
+        bordered = prepare("quiet_border", pixels, lambda: _add_quiet_border(cv2, enlarged, border_px=border))
+        if bordered is None:
+            return
         actual_border = (bordered.shape[0] - enlarged.shape[0]) // 2
         yield bordered, effective_scale, actual_border
-    gray = _to_gray(cv2, image)
+    gray = prepare("grayscale", pixels, lambda: _to_gray(cv2, image))
     if gray is not None:
-        bordered = _add_quiet_border(cv2, gray, border_px=border)
+        bordered = prepare("quiet_border", pixels, lambda: _add_quiet_border(cv2, gray, border_px=border))
+        if bordered is None:
+            return
         actual_border = (bordered.shape[0] - gray.shape[0]) // 2
         yield bordered, effective_scale, actual_border
-        thresholded = _threshold_for_qr(cv2, bordered)
+        thresholded = prepare("threshold", image_pixels(bordered), lambda: _threshold_for_qr(cv2, bordered))
         if thresholded is not None:
             yield thresholded, effective_scale, actual_border
 
