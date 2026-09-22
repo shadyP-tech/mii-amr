@@ -88,7 +88,7 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             return value
 
         def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None,
-                   prefer_native_geometry=False):
+                   prefer_native_geometry=False, preferred_scale=None):
             index = current_index[0]
             if scenario == "head_only" or scenario == "historical_qr" and index >= 2:
                 return ()

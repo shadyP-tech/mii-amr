@@ -102,9 +102,15 @@ tests/aufgabe04/fixtures/head_border_clutter_20260918/*
 !tests/aufgabe04/fixtures/head_border_clutter_20260918/source_000003.png
 !tests/aufgabe04/fixtures/scan_endpoint_20260918.json
 !tests/aufgabe04/fixtures/endpoint_search_20260921.json
+!tests/aufgabe04/fixtures/backside_framing_20260922.json
 !tests/aufgabe04/fixtures/stopped_target_search_20260921/
 tests/aufgabe04/fixtures/stopped_target_search_20260921/*
 !tests/aufgabe04/fixtures/stopped_target_search_20260921/frame_000004.json
 !tests/aufgabe04/fixtures/stopped_target_search_20260921/frame_000004.jpg
 !tests/aufgabe04/fixtures/stopped_target_search_20260921/frame_000009.json
 !tests/aufgabe04/fixtures/stopped_target_search_20260921/frame_000009.jpg
+!tests/aufgabe04/fixtures/qr_admission_20260922/
+tests/aufgabe04/fixtures/qr_admission_20260922/*
+!tests/aufgabe04/fixtures/qr_admission_20260922/inputs.json
+!tests/aufgabe04/fixtures/qr_admission_20260922/frame_000003.compressed
+!tests/aufgabe04/fixtures/qr_admission_20260922/frame_000014.compressed

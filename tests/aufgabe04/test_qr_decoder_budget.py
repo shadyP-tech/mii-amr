@@ -116,3 +116,18 @@ class QrDecoderBudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_preferred_scale_has_a_pixel_cap_and_obeys_work_denial():
+    from unittest.mock import Mock
+    from scripts.aufgabe04.qr_scanning.opencv_qr_detector import _qr_decode_candidates_with_geometry
+    small, large = SimpleNamespace(shape=(200, 200, 3)), SimpleNamespace(shape=(600, 800, 3))
+    resized = SimpleNamespace(shape=(800, 800, 3))
+    with patch(MODULE + '_resize_for_qr', return_value=resized) as resize:
+        assert next(_qr_decode_candidates_with_geometry(small, object(), preferred_scale=4)) == (resized, 4., 0)
+        resize.assert_called_once()
+        resize.reset_mock()
+        assert next(_qr_decode_candidates_with_geometry(large, object(), preferred_scale=4)) == (large, 1., 0)
+        denied = SimpleNamespace(allow=Mock(return_value=False))
+        assert next(_qr_decode_candidates_with_geometry(small, object(), preferred_scale=4, work_budget=denied)) == (small, 1., 0)
+        resize.assert_not_called()

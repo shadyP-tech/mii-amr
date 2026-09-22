@@ -79,6 +79,11 @@ class QrFrameAcquisitionBudget:
     def remaining_work_sec(self, now_monotonic_sec):
         return max(0., self._deadline - now_monotonic_sec - QR_PUBLICATION_RESERVE_SEC)
 
+    def identity_first_due(self, *, now_monotonic_sec, previous_head_miss):
+        """Reserve a periodic image's first work for identity after head misses."""
+        return (previous_head_miss and self._policy._last_probe_bucket != self._bucket
+                and self.remaining_work_sec(now_monotonic_sec) >= .07)
+
     def head_deadline_with_identity_reserve(self, *, now_monotonic_sec, previous_head_miss):
         """Let a periodic decode progress even during repeated locator misses."""
         deadline = self._deadline - QR_PUBLICATION_RESERVE_SEC
@@ -97,6 +102,7 @@ class QrFrameAcquisitionBudget:
         if self._full_roi == roi:
             decision = QrAcquisitionDecision(True, "same_image_exact_crop_cache", 0., True)
         elif identity_geometry_available:
+            self._policy._last_probe_bucket = self._bucket
             decision = QrAcquisitionDecision(False, "native_identity_geometry_available", 0.)
         elif self._full_roi is not None:
             decision = QrAcquisitionDecision(False, "one_full_crop_per_image", 0.)
@@ -134,6 +140,7 @@ class QrFrameAcquisitionBudget:
             "native_current_image_checks_required": False,
             "skipped_marker_checks_mean": "unknown_side",
             "identity_probe_head_miss_reserve_sec": .08,
+            "periodic_identity_first_after_head_miss": True,
             "cached_measurement_reuse": False,
             "cooperative_backend_budget": True,
             "decisions": list(self._decisions),

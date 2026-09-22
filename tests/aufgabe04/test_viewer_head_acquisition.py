@@ -252,3 +252,49 @@ def test_real_full_frame_fit_and_marker_decoration_solve_geometry_once(scene, an
     assert side.estimate.yaw_deg == result.estimate.yaw_deg
     assert admit_measured_head_model(estimate=side.estimate, debug=side.debug,
         yaw_rad=math.radians(side.estimate.yaw_deg)).accepted
+
+
+@pytest.mark.parametrize('identity_first', (False, True))
+def test_periodic_identity_precedes_a_geometry_budget_exhaustion(scene, identity_first):
+    clock, order = [10.], []
+    estimate, debug = scene[4]
+    miss = (replace(estimate, usable=False, corners=None, yaw_deg=None),
+            replace(debug, head_model_quality=None, model_pose=None))
+    def geometry(*args, **kwargs):
+        order.append('geometry')
+        clock[0] = max(clock[0], 10.11)  # the recorded ~110 ms head deadline
+        return miss
+    def native(crop):
+        order.append('native')
+        clock[0] += .01
+        return ()
+    def decode(crop, limit, diagnostics):
+        order.append('decode')
+        assert 0 < limit <= .12
+        clock[0] += .035
+        return (replace(QR, text='Start'),)
+    attempt = HeadRoiAttempt(ImageRoi(120, 150, 300, 400, scene[3]),
+        'current_unique_scan_qr_search', 2.4, 200., 200., scene[3])
+    result, _ = evaluate(scene, clock=clock, available=.16, estimator=Mock(side_effect=geometry),
+        native=native, full=Mock(side_effect=AssertionError('use the scan search decoder')),
+        identity_search_attempt=attempt, search_decoder=decode, previous_head_miss=identity_first)
+    assert result.qr_decode_metadata['geometry_first'] is not identity_first
+    if identity_first:
+        assert order == ['native', 'decode', 'geometry']
+        assert result.qr_observations[0].text == 'Start'
+        assert result.qr_observations[0].corners[0] == (140., 170.)
+        assert result.debug.qr_marker_verified is True
+    else:
+        assert order == ['geometry']
+        assert result.qr_decode_metadata['reason'] == 'identity_deferred_for_source_freshness'
+    assert result.estimate.usable is False
+    assert result.estimate.yaw_deg is None
+
+
+def test_identity_first_empty_probe_does_not_claim_backside(scene):
+    attempt = HeadRoiAttempt(ImageRoi(120, 150, 300, 400, scene[3]), 'nominal_projection', 3., 200., 200., scene[3])
+    with patch(f'{MODULE}.detect_qr_quad', side_effect=AssertionError('early QR probe has no head')):
+        result, estimator = evaluate(scene, previous_head_miss=True, fallback_attempt=attempt)
+    estimator.assert_called_once()
+    assert result.debug.qr_marker_verified is None
+    assert classified(scene, result).estimate.visible_face is None

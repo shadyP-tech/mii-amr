@@ -101,6 +101,14 @@ class ObserverScanWitnessCollectionTests(unittest.TestCase):
         self.assertEqual(len(self.adapter._pending_scan_witnesses), 0)
         tracking.reset.assert_called_once_with("observation_evidence_reset")
 
+    def test_rejected_ingestion_is_not_counted_as_accepted(self):
+        self.adapter._scan_target_persistence.ingest_scan.return_value = False
+        self.adapter._on_scan(self.sample())
+        self.adapter._drain_received_sensors()
+        self.adapter._collect_scan_witnesses()
+        self.assertEqual(self.adapter._camera_pipeline_counters["scan_witness_ingestion_rejected"], 1)
+        self.assertNotIn("scan_witness_ingested", self.adapter._camera_pipeline_counters)
+
     def test_witness_lookup_preserves_selected_camera_tf_capture(self):
         adapter = self.adapter
         # Exercise the real lookup, not the per-test fixture's lookup stub.

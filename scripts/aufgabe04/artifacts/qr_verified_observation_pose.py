@@ -99,6 +99,25 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
             or any(type(index) is not int or index < 0 for index in indices)
             or len(indices) != len(set(indices))):
         raise ValueError("QR observation needs current LiDAR sample indices")
+    registration = binding.get("independent_registration")
+    if registration is not None:
+        envelope = registration.get("envelope") if isinstance(registration, Mapping) else None
+        if (not isinstance(envelope, Mapping)
+                or registration.get("policy") != "decoded_quad_unique_registration_envelope"
+                or envelope.get("associated") is not True
+                or type(envelope.get("eligible_cluster_count")) is not int
+                or envelope["eligible_cluster_count"] != 1
+                or envelope.get("min_cluster_sample_count") != 1
+                or envelope.get("scan_stamp_sec") != scan
+                or envelope.get("scan_frame_id") != cluster["scan_frame_id"]
+                or envelope.get("accepted_range_m") != cluster.get("accepted_range_m")):
+            raise ValueError("independent QR registration needs its unique current search envelope")
+        envelope_indices = envelope.get("selected_cluster_source_indices")
+        if (not isinstance(envelope_indices, (list, tuple)) or not envelope_indices
+                or any(type(i) is not int or i < 0 for i in envelope_indices)
+                or len(envelope_indices) != len(set(envelope_indices))
+                or not set(indices).issubset(envelope_indices)):
+            raise ValueError("independent QR registration must retain the same cluster")
     if type(data.get("motion_epoch")) is not int or data["motion_epoch"] < 0:
         raise ValueError("QR observation needs a stopped motion epoch")
     signature = data.get("camera_signature")

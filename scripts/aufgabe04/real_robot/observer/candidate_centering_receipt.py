@@ -7,6 +7,7 @@ new sensor tuple or a motion epoch reset.
 """
 
 from dataclasses import dataclass
+import time
 
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256, real_robot_profile_sha256,
@@ -16,6 +17,9 @@ from scripts.aufgabe04.real_robot.observer.candidate_centering import (
 )
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import (
     qr_observation_grace_pending,
+)
+from scripts.aufgabe04.real_robot.observer.inspection_framing import (
+    ProductiveViewHold, review_centering_destination,
 )
 
 
@@ -55,6 +59,18 @@ def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_
     if (not update.frame_accepted or snapshot.poisoned or update.motion_epoch_reset
             or current.target_key != snapshot.target_key):
         return
+    hold = getattr(adapter, "_productive_view_hold", None)
+    if hold is None:
+        hold = adapter._productive_view_hold = ProductiveViewHold()
+    now = time.monotonic()
+    hold_pending = hold.observe(context=(snapshot.target_key, snapshot.motion_epoch,
+        adapter.stand_model_profile.sha256, current.intrinsics, current.scan_from_camera,
+        current.base_from_camera), now_sec=now, axis_sample_accepted=update.axis_sample_accepted)
+    current.metadata["productive_view_opportunity"] = hold.metadata(now)
+    if hold_pending:
+        current.metadata["candidate_centering"] = dict(ready=False,
+            reason="preserve_productive_geometry_view", motion_authorized=False)
+        return
     try:
         advisory = build_camera_centering_advisory(
             association=current.association, intrinsics=current.intrinsics,
@@ -77,6 +93,13 @@ def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_
             "ready": False, "reason": "centering_advisory_rejected", "detail": str(exc)}
         return
     if advisory is None:
+        return
+    framing = review_centering_destination(advisory,
+        search_association=current.association.lidar_association.search_association)
+    current.metadata["centering_framing"] = framing.metadata()
+    if not framing.allowed:
+        current.metadata["candidate_centering"] = dict(ready=False,
+            reason=framing.reason, motion_authorized=False)
         return
     current.metadata["candidate_centering"] = advisory.metadata()
     adapter._candidate_centering_ready = current, advisory

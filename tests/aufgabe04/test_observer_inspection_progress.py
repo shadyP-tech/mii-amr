@@ -280,3 +280,28 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
             kwargs["recommendation_path"].write_text("{}")
             result=monitor_passive_observer_process(process=_Process(wait_outcomes=(0,)),**kwargs)
             self.assertEqual(result.artifact_kind,"recommendation")
+
+
+def test_discovery_opportunity_is_bounded_and_cannot_renew_on_soft_restart():
+    progress = InspectionProgress(minimum_acquisition_sec=5.)
+    for i in range(15):
+        assert progress.record(**frame(10+i/3), now_monotonic_sec=20+i/3) is None
+    progress.restart_acquisition_window()
+    # A soft restart clears advisory samples, not the five-second deadline.
+    for i in range(7):
+        result = progress.record(**frame(15+i/3), now_monotonic_sec=25+i/3)
+    assert result is not None
+    assert progress._acquisition_started == 20.
+    # Actual motion creates a new stationary observation opportunity.
+    moved = frame(18)
+    moved['robot_pose']['x_m'] = .1
+    assert progress.record(**moved, now_monotonic_sec=28.) is None
+    assert progress._acquisition_started == 28.
+
+
+def test_discovery_opportunity_cannot_clear_identity_conflict():
+    progress = InspectionProgress(minimum_acquisition_sec=5.)
+    assert progress.record(**frame(10, current_qr_id='Start', current_qr_sample_count=2), now_monotonic_sec=20.) is None
+    for i in range(20):
+        assert progress.record(**frame(11+i/3, current_qr_id='other', current_qr_sample_count=2), now_monotonic_sec=21+i/3) is None
+    assert progress.poisoned

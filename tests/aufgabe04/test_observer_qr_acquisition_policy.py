@@ -173,3 +173,20 @@ class ObserverQrAcquisitionPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_identity_first_slot_is_periodic_fresh_and_target_local():
+    policy = QrAcquisitionPolicy()
+    def frame(stamp, target='candidate', age=.33):
+        return policy.begin_frame(target_key=target, image_stamp_sec=stamp,
+            started_ros_sec=stamp+age, started_monotonic_sec=10., max_sensor_age_sec=.5)
+    first = frame(100.)
+    assert first.identity_first_due(now_monotonic_sec=10., previous_head_miss=True)
+    assert not first.identity_first_due(now_monotonic_sec=10., previous_head_miss=False)
+    decision = first.request(roi=NOMINAL, roi_source='search', now_monotonic_sec=10.,
+        current_qr_signal=False, identity_geometry_available=False, selected_crop=True)
+    assert decision.allowed
+    assert not frame(100.2).identity_first_due(now_monotonic_sec=10., previous_head_miss=True)
+    assert frame(101.1).identity_first_due(now_monotonic_sec=10., previous_head_miss=True)
+    assert frame(101.2, target='other').identity_first_due(now_monotonic_sec=10., previous_head_miss=True)
+    assert not frame(102.2, age=.4).identity_first_due(now_monotonic_sec=10., previous_head_miss=True)

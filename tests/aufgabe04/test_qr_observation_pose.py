@@ -84,6 +84,29 @@ class QrObservationPoseTests(unittest.TestCase):
         path = self.adapter.args.qr_observation_pose_json
         return load_qr_verified_observation_pose(path) if path.exists() else None
 
+    def test_independent_registration_receipt_preserves_envelope_evidence(self):
+        self.adapter.args.qr_pose_fallback_delay_sec = 0.
+        self.frame(100., qr_id="Start")
+        payload = self.result()
+        association = payload["qr_binding"]["association"]
+        envelope = deepcopy(association.get("search_association", association))
+        envelope["min_cluster_sample_count"] = 1
+        payload["qr_binding"]["independent_registration"] = {
+            "policy": "decoded_quad_unique_registration_envelope", "envelope": envelope}
+        payload.pop(HASH_FIELD)
+        payload = content_hashed_payload(payload, hash_field=HASH_FIELD)
+        self.assertEqual(validate_qr_verified_observation_pose(payload)["qr_id"], "Start")
+        for field, value in (("eligible_cluster_count", 2), ("scan_stamp_sec", 99.),
+                             ("scan_frame_id", "other"), ("accepted_range_m", [0., 10.]),
+                             ("selected_cluster_source_indices", [999]),
+                             ("min_cluster_sample_count", 2)):
+            with self.subTest(field=field):
+                invalid = deepcopy(payload)
+                invalid.pop(HASH_FIELD)
+                invalid["qr_binding"]["independent_registration"]["envelope"][field] = value
+                with self.assertRaises(ValueError):
+                    validate_qr_verified_observation_pose(content_hashed_payload(invalid, hash_field=HASH_FIELD))
+
     def test_default_delay_admits_one_current_decode_without_a_head_angle(self):
         from scripts.aufgabe04.real_robot.observer.node import build_parser
         self.adapter.args.qr_pose_fallback_delay_sec = build_parser().get_default("qr_pose_fallback_delay_sec")
@@ -210,6 +233,7 @@ class QrObservationPoseTests(unittest.TestCase):
         adapter.stand_model_profile.environment = "physical"
         adapter.stand_model_profile.committable = True
         adapter.stand_model_profile.head_depth_m = .006
+        adapter.stand_model_profile.head_top_height_m = .21
         adapter.stand_model_profile.tolerance_m = .002
         adapter._write_status = PassiveRealViewpointNode._write_status.__get__(adapter)
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)

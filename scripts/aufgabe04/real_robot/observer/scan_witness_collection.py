@@ -45,11 +45,15 @@ def collect_pending_scan_witnesses(pending, persistence, *, now_sec, lookup,
         now = now_sec()
         if not -args.max_future_timestamp_sec <= now - sample.stamp_sec <= args.max_sensor_age_sec:
             count("scan_witness_expired_before_tf")
+            persistence.note_collection("tf_expired", stamp=sample.stamp_sec,
+                                       reason="source_age_exceeded_before_exact_tf")
             # An unobserved intervening scan cannot silently preserve a chain
             # of consecutive unique witnesses across unavailable localization.
             persistence.reset()
             continue
         if str(sample.value.header.frame_id).strip("/") != profile.scan_frame:
+            count("scan_witness_context_rejected")
+            persistence.note_collection("context_rejected", stamp=sample.stamp_sec, reason="scan_frame_mismatch")
             return False
         try:
             stamp = sample.value.header.stamp
@@ -61,11 +65,15 @@ def collect_pending_scan_witnesses(pending, persistence, *, now_sec, lookup,
             # Preserve source order while exact TF catches up; newer scans
             # cannot advance the history past an unresolved earlier source.
             pending.appendleft(sample)
+            count("scan_witness_tf_pending")
+            persistence.note_collection("tf_pending", stamp=sample.stamp_sec, reason="exact_scan_tf_unavailable")
             return True
         if transform_mismatches(
                 calibration.base_to_camera, base_from_camera,
                 translation_tolerance_m=args.extrinsic_translation_tolerance_m,
                 rotation_tolerance_rad=math.radians(args.extrinsic_rotation_tolerance_deg)):
+            count("scan_witness_context_rejected")
+            persistence.note_collection("context_rejected", stamp=sample.stamp_sec, reason="camera_extrinsic_mismatch")
             return False
         try:
             context = ScanPersistenceContext(
@@ -80,11 +88,14 @@ def collect_pending_scan_witnesses(pending, persistence, *, now_sec, lookup,
                 lidar_range_tolerance_m=args.lidar_range_tolerance_m,
                 scan_pose_robot=scan_pose_from_camera_extrinsics(
                     *_transform_values(base_from_camera), *_transform_values(scan_from_camera)))
-            persistence.ingest_scan(
+            ingested = persistence.ingest_scan(
                 plain_scan_from_sample(sample, topology_profile=getattr(args, "scan_topology_profile", "linear")), context=context,
                 now_sec=now_sec(),
                 max_scan_age_sec=args.max_sensor_age_sec)
-        except (TypeError, ValueError, ArithmeticError):
+            count("scan_witness_ingested" if ingested else "scan_witness_ingestion_rejected")
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            count("scan_witness_context_rejected")
+            persistence.note_collection("context_rejected", stamp=sample.stamp_sec, reason=str(exc))
             return False
 
     return True

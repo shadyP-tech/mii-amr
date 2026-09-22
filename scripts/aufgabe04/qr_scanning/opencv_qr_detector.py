@@ -31,6 +31,7 @@ def detect_qr_observations_bgr(
     max_elapsed_sec: float | None = None,
     prefer_native_geometry: bool = False,
     resources=None,
+    preferred_scale: int | None = None,
 ) -> tuple[DecodedQrObservation, ...]:
     """Share text and corners from the same decoder and bounded preprocessing.
 
@@ -38,6 +39,7 @@ def detect_qr_observations_bgr(
     remain multiple observations; callers must not pick one as target proof.
     The optional budget stops between decoder stages and pyramid variants;
     it cannot preempt one OpenCV call. Callers still enforce source freshness.
+    A preferred scale optionally prioritizes enlargement of a bounded scan crop.
     For an already localized current-head crop, ``prefer_native_geometry``
     tries native symbol geometry and isolated identity recovery before the
     whole-crop decoder or enlarged variants. This prioritizes spatial identity
@@ -50,6 +52,8 @@ def detect_qr_observations_bgr(
         or not math.isfinite(max_elapsed_sec) or max_elapsed_sec <= 0.0
     ):
         raise ValueError("QR processing budget must be finite and positive")
+    if preferred_scale is not None and (type(preferred_scale) is not int or preferred_scale not in (2, 4)):
+        raise ValueError("preferred QR scale must be 2 or 4")
     if resources is not None:
         resources.check_owner(cv2)
     started = monotonic()
@@ -59,6 +63,7 @@ def detect_qr_observations_bgr(
                      else resources.history, clock=monotonic))
     runtime = QrDecoderRuntime(cv2, diagnostics, resources=resources, work_budget=work_budget)
     if diagnostics is not None:
+        diagnostics["preferred_scale"] = preferred_scale
         diagnostics["search_policy"] = (
             "current_head_native_geometry_first" if prefer_native_geometry else "default"
         )
@@ -82,6 +87,7 @@ def detect_qr_observations_bgr(
     provisional = ()
     deferred_single = []
     candidates = iter(_qr_decode_candidates_with_geometry(frame, cv2,
+        **({"preferred_scale": preferred_scale} if preferred_scale is not None else {}),
         **({"work_budget": work_budget} if resources is not None else {})))
     while not exhausted():
         # Check before advancing the generator: next() may resize/threshold.
@@ -289,11 +295,11 @@ def _decoded_observations(decoded, points, *, detector, image_shape, scale, bord
     return tuple(result)
 
 
-def _qr_decode_candidates_with_geometry(frame, cv2, *, work_budget=None):
-    yield frame, 1.0, 0
+def _qr_decode_candidates_with_geometry(frame, cv2, *, work_budget=None, preferred_scale=None):
     try:
         height, width = frame.shape[:2]
     except (AttributeError, ValueError):
+        yield frame, 1.0, 0
         return
 
     def prepare(stage, pixels, operation):
@@ -302,6 +308,19 @@ def _qr_decode_candidates_with_geometry(frame, cv2, *, work_budget=None):
         if not work_budget.allow(stage, pixels):
             return None
         return work_budget.measure(stage, pixels, operation)
+
+    # A bounded scan crop already localized a small head. Try enlarged pixels
+    # first; restoration still uses the decoder's own corners and this scale.
+    # Respect the existing measured cost forecast and a fixed allocation cap.
+    preferred_pixels = height*width*(preferred_scale or 1)**2
+    if (preferred_scale is not None and preferred_pixels <= 1_500_000
+            and (work_budget is None or any(work_budget.allow(stage, preferred_pixels)
+                 for stage in ("opencv_multi", "opencv_single", "wechat")))):
+        enlarged = prepare("resize", preferred_pixels,
+                           lambda: _resize_for_qr(cv2, frame, scale=preferred_scale))
+        if enlarged is not None:
+            yield enlarged, float(preferred_scale), 0
+    yield frame, 1.0, 0
 
     scale = 4 if max(height, width) < 220 else 2
     expanded_border = max(12, int(.08 * max(height, width) * scale))

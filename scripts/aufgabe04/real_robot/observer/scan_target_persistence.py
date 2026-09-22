@@ -18,6 +18,7 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
 from scripts.aufgabe04.real_robot.observer.scan_target_geometry import scan_target_geometry
 from scripts.aufgabe04.real_robot.observer.scan_witness_buffer import StoppedScanWitnessBuffer
+from scripts.aufgabe04.real_robot.observer.scan_witness_diagnostics import ScanWitnessDiagnostics
 from scripts.aufgabe04.real_robot.observer.scan_endpoint_fragments import (
     endpoint_fragments, ENDPOINT_WITNESS_KIND, INTERNAL_WITNESS_KIND,
 )
@@ -426,11 +427,17 @@ def _invalid_current_association(association):
 class StoppedScanTargetPersistence:
     """One candidate/epoch, three recent unique real witnesses, no robot I/O."""
     def __init__(self):
+        self.diagnostics = ScanWitnessDiagnostics()
         self.reset()
 
-    def reset(self):
+    def reset(self, *, reason="context_or_source_reset"):
+        self.diagnostics.record("history_reset", reason=reason,
+            witness_count=len(getattr(self, "_history", ())))
         self._reset_resolution()
         self._pending_scans = StoppedScanWitnessBuffer()
+
+    def note_collection(self, stage, *, stamp=None, reason=None):
+        self.diagnostics.record(stage, stamp=stamp, reason=reason, witness_count=len(self._history))
 
     def _reset_resolution(self):
         self._history = []
@@ -460,6 +467,7 @@ class StoppedScanTargetPersistence:
             except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError):
                 return _invalid_current_association(association)
         candidate = copy.copy(self)
+        candidate.diagnostics = self.diagnostics.clone()
         candidate._history = list(self._history)
         candidate.last_metadata = dict(self.last_metadata)
         candidate._pending_scans = copy.copy(self._pending_scans)
@@ -485,11 +493,15 @@ class StoppedScanTargetPersistence:
             _read_scan_context(entry)
             _target_for_context(entry["context"])
             if self._pending_scans.ingest(entry):
+                self.diagnostics.record("history_reset", stamp=scan.scan_stamp_sec,
+                    reason="independent_scan_context_or_order_discontinuity", witness_count=len(self._history))
                 self._reset_resolution()
+            self.note_collection("ingestion_accepted", stamp=scan.scan_stamp_sec)
             return True
         except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError) as exc:
-            self.reset()
+            self.reset(reason=str(exc))
             self.last_metadata = dict(accepted=False, reason=str(exc), input_source="independent_stopped_scan")
+            self.note_collection("ingestion_rejected", stamp=scan.scan_stamp_sec, reason=str(exc))
             return False
 
     @staticmethod
@@ -521,7 +533,9 @@ class StoppedScanTargetPersistence:
                         old = self._register_scan_witness(old, current)
                         if not _read_entry(old)[3].associated:
                             raise ValueError("independent scan witness is no longer unique in the current cone")
-                    except (TypeError, ValueError, ArithmeticError, KeyError):
+                    except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
+                        self.diagnostics.record("history_reset", stamp=scan.scan_stamp_sec,
+                            reason=str(exc), witness_count=len(self._history))
                         refreshed = []
                         break
                 refreshed.append(old)
@@ -536,12 +550,14 @@ class StoppedScanTargetPersistence:
                     self._resolve(old_association, old_scan, context=old_context,
                         now_sec=old["now_sec"], max_scan_age_sec=old["max_scan_age_sec"],
                         input_source="independent_stopped_scan")
-                except (TypeError, ValueError, ArithmeticError, KeyError):
+                except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
                     # A contradiction consumes prior proof. Three later real
                     # scans may independently establish a new target again.
+                    self.diagnostics.record("history_reset", stamp=scan.scan_stamp_sec,
+                        reason=str(exc), witness_count=len(self._history))
                     self._reset_resolution()
-        except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError):
-            self.reset()
+        except (TypeError, ValueError, ArithmeticError, KeyError, AttributeError) as exc:
+            self.reset(reason=str(exc))
         return self._resolve(association, scan, context=context,
             now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
 
@@ -553,15 +569,26 @@ class StoppedScanTargetPersistence:
                 max_scan_age_sec=max_scan_age_sec, input_source=input_source)
             key = (context.target_key, context.epoch_key, scan.scan_frame_id,
                    *(getattr(context, field) for field in _CANDIDATE_GEOMETRY_FIELDS))
-            if (self._anchor is not None and (key != self._anchor[0]
-                    or not _stationary(self._anchor[1], robot) or not _stationary(self._anchor[2], pose))
-                    or self._last_stamp is not None and (scan.scan_stamp_sec < self._last_stamp
-                    or scan.scan_stamp_sec - self._last_stamp > MAX_SCAN_GAP_SEC)):
-                self.reset()
+            reset_reason = None
+            if self._anchor is not None:
+                if key != self._anchor[0]:
+                    reset_reason = "candidate_epoch_frame_or_geometry_changed"
+                elif not _stationary(self._anchor[1], robot) or not _stationary(self._anchor[2], pose):
+                    reset_reason = "stationary_pose_changed"
+            if self._last_stamp is not None:
+                if scan.scan_stamp_sec < self._last_stamp:
+                    reset_reason = "scan_stamp_regressed"
+                elif scan.scan_stamp_sec - self._last_stamp > MAX_SCAN_GAP_SEC:
+                    reset_reason = "scan_gap_exceeded"
+            if reset_reason is not None:
+                self.reset(reason=reset_reason)
             if self._anchor is None:
                 self._anchor = (key, robot, pose)
+            previous_count = len(self._history)
             self._history = [old for old in self._history
                              if 0 <= scan.scan_stamp_sec - old["scan"]["scan_stamp_sec"] <= MAX_HISTORY_SEC]
+            if len(self._history) != previous_count:
+                self.note_collection("history_pruned", stamp=scan.scan_stamp_sec, reason="witness_source_age_exceeded")
             result = association
             self.last_metadata = dict(accepted=association.associated,
                 reason="unique_current_cluster" if association.associated else association.rejection_reason,
@@ -575,7 +602,9 @@ class StoppedScanTargetPersistence:
                 try:
                     result = validated_witnessed_fragmentation(proof)
                 except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
-                    self.last_metadata = dict(accepted=False, reason=str(exc))
+                    self.last_metadata = dict(accepted=False, reason=str(exc),
+                        witness_scan_count=len(proof["witnesses"]),
+                        witness_stamps_sec=[old["scan"]["scan_stamp_sec"] for old in proof["witnesses"]])
                     # Compatible endpoint fragments may wait for three real
                     # witnesses. They never become witnesses themselves. Any
                     # geometric, context, timing or continuity contradiction
@@ -585,18 +614,29 @@ class StoppedScanTargetPersistence:
                             raise ValueError("not endpoint fragments")
                         _resolved(entry, proof["witnesses"], kind=ENDPOINT_WITNESS_KIND,
                                   allow_partial=True)
-                    except (TypeError, ValueError, ArithmeticError, KeyError):
+                    except (TypeError, ValueError, ArithmeticError, KeyError) as partial_exc:
+                        self.last_metadata["history_reset_reason"] = str(partial_exc)
+                        self.diagnostics.record("history_reset", stamp=scan.scan_stamp_sec,
+                            reason=str(partial_exc), witness_count=len(self._history), association=association)
                         self._history = []
+                    self.diagnostics.record("fragment_only", stamp=scan.scan_stamp_sec,
+                        reason=str(exc), witness_count=len(self._history), association=association,
+                        index_groups=tuple(tuple(s.index for s in group.samples[:16]) for group in clusters[:8]))
             if association.associated and len(clusters) == 1 and scan.scan_stamp_sec != self._last_stamp:
                 self._history.append(entry)
                 self._history = self._history[-MIN_WITNESS_SCANS:]
+                self.diagnostics.record("unique_witness", stamp=scan.scan_stamp_sec,
+                    witness_count=len(self._history), association=association)
             self._last_stamp = scan.scan_stamp_sec
             if result is not association:
                 self.last_metadata = dict(accepted=True, reason="witnessed_current_fragments",
                     raw_eligible_cluster_count=association.search_association.eligible_cluster_count,
                     witness_scan_count=MIN_WITNESS_SCANS, persistent_target_count=1)
+                self.diagnostics.record("fragment_proof_accepted", stamp=scan.scan_stamp_sec,
+                    witness_count=MIN_WITNESS_SCANS, association=result)
             return result
         except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
-            self.reset()
+            self.reset(reason=str(exc))
             self.last_metadata = dict(accepted=False, reason=str(exc))
+            self.note_collection("resolution_rejected", stamp=scan.scan_stamp_sec, reason=str(exc))
             return _invalid_current_association(association)

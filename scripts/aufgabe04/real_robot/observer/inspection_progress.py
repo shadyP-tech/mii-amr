@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+import time
 
 from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
     MAX_ADVISORY_ACCUMULATION_WINDOW_SEC,
@@ -15,6 +16,7 @@ from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
 # QR/axis latch lifetime. Every sample must still pass fresh sensor gates at
 # ingestion; this bounded history gives no older QR or metric pose authority.
 INSPECTION_PROGRESS_WINDOW_SEC = MAX_ADVISORY_ACCUMULATION_WINDOW_SEC
+MINIMUM_DISCOVERY_ACQUISITION_SEC = 5.0
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,8 @@ class InspectionProgress:
 
     def __init__(self, *, required_frames=MIN_PROGRESS_FRAMES, minimum_span_sec=MIN_PROGRESS_SPAN_SEC,
                  max_age_sec=INSPECTION_PROGRESS_WINDOW_SEC,
-                 max_translation_m=0.02, max_rotation_rad=math.radians(2)):
+                 max_translation_m=0.02, max_rotation_rad=math.radians(2),
+                 minimum_acquisition_sec=0.0):
         if isinstance(required_frames, bool) or not isinstance(required_frames, int) or required_frames < MIN_PROGRESS_FRAMES:
             raise ValueError("inspection progress needs at least seven frames")
         if not math.isfinite(minimum_span_sec) or minimum_span_sec < MIN_PROGRESS_SPAN_SEC:
@@ -111,6 +114,12 @@ class InspectionProgress:
         self.max_age_sec = max_age_sec
         self.max_translation_m = max_translation_m
         self.max_rotation_rad = max_rotation_rad
+        if (type(minimum_acquisition_sec) not in (int, float)
+                or not math.isfinite(minimum_acquisition_sec)
+                or not 0 <= minimum_acquisition_sec <= MINIMUM_DISCOVERY_ACQUISITION_SEC):
+            raise ValueError("inspection acquisition opportunity must be between zero and five seconds")
+        self.minimum_acquisition_sec = minimum_acquisition_sec
+        self._acquisition_started = None
         self._samples = {}
         self._anchor = None
         self._poisoned = False
@@ -126,8 +135,21 @@ class InspectionProgress:
 
         self._samples.clear()
 
+    def acquisition_metadata(self, *, now_monotonic_sec):
+        deadline = (None if self._acquisition_started is None else
+                    self._acquisition_started + self.minimum_acquisition_sec)
+        return dict(minimum_acquisition_sec=self.minimum_acquisition_sec,
+            deadline_monotonic_sec=deadline,
+            remaining_sec=None if deadline is None else max(0., deadline-now_monotonic_sec),
+            renews_on_soft_miss=False, extends_parent_deadline=False,
+            motion_authorized=False)
+
     def record(self, *, frame_stamp_sec, robot_pose, frame_accepted, poisoned, classification,
-               current_qr_id=None, current_qr_sample_count=0, motion_epoch_reset=False):
+               current_qr_id=None, current_qr_sample_count=0, motion_epoch_reset=False,
+               now_monotonic_sec=None):
+        now = time.monotonic() if now_monotonic_sec is None else now_monotonic_sec
+        if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
+            raise ValueError("inspection acquisition clock must be finite and nonnegative")
         if isinstance(frame_stamp_sec, bool) or not math.isfinite(frame_stamp_sec) or frame_stamp_sec < 0:
             raise ValueError("inspection frame timestamp is invalid")
         pose = tuple(float(robot_pose[k]) for k in ("x_m", "y_m", "yaw_rad"))
@@ -139,6 +161,7 @@ class InspectionProgress:
             dyaw = abs(math.atan2(math.sin(pose[2] - self._anchor[2]), math.cos(pose[2] - self._anchor[2])))
             new_motion_epoch = new_motion_epoch or math.hypot(dx, dy) > self.max_translation_m or dyaw > self.max_rotation_rad
         if new_motion_epoch:
+            self._acquisition_started = None
             self._samples.clear()
             self._anchor = None
             self._seen_qr_id = None
@@ -150,6 +173,7 @@ class InspectionProgress:
             return None
         if self._anchor is None:
             self._anchor = pose
+            self._acquisition_started = now
         if current_qr_id is not None:
             if self._seen_qr_id is not None and current_qr_id != self._seen_qr_id:
                 self._samples.clear()
@@ -163,6 +187,12 @@ class InspectionProgress:
         if frame_stamp_sec < newest - self.max_age_sec:
             return None
         self._samples[frame_stamp_sec] = classification
+        # One fixed opportunity for QR probes and independent scan/axis
+        # witnesses. Soft failures and consensus restarts cannot renew it.
+        # This history authorizes no measurement and cannot extend the parent
+        # process deadline; successful stronger paths can finish immediately.
+        if now-self._acquisition_started < self.minimum_acquisition_sec:
+            return None
         stamps = sorted(self._samples)
         if len(stamps) < self.required_frames or stamps[-1] - stamps[0] < self.minimum_span_sec:
             return None

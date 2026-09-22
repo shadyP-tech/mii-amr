@@ -68,81 +68,12 @@ def _full_image_observations(observations, bounds):
             (u + bounds[0], v + bounds[1]) for u, v in item.corners)) for item in observations)
 
 
-def evaluate_viewer_head(
-    cv2, frame, *, model_profile, intrinsics, pose_hint, projection,
-    expected_head_height_px, fallback_attempt, cache, budget, native_decoder,
-    full_decoder, deadline_monotonic_sec, edge_preprocess="channel_union",
-    canny_low=20, canny_high=60, estimator=None, now=None,
-    max_center_offset_ratio=1.5,
-    proposal_filter=None,
-    source_support=None,
-    lidar_edge_region=None,
-    lidar_edge_region_diagnostics=None,
-    depth_uncertainty_m=.02,
-    position_uncertainty_m=None,
-    camera_vertical=(0., 1., 0.),
-):
-    """Measure full-frame geometry once, returning neutral side classification.
-
-    A decoded payload supplies positive marker evidence. Empty decoding supplies
-    none: only a completed current native finder check on a complete head may
-    provide marker absence. Skipped or late checks retain unknown side.
-    """
-    now = time.monotonic if now is None else now
-    validate_intrinsics(intrinsics)
-    if frame.shape[:2] != (intrinsics.height_px, intrinsics.width_px):
-        raise ValueError("viewer head frame must match its full-image intrinsics")
-    started = now()
-    candidate_search = CandidateHeadSearch.optional(
-        getattr(projection, "u_px", None), getattr(projection, "v_px", None),
-        expected_head_height_px, max_center_offset_ratio=max_center_offset_ratio)
-    depth = getattr(projection, "depth_m", None)
-    if depth is None or not math.isfinite(depth) or depth <= 0.:
-        candidate_search = None
-    if candidate_search is not None and lidar_edge_region is not None:
-        candidate_search = replace(candidate_search, edge_region=lidar_edge_region)
-    if candidate_search is not None:
-        try:
-            candidate_search = metric_head_search(model_profile=model_profile, depth_m=depth,
-                fx=intrinsics.fx_px, fy=intrinsics.fy_px, cx=intrinsics.cx_px, cy=intrinsics.cy_px,
-                image_shape=frame.shape, center=candidate_search.center,
-                depth_uncertainty_m=depth_uncertainty_m, camera_vertical=camera_vertical,
-                position_uncertainty_m=position_uncertainty_m,
-                max_center_offset_ratio=max_center_offset_ratio, edge_region=lidar_edge_region)
-        except ValueError:
-            candidate_search = None
-    estimate, debug = estimate_current_head_geometry(
-        cv2, frame, model_profile=model_profile,
-        camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
-        camera_cx_px=intrinsics.cx_px, camera_cy_px=intrinsics.cy_px,
-        pose_hint=pose_hint, edge_preprocess=edge_preprocess,
-        canny_low=canny_low, canny_high=canny_high,
-        deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
-        candidate_search=candidate_search,
-        proposal_filter=proposal_filter,
-        source_support=source_support,
-    )
-    geometry_completed = now()
-    geometry_ms = (geometry_completed-started)*1000.
-    height = _finite_or_zero(expected_head_height_px)
-    attempt = HeadRoiAttempt(
-        ImageRoi(0, 0, intrinsics.width_px, intrinsics.height_px, height),
-        VIEWER_HEAD_SOURCE, 1., _finite_or_zero(getattr(projection, "u_px", None)),
-        _finite_or_zero(getattr(projection, "v_px", None)), height,
-    )
-    complete_head = current_head_available_for_markers((estimate, debug, None))
-    bounds, scope = _marker_bounds(frame, estimate, complete_head, fallback_attempt)
+def _acquire_identity(cv2, frame, *, bounds, scope, complete_head, cache, budget,
+        native_decoder, full_decoder, now):
     observations, qr_detected, marker_verified, detection_scale = None, None, None, None
     marker_reason = "head_unavailable_marker_unchecked" if not complete_head else "qr_marker_processing_budget_exhausted"
-    metadata = dict(performed=False, geometry_first=True, geometry_scope="full_image",
-        head_frame_detection=head_frame_detection(estimate, debug),
-        candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
-        current_scan_proposal_filter_applied=proposal_filter is not None,
-        lidar_edge_region=lidar_edge_region_diagnostics,
-        geometry_completed_monotonic_sec=geometry_completed,
-        identity_scope=scope, identity_roi=None if bounds is None else list(bounds),
-        current_image_geometry_refit=False, marker_refresh_performed=False,
-        elapsed_ms=0.)
+    metadata = dict(performed=False, identity_scope=scope,
+        identity_roi=None if bounds is None else list(bounds), marker_refresh_performed=False)
     identity_started = now()
     if bounds is None:
         metadata["reason"] = scope
@@ -189,6 +120,102 @@ def evaluate_viewer_head(
         observations = _full_image_observations(observations, bounds)
     identity_ms = (now()-identity_started)*1000.
     metadata["elapsed_ms"] = identity_ms
+    return observations, qr_detected, marker_verified, detection_scale, marker_reason, metadata
+
+
+def evaluate_viewer_head(
+    cv2, frame, *, model_profile, intrinsics, pose_hint, projection,
+    expected_head_height_px, fallback_attempt, cache, budget, native_decoder,
+    full_decoder, deadline_monotonic_sec, edge_preprocess="channel_union",
+    canny_low=20, canny_high=60, estimator=None, now=None,
+    max_center_offset_ratio=1.5,
+    proposal_filter=None,
+    source_support=None,
+    lidar_edge_region=None,
+    lidar_edge_region_diagnostics=None,
+    depth_uncertainty_m=.02,
+    position_uncertainty_m=None,
+    camera_vertical=(0., 1., 0.),
+    previous_head_miss=False, identity_search_attempt=None, search_decoder=None,
+):
+    """Measure full-frame geometry once, returning neutral side classification.
+
+    A decoded payload supplies positive marker evidence. Empty decoding supplies
+    none: only a completed current native finder check on a complete head may
+    provide marker absence. Skipped or late checks retain unknown side.
+    """
+    now = time.monotonic if now is None else now
+    validate_intrinsics(intrinsics)
+    if frame.shape[:2] != (intrinsics.height_px, intrinsics.width_px):
+        raise ValueError("viewer head frame must match its full-image intrinsics")
+    started = now()
+    candidate_search = CandidateHeadSearch.optional(
+        getattr(projection, "u_px", None), getattr(projection, "v_px", None),
+        expected_head_height_px, max_center_offset_ratio=max_center_offset_ratio)
+    depth = getattr(projection, "depth_m", None)
+    if depth is None or not math.isfinite(depth) or depth <= 0.:
+        candidate_search = None
+    if candidate_search is not None and lidar_edge_region is not None:
+        candidate_search = replace(candidate_search, edge_region=lidar_edge_region)
+    if candidate_search is not None:
+        try:
+            candidate_search = metric_head_search(model_profile=model_profile, depth_m=depth,
+                fx=intrinsics.fx_px, fy=intrinsics.fy_px, cx=intrinsics.cx_px, cy=intrinsics.cy_px,
+                image_shape=frame.shape, center=candidate_search.center,
+                depth_uncertainty_m=depth_uncertainty_m, camera_vertical=camera_vertical,
+                position_uncertainty_m=position_uncertainty_m,
+                max_center_offset_ratio=max_center_offset_ratio, edge_region=lidar_edge_region)
+        except ValueError:
+            candidate_search = None
+    # One periodic image services identity first after failed head fitting.
+    # No previous pixels, payloads or head corners cross this scheduling boundary.
+    identity_fallback = identity_search_attempt or fallback_attempt
+    early_identity = None
+    if budget.identity_first_due(now_monotonic_sec=now(), previous_head_miss=previous_head_miss):
+        early_bounds, early_scope = _marker_bounds(frame, None, False, identity_fallback)
+        early_identity = _acquire_identity(cv2, frame, bounds=early_bounds, scope=early_scope,
+            complete_head=False, cache=cache, budget=budget, native_decoder=native_decoder,
+            full_decoder=search_decoder if identity_search_attempt is not None and search_decoder else full_decoder,
+            now=now)
+    geometry_started = now()
+    estimate, debug = estimate_current_head_geometry(
+        cv2, frame, model_profile=model_profile,
+        camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
+        camera_cx_px=intrinsics.cx_px, camera_cy_px=intrinsics.cy_px,
+        pose_hint=pose_hint, edge_preprocess=edge_preprocess,
+        canny_low=canny_low, canny_high=canny_high,
+        deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
+        candidate_search=candidate_search,
+        proposal_filter=proposal_filter,
+        source_support=source_support,
+    )
+    geometry_completed = now()
+    geometry_ms = (geometry_completed-geometry_started)*1000.
+    height = _finite_or_zero(expected_head_height_px)
+    attempt = HeadRoiAttempt(
+        ImageRoi(0, 0, intrinsics.width_px, intrinsics.height_px, height),
+        VIEWER_HEAD_SOURCE, 1., _finite_or_zero(getattr(projection, "u_px", None)),
+        _finite_or_zero(getattr(projection, "v_px", None)), height,
+    )
+    complete_head = current_head_available_for_markers((estimate, debug, None))
+    bounds, scope = _marker_bounds(frame, estimate, complete_head, identity_fallback)
+    if early_identity is None:
+        identity = _acquire_identity(cv2, frame, bounds=bounds, scope=scope,
+            complete_head=complete_head, cache=cache, budget=budget,
+            native_decoder=native_decoder,
+            full_decoder=(search_decoder if scope == "current_unique_scan_qr_search" and search_decoder else full_decoder),
+            now=now)
+    else:
+        identity = early_identity
+    observations, qr_detected, marker_verified, detection_scale, marker_reason, identity_metadata = identity
+    identity_ms = identity_metadata["elapsed_ms"]
+    metadata = dict(geometry_first=early_identity is None, geometry_scope="full_image",
+        head_frame_detection=head_frame_detection(estimate, debug),
+        candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
+        current_scan_proposal_filter_applied=proposal_filter is not None,
+        lidar_edge_region=lidar_edge_region_diagnostics,
+        geometry_completed_monotonic_sec=geometry_completed,
+        current_image_geometry_refit=False, **identity_metadata)
     timings = {**(debug.stage_timings_ms or {}), "initial_geometry_pass_ms": geometry_ms,
                "qr_identity": identity_ms, "total": (now()-started)*1000.}
     debug = replace(debug, qr_detected=qr_detected, qr_marker_verified=marker_verified,

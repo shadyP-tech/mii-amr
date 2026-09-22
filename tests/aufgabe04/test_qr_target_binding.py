@@ -148,3 +148,37 @@ class QrTargetBindingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndependentQrRegistrationTest(unittest.TestCase):
+    setUp = QrTargetBindingTest.setUp
+    observation = QrTargetBindingTest.observation
+    scan = QrTargetBindingTest.scan
+    bind = QrTargetBindingTest.bind
+
+    def test_independent_quad_can_register_without_a_head(self):
+        binding = self.bind((self.observation(9),), scan=self.scan(9), allow_independent_registration=True)
+        self.assertTrue(binding.accepted)
+        self.assertFalse(binding.independent_registration['head_geometry_required'])
+
+    def test_competitor_outside_narrow_qr_cone_but_inside_envelope_vetoes(self):
+        scan = self.scan(-.5, ranges=(.7, .7, math.inf, math.inf, math.inf, .7, .7))
+        scan = replace(scan, angle_min=0., angle_increment=math.radians(1.5))
+        binding = self.bind((self.observation(9),), scan=scan, allow_independent_registration=True)
+        self.assertFalse(binding.accepted)
+        self.assertEqual(binding.reason, 'independent_qr_registration_envelope_not_unique')
+        self.assertEqual(binding.independent_registration['envelope']['eligible_cluster_count'], 2)
+
+    def test_independent_registration_cannot_bind_a_neighbor_ray_to_nominal_scan(self):
+        self.assertFalse(self.bind((self.observation(9),), allow_independent_registration=True).accepted)
+
+    def test_independent_registration_keeps_range_and_bearing_bounds(self):
+        for bearing, ranges in ((13., (.7, .7, .7)), (9., (.9, .9, .9))):
+            self.assertFalse(self.bind((self.observation(bearing),), scan=self.scan(bearing, ranges=ranges),
+                                      allow_independent_registration=True).accepted)
+
+    def test_frame_mismatch_and_stale_source_with_fresh_receipt_rejected(self):
+        scan = replace(self.scan(9), scan_frame_id='different')
+        self.assertFalse(self.bind((self.observation(9),), scan=scan, allow_independent_registration=True).accepted)
+        scan = replace(self.scan(9, stamp=9.), receipt_sec=10.)
+        self.assertFalse(self.bind((self.observation(9),), scan=scan, allow_independent_registration=True).accepted)

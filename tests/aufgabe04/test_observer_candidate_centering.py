@@ -52,7 +52,7 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
 
     def frame(self, stamp=100., *, bounded=False, complete=True, associated=True,
               ambiguous=False, age=.1, skew=0., pose=None, odom=True,
-              symbols=0, qr=False, publish=True):
+              symbols=0, qr=False, publish=True, axis=False, scan_topology=None):
         adapter = self.adapter
         self.fixture.clock_sec = stamp + age
         options = (bounded_fixtures.BoundedHeadDetectionTests().options() if bounded
@@ -65,6 +65,10 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
                 ranges=(.55, .55, math.inf, .55, .55, .55, .55, .55, .55))
         options["now_sec"] = stamp + .1
         association = associate_current_measured_head(**options)
+        if scan_topology is not None:
+            association = replace(association, lidar_association=replace(association.lidar_association,
+                search_association=replace(association.lidar_association.search_association,
+                    scan_topology=scan_topology)))
         if not associated:
             association = replace(association, accepted=False)
         pose = pose or Pose2D(0., 0., 0.)
@@ -92,7 +96,8 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         update = adapter._record_observation_frame(
             robot_pose=pose, image_stamp_sec=stamp, scan_stamp_sec=stamp + skew,
             observed_at_sec=stamp + age, lidar_associated=association.accepted,
-            axis_yaw_rad=None, axis_source=None, qr_texts=texts, qr_symbol_count=symbols)
+            axis_yaw_rad=.1 if axis else None, axis_source="test_geometry" if axis else None,
+            qr_texts=texts, qr_symbol_count=symbols)
         if publish:
             PassiveRealViewpointNode._write_status(adapter, "collecting_consensus")
         return update, metadata
@@ -139,15 +144,34 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
                 "physical_shifted_registered_" + scenario, publish_immediate=True)
         return adapter, recommendation, output
 
-    def test_real_processing_stages_center_after_current_crop_and_stopped_frame(self):
+    def test_real_processing_preserves_productive_geometry_before_centering(self):
         adapter, recommendation, output = self.run_processing("head_only")
         self.assertIsNone(recommendation)
-        self.assertTrue(output.exists(), adapter._write_status.call_args)
-        payload = json.loads(output.read_text())
-        self.assertEqual(payload["image_stamp_sec"], 100.)
-        self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 1)
-        self.assertEqual(adapter._write_status.call_count, 1)
-        self.assertTrue(adapter.completed)
+        self.assertFalse(output.exists())
+        self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 7)
+        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 7)
+        self.assertFalse(adapter.completed)
+
+    def test_productive_opportunity_is_fixed_and_does_not_renew_on_miss(self):
+        module = "scripts.aufgabe04.real_robot.observer.candidate_centering_receipt.time.monotonic"
+        for stamp, axis in ((100., True), (101., False), (104.9, True)):
+            with patch(module, return_value=stamp):
+                update, metadata = self.frame(stamp, axis=axis)
+            self.assertIsNone(self.result())
+            self.assertEqual(update.axis_sample_accepted, axis)
+            self.assertEqual(metadata["candidate_centering"]["reason"], "preserve_productive_geometry_view")
+        with patch(module, return_value=105.):
+            self.frame(105.)
+        self.assertIsNotNone(self.result())  # Linear scanner fixture: no boundary veto.
+
+    def test_boundary_veto_does_not_publish_or_complete(self):
+        _, metadata = self.frame(scan_topology=dict(profile="full_rotation", sample_count=360,
+            angle_min_rad=0., angle_increment_rad=math.tau/360))
+        self.assertIsNone(self.result())
+        self.assertFalse(self.adapter.completed)
+        self.assertEqual(metadata["candidate_centering"]["reason"],
+                         "preserve_view_centering_would_cross_scan_boundary")
+
 
     def test_missing_optional_odom_does_not_suppress_current_qr_completion(self):
         adapter, recommendation, output = self.run_processing("bound_qr", odom_available=False)

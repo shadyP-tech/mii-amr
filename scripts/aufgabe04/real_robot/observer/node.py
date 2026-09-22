@@ -191,6 +191,7 @@ from scripts.aufgabe04.real_robot.observer.current_scan_head_proposal_filter imp
     CurrentScanHeadProposalFilter,
 )
 from scripts.aufgabe04.real_robot.observer.stopped_target_search import reconcile_stopped_target_search
+from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, unavailable_head_evaluation,
 )
@@ -221,6 +222,7 @@ from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
     build_candidate_inspection_observation,
 )
 from scripts.aufgabe04.real_robot.observer.inspection_progress import (
+    MINIMUM_DISCOVERY_ACQUISITION_SEC,
     INSPECTION_PROGRESS_WINDOW_SEC,
     InspectionProgress,
     classify_inspection_progress,
@@ -803,6 +805,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._qr_observation_pose_ready = None
         self._pending_candidate_centering = None
         self._candidate_centering_ready = None
+        self._productive_view_hold = None
         self._scan_target_persistence = None
         self._reset_scan_witnesses()
         self._reset_candidate_search("observation_evidence_reset")
@@ -1812,12 +1815,33 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 optical_depth_m=(None if search_reconciliation is None else head_search_projection.depth_m),
                 depth_uncertainty_m=self.args.stand_uncertainty_m+self.args.stand_radius_m,
             )
+            identity_search, identity_search_metadata = current_scan_qr_search(
+                scan=plain_scan,
+                scan_from_map=RigidTransform(self.profile.scan_frame, self.profile.map_frame,
+                    scan_translation, scan_rotation),
+                camera_from_map=RigidTransform(self.profile.camera_optical_frame, self.profile.map_frame,
+                    camera_translation, camera_rotation),
+                intrinsics=intrinsics, model_profile=self.stand_model_profile,
+                image_stamp_sec=image.stamp_sec, sync_tolerance_sec=self.args.sync_tolerance_sec,
+                map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_scan_age_sec=self.args.max_sensor_age_sec)
             tracking_evaluation = evaluate_viewer_head(
                 self.cv2, frame, model_profile=self.stand_model_profile,
                 intrinsics=intrinsics, pose_hint=prediction.pose,
                 projection=head_search_projection, expected_head_height_px=expected_head_height_px,
                 max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
                 fallback_attempt=roi_attempts[-1] if roi_attempts else None,
+                identity_search_attempt=identity_search,
+                previous_head_miss=(getattr(self, "_last_head_miss_target", None)
+                                    == self._target_evidence_key()),
+                search_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
+                    crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
+                    **getattr(self, "_qr_decoder_options", {}),
+                    prefer_native_geometry=True, preferred_scale=4),
                 cache=qr_decode_cache, budget=qr_acquisition_budget,
                 native_decoder=lambda crop: detect_native_qr_observations_bgr(
                     crop, self.cv2, **getattr(self, "_qr_decoder_options", {})),
@@ -1854,6 +1878,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "current_scan_preview_before_cold_selection": current_scan_proposal_filter.metadata(),
                 "lidar_edge_region": lidar_edge_region_diagnostics,
                 "stopped_target_search": reconciliation_metadata,
+                "identity_search": identity_search_metadata,
                 "current_scan_association_after_geometry": True,
                 "measurement_reused": False, "motion_authorized": False,
             }
@@ -2115,6 +2140,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_camera_map_bearing_delta_rad=math.radians(
                 self.args.backside_registration_max_bearing_delta_deg
             ),
+            allow_independent_registration=(viewer_geometry and
+                getattr(self.args, "qr_observation_pose_json", None) is not None),
         )
         # Discovery binds the decoded symbol to the mapped LiDAR candidate;
         # an unavailable or wrong head fit cannot replace that independent ray.
@@ -2970,6 +2997,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         progress = getattr(self, "_inspection_progress", None)
         if progress is None:
             progress = InspectionProgress(
+                minimum_acquisition_sec=(MINIMUM_DISCOVERY_ACQUISITION_SEC
+                    if getattr(self.args, "qr_observation_pose_json", None) is not None else 0.0),
                 required_frames=getattr(self.args, "inspection_progress_frames", 7),
                 minimum_span_sec=getattr(self.args, "inspection_progress_min_span_sec", 2.0),
                 max_age_sec=INSPECTION_PROGRESS_WINDOW_SEC,
@@ -3130,7 +3159,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "axis_consensus": consensus_status,
             "observation_evidence": observation_status,
             "camera_pipeline_counts": dict(getattr(self, "_camera_pipeline_counters", {})),
+            "scan_witness_diagnostics": (None if getattr(self, "_scan_target_persistence", None) is None
+                else self._scan_target_persistence.diagnostics.snapshot()),
             "camera_framing": getattr(self, "_camera_framing", None),
+            "inspection_acquisition_opportunity": (
+                None if getattr(self, "_inspection_progress", None) is None
+                else self._inspection_progress.acquisition_metadata(now_monotonic_sec=time.monotonic())
+            ),
             "front_view_recovery": (
                 None if getattr(self, "_front_view_recovery", None) is None
                 else self._front_view_recovery.metadata(now_sec=time.monotonic())
