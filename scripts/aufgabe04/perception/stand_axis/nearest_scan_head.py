@@ -5,6 +5,7 @@ import math
 from scripts.aufgabe04.perception.lidar_stand_detector import detect_stand_candidates_from_scan
 from scripts.aufgabe04.perception.models import LidarStandDetectorConfig
 from scripts.aufgabe04.perception.scan_topology import ScanTopology
+from scripts.aufgabe04.perception.stand_axis.endpoint_search_hint import endpoint_search_center
 from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector, transform_point
 
@@ -54,21 +55,23 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
         angle_min_rad=scan.angle_min, angle_increment_rad=scan.angle_increment,
         angle_max_rad=scan.angle_max, scan_topology_profile=scan.scan_topology_profile,
         config=config)
-    projected = []
-    for cluster in clusters:
-        surface_camera = _inverse_point((cluster.center_x_m, cluster.center_y_m, 0.), scan_from_camera)
+    def project_center(x_m, y_m, cluster=None):
+        surface_camera = _inverse_point((x_m, y_m, 0.), scan_from_camera)
         surface_base = transform_point(surface_camera, base_from_camera)
         center_base = (surface_base[0], surface_base[1],
                        model_profile.head_top_height_m-.5*model_profile.head_height_m)
         point = _inverse_point(center_base, base_from_camera)
         if point[2] <= .05:
-            continue
+            return None
         u, v = fx*point[0]/point[2]+cx, fy*point[1]/point[2]+cy
         height = fy*model_profile.head_height_m/point[2]
         if not (0. <= u < image_shape[1] and 0. <= v < image_shape[0] and height >= 8.):
-            continue
+            return None
         distance = math.hypot(*center_base[:2])
-        projected.append((distance, u, v, height, cluster, point[2]))
+        return distance, u, v, height, cluster, point[2]
+
+    projected = [p for cluster in clusters if (p := project_center(
+        cluster.center_x_m, cluster.center_y_m, cluster)) is not None]
     projected.sort(key=lambda p: p[0])
     info["candidates"] = [{"range_m": d, "center_u_px": u, "center_v_px": v,
                            "height_px": h, "scan_indices": c.source_indices,
@@ -76,9 +79,23 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
                           for d, u, v, h, c, depth in projected]
     if not projected:
         return fail("nearest_head_no_visible_scan_candidate")
+    selected = projected[0]
     if len(projected) > 1 and projected[1][0]-projected[0][0] < .03:
-        return fail("nearest_head_scan_candidates_ambiguous")
-    distance, u, v, height, cluster, depth = projected[0]
+        center = endpoint_search_center(scan, [p[4] for p in projected[:2]],
+                                        max_width_m=config.max_width_m)
+        # An endpoint search region cannot hide a competing third target.
+        if center is None or (len(projected) > 2 and projected[2][0]-projected[0][0] < .03):
+            return fail("nearest_head_scan_candidates_ambiguous")
+        selected = project_center(*center)
+        if selected is None:
+            return fail("nearest_head_no_visible_scan_candidate")
+        info["endpoint_fragment_search"] = {
+            "policy": "bounded_endpoint_search_region_only",
+            "source_index_groups": [p[4].source_indices for p in projected[:2]],
+            "raw_cluster_count": 2, "target_uniqueness_proven": False,
+            "supplies_corners": False, "motion_authorized": False,
+        }
+    distance, u, v, height, cluster, depth = selected
     x, y, z, w = base_from_camera.rotation_xyzw
     try:
         search = metric_head_search(model_profile=model_profile, depth_m=depth,

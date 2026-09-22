@@ -104,3 +104,32 @@ filled square would not represent the recorded star-shaped base.
   contour-support band and diagnostic intersection with saved raw Canny edges.
   That last intersection illustrates a hypothetical hard color filter; it is
   not the physical metric path's actual edge-exclusion policy.
+
+## Follow-up: are the grey edges absent from raw Canny?
+
+The final saved `latest_raw_edges.png` clearly contains the grey head's top,
+left/right sides and both bottom segments beside the attached post. The
+processed `latest_edges.png` is nearly empty except for the canvas boundary;
+it must not be interpreted as the original Canny output.
+
+`edge_check.py` replays the current channel-union Canny path and compares five
+manually identified border segments (excluding corners and the physical post
+junction). Every sampled reference location lies within 2.5 pixels of a recorded
+raw edge. This is a diagnostic of selected visible segments in one frame, not
+whole-sequence recall or proof of pose admission.
+
+| Edge extraction | Full-image edge pixels | Edge pixels in diagnostic head crop |
+| --- | ---: | ---: |
+| Recorded raw / reproduced channel union, blur 5, Canny 20/60 | 13,514 | 963 |
+| Channel union, blur 3, Canny 20/60 | 14,378 | 1,094 |
+| Channel union, blur 5, Canny 10/30 | 16,285 | 1,210 |
+
+All three settings give the same complete sampled-segment support. Lowering
+thresholds adds approximately 20.5% more full-image edge pixels without
+improving that support. The next priority for this recorded failure is correct
+head search, coherent line selection and model fitting. The head's connection
+to the post naturally interrupts its bottom edge; a missing physical boundary
+there must not be filled and then counted as a measured edge.
+
+Artifacts: `grey_head_raw_edges.png`, `edge_check.py`, `edge_metrics.json` in the
+same implementation-check directory. No production thresholds were changed.

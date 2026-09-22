@@ -152,6 +152,7 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             self.assertEqual(command[command.index("--capture-max-frames") + 1], "64")
             self.assertEqual(command[command.index("--capture-max-bytes") + 1], "33554432")
             self.assertEqual(command[command.index("--scan-topology-profile") + 1], "linear")
+            self.assertEqual(command[command.index("--qr-pose-fallback-delay-sec") + 1], "1.5")
 
     @patch.object(runtime, "_capture_camera_recommendation")
     def test_capture_adapter_preserves_inspection_path_and_legacy_success(self, capture):

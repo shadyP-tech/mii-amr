@@ -3044,7 +3044,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
     def _write_status(self, state: str, **details) -> None:
         committed = (commit_immediate_front(self) or commit_bounded_head(self)
-                     or commit_qr_observation_pose(self) or commit_candidate_centering(self))
+                     or commit_qr_observation_pose(self)
+                     or (None if qr_observation_grace_pending(self) else commit_candidate_centering(self)))
         if committed is not None:
             state, committed_details = committed
             details = {**details, **committed_details}

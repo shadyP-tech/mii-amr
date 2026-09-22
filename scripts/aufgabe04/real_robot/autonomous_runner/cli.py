@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 from scripts.aufgabe04.real_robot.execution.child_runner import (
@@ -25,6 +26,14 @@ DEFAULT_MAX_LOCALIZATION_READINESS_RETRIES_PER_LEG = 2
 DEFAULT_MAX_CAMERA_OBSERVATION_ATTEMPTS_PER_CANDIDATE = 2
 DEFAULT_MAX_CANDIDATE_INSPECTION_VIEWS = 8
 DEFAULT_MAX_ROUTE_ADMISSION_ATTEMPTS_PER_CANDIDATE = 2
+DEFAULT_QR_POSE_FALLBACK_DELAY_SEC = 1.5
+
+
+def _qr_pose_fallback_delay(value):
+    delay = float(value)
+    if not math.isfinite(delay) or not 0. <= delay <= 10.:
+        raise argparse.ArgumentTypeError("must be finite and between zero and ten seconds")
+    return delay
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,6 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--axis-sample-count", type=int, default=7,
         help="Samples for bounded/backside and legacy consensus; current head plus bound QR uses one validated fit.")
     parser.add_argument("--camera-timeout-sec", type=float, default=90.0)
+    parser.add_argument("--qr-pose-fallback-delay-sec", type=_qr_pose_fallback_delay,
+        default=DEFAULT_QR_POSE_FALLBACK_DELAY_SEC,
+        help="Geometry opportunity after the first fresh associated QR (default: 1.5 s, range: 0-10 s). "
+             "Complete geometry may finish immediately; QR-only completion requires a fresh decode after the delay.")
     parser.add_argument(
         "--stop-after-camera-candidates", type=int,
         help="Stop after this many validated candidates as an incomplete pilot checkpoint; preserves the arena goal and full obstacle pool.",

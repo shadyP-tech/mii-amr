@@ -1521,6 +1521,8 @@ def _capture_camera_recommendation(
         str(inspection_observation_path),
         "--qr-observation-pose-json",
         str(qr_observation_pose_path),
+        "--qr-pose-fallback-delay-sec",
+        str(getattr(args, "qr_pose_fallback_delay_sec", DEFAULT_QR_POSE_FALLBACK_DELAY_SEC)),
         "--debug-dir",
         str(output_dir / "perception_debug"),
         "--once",
@@ -1980,6 +1982,7 @@ def _run_camera_centering_turn(*, profile, args, master_authorization_path,
 
 from .cli import (
     build_parser,
+    DEFAULT_QR_POSE_FALLBACK_DELAY_SEC,
 )
 
 

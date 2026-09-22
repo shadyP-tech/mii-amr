@@ -20,6 +20,7 @@ from scripts.aufgabe04.real_robot.observer.immediate_front_observation import (
 )
 from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
 from scripts.aufgabe04.real_robot.observer.qr_target_binding import QrTargetBinding
+from scripts.aufgabe04.real_robot.observer.qr_observation_pose import prepare_qr_observation_pose
 from tests.aufgabe04 import test_camera_observer_processing as processing_fixtures
 from tests.aufgabe04 import test_current_head_association as association_fixtures
 from tests.aufgabe04.test_head_model_admission import head_debug, outer_boundary
@@ -79,6 +80,14 @@ class ImmediateFrontObservationTests(unittest.TestCase):
             camera_heading_rad=0., target_key=adapter._target_evidence_key(),
             camera_signature=camera_signature, image_shape=(600, 800, 3),
             roi=options["attempt"].roi, metadata=metadata)
+        if getattr(adapter.args, "qr_observation_pose_json", None) is not None:
+            adapter._pending_qr_observation_pose = prepare_qr_observation_pose(
+                qr_binding=binding, qr_observations=observations,
+                observed_qr_texts=() if not decode else (qr_id,), image_stamp_sec=stamp,
+                scan_stamp_sec=stamp+scan_offset, robot_pose=pose,
+                target_key=adapter._target_evidence_key(), camera_signature=camera_signature,
+                image_shape=(600, 800, 3), roi=options["attempt"].roi,
+                model_profile_sha256=adapter.stand_model_profile.sha256, metadata=metadata)
         update = adapter._record_observation_frame(
             robot_pose=pose, image_stamp_sec=stamp, scan_stamp_sec=stamp + scan_offset,
             observed_at_sec=stamp + age, lidar_associated=associated,
@@ -115,6 +124,20 @@ class ImmediateFrontObservationTests(unittest.TestCase):
         self.assertFalse(update.qr_sample_accepted)
         self.assertEqual(recommendation.axis_measurement["qr_sensor_stamp_sec"], 100.)
         self.assertEqual(recommendation.sensor_stamp_sec, 100.4)
+
+    def test_mission_grace_leaves_observer_alive_for_following_current_geometry(self):
+        from scripts.aufgabe04.real_robot.autonomous_runner.cli import DEFAULT_QR_POSE_FALLBACK_DELAY_SEC
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.adapter.args.qr_pose_fallback_delay_sec = DEFAULT_QR_POSE_FALLBACK_DELAY_SEC
+        with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=100.):
+            _, metadata = self.frame(100., usable=False)
+        self.assertEqual(metadata["qr_observation_pose_fallback"]["reason"], "same_pose_geometry_grace_pending")
+        self.assertFalse(self.adapter.completed)
+        with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=100.4):
+            self.frame(100.4, decode=False)
+        self.assertIsNotNone(self.recommendation())
+        self.assertTrue(self.adapter.completed)
+        self.assertFalse(self.adapter.args.qr_observation_pose_json.exists())
 
     def test_geometry_alone_cannot_admit_or_authorize_backside(self):
         for index in range(8):

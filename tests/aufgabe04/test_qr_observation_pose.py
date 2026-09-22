@@ -158,6 +158,23 @@ class QrObservationPoseTests(unittest.TestCase):
         with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=100.5):
             self.assertTrue(qr_observation_grace_pending(self.adapter))
 
+    def test_centering_advisory_cannot_end_geometry_grace(self):
+        with patch("scripts.aufgabe04.real_robot.observer.node.commit_candidate_centering") as centering:
+            self.frame(100.)
+            centering.assert_not_called()
+        with patch("scripts.aufgabe04.real_robot.observer.node.commit_candidate_centering",
+                   return_value=None) as centering:
+            self.frame(102., decode=False)
+            centering.assert_called_once_with(self.adapter)
+
+    def test_geometry_can_complete_on_first_frame_inside_grace(self):
+        self.frame(100., publish=False)
+        with patch("scripts.aufgabe04.real_robot.observer.node.commit_immediate_front",
+                   return_value=("recommendation_committed", {})) as geometry:
+            PassiveRealViewpointNode._write_status(self.adapter, "collecting_consensus")
+        geometry.assert_called_once_with(self.adapter)
+        self.assertIsNone(self.result())
+
     def test_publication_rechecks_sources_after_processing(self):
         self.adapter.args.qr_pose_fallback_delay_sec = 0.
         self.frame(100., publish=False)
@@ -178,7 +195,9 @@ class QrObservationPoseTests(unittest.TestCase):
         self.assertIsNone(self.result())
 
     def test_processing_head_acquisition_failure_still_commits_current_qr_pose(self):
+        import cv2
         adapter = self.adapter
+        adapter.cv2 = cv2  # Current producer also builds the rectification support mask.
         # ROS Humble supplies ndarray fields. Retain those live scalar types
         # through the real producer path; a JSON fixture hides the type bug.
         info = adapter._next_sensor_tuple.return_value.camera_info.value
@@ -190,6 +209,8 @@ class QrObservationPoseTests(unittest.TestCase):
         adapter.profile.scan_frame = "scan"
         adapter.stand_model_profile.environment = "physical"
         adapter.stand_model_profile.committable = True
+        adapter.stand_model_profile.head_depth_m = .006
+        adapter.stand_model_profile.tolerance_m = .002
         adapter._write_status = PassiveRealViewpointNode._write_status.__get__(adapter)
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
         module = "scripts.aufgabe04.real_robot.observer.node."
