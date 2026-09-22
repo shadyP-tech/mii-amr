@@ -91,7 +91,9 @@ def execute_candidate_inspection(
                     observation={
                         "qr_id": observation.qr_id,
                         "qr_observation_pose_path": str(observation.qr_observation_pose_path),
-                        "stand_axis_rad": None, "facing_ready": False,
+                        **({"stand_axis_rad": None} if getattr(frame, "retained_backside_axis_path", None) is None
+                           else {"retained_backside_axis_path": str(frame.retained_backside_axis_path)}),
+                        "facing_ready": False,
                         "completion_scope": "discovery_only",
                     },
                 )

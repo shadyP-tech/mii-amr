@@ -851,6 +851,14 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             def capture(request):
                 if request.attempt_index == 0:
                     return CandidateObservation(None, None, axis_path)
+                self.assertIsNotNone(request.retained_backside_axis_path)
+                retained = load_backside_axis_planning_observation(request.retained_backside_axis_path)
+                self.assertAlmostEqual(retained.stand_axis_rad, math.pi / 2.0)
+                self.assertAlmostEqual(retained.stand_x_m, request.candidate.geometry.x_m)
+                self.assertAlmostEqual(retained.stand_y_m, request.candidate.geometry.y_m)
+                self.assertEqual(retained.source_axis_observation_path.resolve(), axis_path.resolve())
+                self.assertTrue(request.candidate_crop_snapshot_path.is_file())
+                self.assertFalse(request.allow_centering)
                 return CandidateObservation(
                     request.output_dir / "recommendation.json",
                     "QR_A",

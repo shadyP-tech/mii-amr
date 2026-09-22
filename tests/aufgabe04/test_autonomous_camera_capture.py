@@ -129,6 +129,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
                     map_frame="map", calibration_profile_sha256="c" * 64
                 ),
                 args=_args(model_path), candidate=_candidate(), output_dir=output,
+                retained_backside_axis_path=root / "retained.json",
+                candidate_crop_snapshot_path=root / "arrival_snapshot.json",
             )
             self.assertEqual(result, (None, "QR_001", None, inspection_path))
             bound = load_bound.call_args.kwargs
@@ -148,6 +150,8 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             )
             self.assertIn("--inspection-observation-json", popen.call_args.args[0])
             command = popen.call_args.args[0]
+            self.assertEqual(command[command.index("--retained-backside-axis-json") + 1], str(root / "retained.json"))
+            self.assertEqual(command[command.index("--candidate-crop-snapshot") + 1], str(root / "arrival_snapshot.json"))
             self.assertEqual(command[command.index("--capture-history-dir") + 1], str(output / "capture_history"))
             self.assertEqual(command[command.index("--capture-max-frames") + 1], "64")
             self.assertEqual(command[command.index("--capture-max-bytes") + 1], "33554432")

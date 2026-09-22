@@ -1,7 +1,8 @@
 """Current-scan QR search and registration, independent of physical head fitting.
 
-The broad envelope is only a uniqueness/search check. Admission still needs
+The broad envelope is only a uniqueness/search check. Ordinary admission needs
 the decoded symbol's own ray, the original range and the narrow camera cone.
+The certified opposite-side identity path adds exclusive crop validation.
 No endpoint stitching or temporal measurements are used here.
 """
 
@@ -30,7 +31,7 @@ def current_scan_qr_search(*, scan, scan_from_map, camera_from_map, intrinsics,
     """Project a unique current return at measured head height for a small crop.
 
     This crop supplies neither symbol corners nor a head angle. Exact-time TF,
-    freshness, decoded-corner binding and stationary gates remain mandatory.
+    freshness, separate identity binding and stationary gates remain mandatory.
     """
     info = dict(policy="current_scan_qr_search", accepted=False, motion_authorized=False,
                 supplies_identity=False, supplies_head_geometry=False)

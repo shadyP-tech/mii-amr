@@ -192,6 +192,8 @@ from scripts.aufgabe04.real_robot.observer.current_scan_head_proposal_filter imp
 )
 from scripts.aufgabe04.real_robot.observer.stopped_target_search import reconcile_stopped_target_search
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
+from scripts.aufgabe04.artifacts.retained_backside_orientation import load_opposite_identity_context
+from scripts.aufgabe04.real_robot.observer.opposite_identity import process_opposite_identity
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, unavailable_head_evaluation,
 )
@@ -439,6 +441,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         )
         self.profile = load_real_robot_profile(args.robot_profile)
         self.calibration = load_camera_calibration(args.camera_calibration)
+        self._opposite_identity_context = None
+        if getattr(args, 'retained_backside_axis_json', None) is not None:
+            self._opposite_identity_context = load_opposite_identity_context(
+                args.retained_backside_axis_json, args.candidate_crop_snapshot,
+                candidate_uid=args.stand_id, planning_frame=self.profile.map_frame,
+                stand_center=dict(x_m=args.stand_x, y_m=args.stand_y),
+                model_sha256=self.stand_model_profile.sha256)
+            retained = self._opposite_identity_context.orientation
+            if (retained['robot_profile_sha256'] != real_robot_profile_sha256(self.profile)
+                    or retained['calibration_profile_sha256'] != camera_calibration_sha256(self.calibration)):
+                raise ValueError('retained backside orientation uses different robot/camera profiles')
         if camera_calibration_sha256(self.calibration) != (
             self.profile.calibration_profile_sha256
         ):
@@ -1571,6 +1584,19 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 pose=robot_pose,
             )
             self._write_status("image_rectification_failed", reason=str(exc))
+            return
+
+        opposite_context = getattr(self, '_opposite_identity_context', None)
+        if opposite_context is not None:
+            process_opposite_identity(self, context=opposite_context, frame=frame,
+                intrinsics=intrinsics, robot_pose=robot_pose,
+                camera_signature=calibrated_camera_signature, image_stamp_sec=image.stamp_sec,
+                scan=plain_scan,
+                scan_from_map=RigidTransform(self.profile.scan_frame, self.profile.map_frame,
+                    scan_translation, scan_rotation),
+                camera_from_map=RigidTransform(self.profile.camera_optical_frame, self.profile.map_frame,
+                    camera_translation, camera_rotation),
+                map_bearing_rad=scan_bearing, accepted_range_m=(lower_surface_bound, upper_surface_bound))
             return
 
         # A metric pose is expressed in camera coordinates, so its tracking
@@ -3356,6 +3382,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require image and scan stamps newer than the preceding turn's stopped proof.")
     parser.add_argument("--qr-observation-pose-json", type=Path, default=None,
         help="Discovery-only QR-confirmed robot observation pose when head angle remains unavailable.")
+    parser.add_argument("--retained-backside-axis-json", type=Path, default=None,
+        help="Parent-certified arrival-frame backside orientation for opposite-side identity acquisition.")
+    parser.add_argument("--candidate-crop-snapshot", type=Path, default=None,
+        help="Arrival candidate snapshot used to exclude neighboring heads from the identity crop.")
     parser.add_argument("--qr-pose-fallback-delay-sec", type=float, default=0.0,
         help="Optional same-stop geometry grace before QR-only discovery (0–10 seconds; default admits a current decode after geometry declines).")
     parser.add_argument("--inspection-progress-frames", type=int, default=7)
@@ -3369,6 +3399,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(parser: argparse.ArgumentParser, args) -> None:
+    if (args.retained_backside_axis_json is None) != (args.candidate_crop_snapshot is None):
+        parser.error("retained backside orientation and candidate crop snapshot are required together")
+    if args.retained_backside_axis_json is not None and args.qr_observation_pose_json is None:
+        parser.error("opposite-side identity acquisition requires a QR observation output")
     if args.observation_not_before_sec is not None and (
             not math.isfinite(args.observation_not_before_sec)
             or args.observation_not_before_sec < 0):

@@ -18,6 +18,9 @@ from scripts.aufgabe04.artifacts.candidate_inspection_observation import (
 from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json, payload_sha256, write_content_hashed_json,
 )
+from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
+    write_backside_axis_frame_projection,
+)
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     write_candidate_inspection_view,
 )
@@ -296,7 +299,7 @@ def execute_local_candidate_inspection(
         nonlocal motion_serial
         motion_serial += 1
         try:
-            return move_certified_opposite(
+            arrival = move_certified_opposite(
                 observation_frame=frame, observation=observation, source_config=source_config,
                 effects=effects, source_registry=source_registry, candidate_root=root,
                 candidate_run_id=f"{candidate_run_id}_inspection_{motion_serial:03d}",
@@ -306,7 +309,24 @@ def execute_local_candidate_inspection(
         except CandidateObservationUnavailableError as exc:
             if exc.status_evidence.get("reasons") != ["bearing_error_above_maximum"]:
                 raise
-            return admit_corrected(root / "corrected_arrival", frame, index)
+            arrival = admit_corrected(root / "corrected_arrival", frame, index)
+        # Use the original proof and source frame even if arrival alignment
+        # required a correction. Reprojection never fits another camera angle.
+        if arrival.decision_binding is not None:
+            source, target = frame.decision_binding, arrival.decision_binding
+            if source is None:
+                raise ValueError("retained backside axis lacks its source candidate frame")
+            retained = root / "arrival_backside_orientation.json"
+            write_backside_axis_frame_projection(retained,
+                axis_evidence_path=observation.axis_observation_path,
+                source_candidate_projection_path=source.projection_path,
+                source_candidate_projection_sha256=source.projection_sha256,
+                target_candidate_projection_path=target.projection_path,
+                target_candidate_projection_sha256=target.projection_sha256,
+                target_candidate_x_m=arrival.candidate.geometry.x_m,
+                target_candidate_y_m=arrival.candidate.geometry.y_m)
+            arrival = replace(arrival, retained_backside_axis_path=retained)
+        return arrival
 
     def distance_recovery(frame, evidence):
         current = pose(frame)
@@ -353,7 +373,20 @@ def execute_local_candidate_inspection(
             raise ValueError("inspection observation target center binding mismatch")
         return {**evidence, "inspection_observation_path": str(observation.inspection_observation_path)}
 
+    def capture_frame(frame, output, index):
+        retained = getattr(frame, "retained_backside_axis_path", None)
+        if retained is not None:
+            return capture_observation(observation_request_type(
+                frame.candidate, output, index, allow_centering=False,
+                timeout_sec=source_config.camera_timeout_sec,
+                retained_backside_axis_path=retained,
+                candidate_crop_snapshot_path=frame.decision_binding.camera_snapshot_path,
+            ))
+        return capture_observation(observation_request_type(frame.candidate, output, index))
+
     def centered_capture(frame, output, index):
+        if getattr(frame, "retained_backside_axis_path", None) is not None:
+            return capture_frame(frame, output, index), frame
         def capture(current, destination, view, enabled, timeout, not_before):
             return capture_observation(observation_request_type(
                 current.candidate, destination, view, allow_centering=enabled,
@@ -416,8 +449,7 @@ def execute_local_candidate_inspection(
         candidate_uid=candidate_uid, candidate_root=candidate_root, initial_frame=initial,
         max_views=source_config.max_candidate_inspection_views,
         effects=CandidateInspectionEffects(
-            capture=lambda frame, output, index: capture_observation(
-                observation_request_type(frame.candidate, output, index)),
+            capture=capture_frame,
             canonical_normal=normal, move_view=move_view, move_opposite=move_opposite,
             progress_evidence=progress, route_search_evidence=route_search.to_dict,
             distance_recovery=distance_recovery, move_distance_recovery=move_distance_recovery,

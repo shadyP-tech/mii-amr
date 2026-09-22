@@ -309,6 +309,8 @@ class CandidateObservationRequest:
     allow_centering: bool = False
     timeout_sec: float | None = None
     observation_not_before_sec: float | None = None
+    retained_backside_axis_path: Path | None = None
+    candidate_crop_snapshot_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +351,7 @@ class _CandidateObservationFrame:
     planning_frame: CandidatePlanningFrame | None
     decision_binding: CameraCandidateFrameBinding | None
     observation_pose: Pose2D | None = None
+    retained_backside_axis_path: Path | None = None
 
 
 @dataclass(frozen=True)

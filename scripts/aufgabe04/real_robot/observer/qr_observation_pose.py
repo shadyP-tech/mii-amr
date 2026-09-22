@@ -1,9 +1,10 @@
-"""Current QR-only discovery after the same image's geometry attempt declines.
+"""Current QR-only discovery, optionally retaining a certified backside angle.
 
 This path does not estimate a stand angle or authorize a facing approach. Its
 optional same-stop grace requires a new, source-fresh associated decode after
 that delay; by default one current decode suffices. Old identity latches cannot
-substitute for current QR corners and the associated scan.
+substitute for a current decode. The certified opposite branch binds text by an
+exclusive current crop and finishes immediately without corners or a new fit.
 """
 
 from dataclasses import asdict, dataclass
@@ -32,11 +33,12 @@ class QrObservationFrame:
     observed_qr_texts: tuple
     model_profile_sha256: str
     metadata: dict
+    retained_backside_orientation: dict | None = None
 
 
 def prepare_qr_observation_pose(*, qr_binding, qr_observations, observed_qr_texts,
         image_stamp_sec, scan_stamp_sec, robot_pose, target_key, camera_signature,
-        image_shape, roi, model_profile_sha256, metadata):
+        image_shape, roi, model_profile_sha256, metadata, retained_backside_orientation=None):
     observations = tuple(qr_observations or ())
     corners = None
     if (qr_binding.accepted and qr_binding.reason == "decoded_qr_target_associated"
@@ -48,7 +50,7 @@ def prepare_qr_observation_pose(*, qr_binding, qr_observations, observed_qr_text
             corners = tuple((x + roi.x0, y + roi.y0) for x, y in local)
     return QrObservationFrame(image_stamp_sec, scan_stamp_sec, robot_pose,
         target_key, tuple(camera_signature), tuple(image_shape[:2]), qr_binding,
-        corners, tuple(observed_qr_texts), model_profile_sha256, metadata)
+        corners, tuple(observed_qr_texts), model_profile_sha256, metadata, retained_backside_orientation)
 
 
 class QrObservationPoseFallback:
@@ -65,15 +67,18 @@ class QrObservationPoseFallback:
         self.qr_id = None
         self.latest_stamp = -math.inf
         self.poisoned = False
+        self.effective_delay_sec = self.delay_sec
 
     def grace_pending(self, *, now_monotonic_sec):
         return (not self.poisoned and self.first_monotonic_sec is not None
-                and 0 <= now_monotonic_sec - self.first_monotonic_sec < self.delay_sec)
+                and 0 <= now_monotonic_sec - self.first_monotonic_sec < self.effective_delay_sec)
 
     def observe(self, current, *, update, observed_at_sec, now_monotonic_sec):
         snapshot = update.snapshot
         context = (snapshot.target_key, snapshot.motion_epoch,
-                   current.camera_signature, current.image_shape, current.model_profile_sha256)
+                   current.camera_signature, current.image_shape, current.model_profile_sha256,
+                   None if current.retained_backside_orientation is None else
+                   current.retained_backside_orientation.get('projection_sha256'))
         if context != self.context or update.motion_epoch_reset:
             self.reset()
             self.context = context
@@ -100,7 +105,10 @@ class QrObservationPoseFallback:
         if current.stamp_sec <= self.latest_stamp:
             return reject("duplicate_or_out_of_order_qr_frame")
         self.latest_stamp = current.stamp_sec
-        if not update.qr_sample_accepted or current.qr_corners is None:
+        retained = current.retained_backside_orientation is not None
+        crop_bound = (retained and current.qr_binding.accepted
+                      and current.qr_binding.reason == "decoded_qr_exclusive_opposite_crop")
+        if not update.qr_sample_accepted or (current.qr_corners is None and not crop_bound):
             return reject("fresh_independently_bound_qr_required")
         qr_id = current.qr_binding.qr_texts_for_evidence[0]
         if qr_id not in (snapshot.tentative_qr_id, snapshot.latched_qr_id):
@@ -111,8 +119,13 @@ class QrObservationPoseFallback:
             self.qr_id = qr_id
         # Both sensor clock and monotonic time must cover the same-stop grace.
         # Neither a timestamp leap nor delayed processing alone completes it.
-        if (observed_at_sec - self.first_checked_sec + 1e-9 < self.delay_sec
-                or now_monotonic_sec - self.first_monotonic_sec + 1e-9 < self.delay_sec):
+        delay = 0. if crop_bound else self.delay_sec
+        self.effective_delay_sec = delay
+        if crop_bound:
+            diagnostic.update(delay_sec=0., stand_axis_rad=current.retained_backside_orientation['stand_axis_rad'],
+                              orientation_source='certified_backside', current_angle_refit=False)
+        if (observed_at_sec - self.first_checked_sec + 1e-9 < delay
+                or now_monotonic_sec - self.first_monotonic_sec + 1e-9 < delay):
             return reject("same_pose_geometry_grace_pending")
         diagnostic.update(ready=True, reason="fresh_qr_observation_pose_ready", qr_id=qr_id)
         return current, update, observed_at_sec
@@ -161,12 +174,14 @@ def commit_qr_observation_pose(adapter):
             target_key=current.target_key, motion_epoch=update.snapshot.motion_epoch,
             camera_signature=current.camera_signature, qr_corners_px=current.qr_corners,
             image_shape=current.image_shape, qr_binding=current.qr_binding.metadata(),
+            **({} if current.retained_backside_orientation is None else
+               {"retained_backside_orientation": current.retained_backside_orientation}),
             source_gates={key: True for key in SOURCE_GATES},
             localization_provenance={"map_frame": profile.map_frame, "base_frame": profile.base_frame,
                 "scan_frame": profile.scan_frame, "camera_frame": profile.camera_optical_frame,
                 "exact_image_transform_stamp_sec": current.stamp_sec,
                 "exact_scan_transform_stamp_sec": current.scan_stamp_sec})
-    except (TypeError, ValueError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         current.metadata["qr_observation_pose_fallback"].update(
             ready=False, reason="qr_observation_receipt_rejected", detail=str(exc))
         return None
@@ -178,5 +193,5 @@ def commit_qr_observation_pose(adapter):
     return "qr_observation_pose_committed", {
         "qr_observation_pose": str(output),
         "qr_verified_observation_pose_sha256": payload["qr_verified_observation_pose_sha256"],
-        "qr_texts": [qr_id], "stand_axis_rad": None, "facing_ready": False,
+        "qr_texts": [qr_id], "stand_axis_rad": payload['stand_axis_rad'], "facing_ready": False,
         "completion_scope": "discovery_only", "admission_policy": "qr_verified_observation_pose"}

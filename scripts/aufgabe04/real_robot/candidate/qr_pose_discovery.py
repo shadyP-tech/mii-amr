@@ -1,4 +1,4 @@
-"""Bind QR-only discovery to its actual observation frame, without an axis.
+"""Bind QR-only discovery and any retained axis to the observation frame.
 
 This receipt records a place from which the robot read the candidate's QR. It
 does not move the LiDAR candidate, create a facing recommendation, or authorize
@@ -62,7 +62,9 @@ def bind_qr_pose_discovery(*, observation, observation_frame, source_config,
         "robot_observation_pose": payload["robot_pose"],
         "sensor_stamp_sec": payload["sensor_stamp_sec"],
         "scan_stamp_sec": payload["scan_stamp_sec"],
-        "stand_axis_rad": None,
+        "stand_axis_rad": payload['stand_axis_rad'],
+        **({} if payload.get('retained_backside_orientation') is None else
+           {'retained_backside_orientation': payload['retained_backside_orientation']}),
         "facing_ready": False,
         "completion_scope": "discovery_only",
         "motion_authorized": False,

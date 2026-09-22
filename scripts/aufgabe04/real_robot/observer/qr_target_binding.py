@@ -1,9 +1,11 @@
 """Bind decoded identity to its own image ray and the mapped LiDAR target.
 
-An ROI is a search proposal, never identity authority. QR text can enter the
+For ordinary acquisition an ROI is only a search proposal. QR text enters the
 temporal latch only with that symbol's quadrilateral and a unique cluster in
 the existing candidate range/cone. Registered crops retain their certified
-bearing correction bound; missing geometry remains diagnostic-only.
+bearing correction bound; missing geometry remains diagnostic-only here.
+The separate opposite_identity_crop module binds cornerless text exclusively
+when certified backside evidence and a current isolated target crop exist.
 """
 
 from __future__ import annotations

@@ -1449,6 +1449,8 @@ def _capture_camera_recommendation(
     allow_centering: bool = False,
     timeout_sec: float | None = None,
     observation_not_before_sec: float | None = None,
+    retained_backside_axis_path: Path | None = None,
+    candidate_crop_snapshot_path: Path | None = None,
 ) -> (
     tuple[Path | None, str | None, Path | None]
     | tuple[None, str | None, None, Path]
@@ -1537,6 +1539,11 @@ def _capture_camera_recommendation(
         command.extend(["--candidate-centering-json", str(centering_path)])
     if observation_not_before_sec is not None:
         command.extend(["--observation-not-before-sec", str(observation_not_before_sec)])
+    if retained_backside_axis_path is not None:
+        if candidate_crop_snapshot_path is None:
+            raise ValueError("retained backside orientation needs its candidate crop snapshot")
+        command.extend(["--retained-backside-axis-json", str(retained_backside_axis_path),
+                        "--candidate-crop-snapshot", str(candidate_crop_snapshot_path)])
     process = subprocess.Popen(command)
     process_evidence = monitor_passive_observer_process(
         process=process,
@@ -1951,6 +1958,8 @@ def _capture_candidate_observation(
         allow_centering=getattr(request, "allow_centering", False),
         timeout_sec=getattr(request, "timeout_sec", None),
         observation_not_before_sec=getattr(request, "observation_not_before_sec", None),
+        retained_backside_axis_path=getattr(request, "retained_backside_axis_path", None),
+        candidate_crop_snapshot_path=getattr(request, "candidate_crop_snapshot_path", None),
     )
     return CandidateObservation(*result)
 
