@@ -19,9 +19,9 @@ from scripts.aufgabe04.artifacts.backside_axis_observation import load_backside_
 from scripts.aufgabe04.artifacts.retained_backside_orientation import orientation_record
 
 
-@pytest.fixture
-def recorded(tmp_path):
-    return recorded_opposite(tmp_path)
+@pytest.fixture(params=[False, True], ids=['recorded_receipt', 'bounded_writer'])
+def recorded(tmp_path, request):
+    return recorded_opposite(tmp_path, bounded_writer=request.param)
 
 
 def support_for(recorded, *, proof=True):

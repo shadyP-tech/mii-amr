@@ -75,9 +75,14 @@ def uncovered_head_hypotheses(hypotheses, verified, *, cv2=None, raw_edges=None,
         return uncovered
     # Texture classification can use the already current-border/corner-supported
     # locator graph. Those hints never provide accepted physical head corners.
-    pool = [SimpleNamespace(corners=item[1]) for item in all_hypotheses]
+    # Exact duplicates carry no extra texture topology. Keep different raw
+    # borders, even when they belong to one family: projective texture tests
+    # can differ between those measurements.
+    unique_corners = dict.fromkeys(tuple(item[1]) for item in all_hypotheses)
+    pool = [SimpleNamespace(corners=corners) for corners in unique_corners]
     covered = set()
-    for outer in verified:
+    unique_verified = {tuple(item.corners): item for item in verified}
+    for outer in unique_verified.values():
         check_head_acquisition_deadline(deadline_monotonic_sec, "cold_uncovered_families")
         others = [item for item in pool if not families.same(outer.corners, item.corners)]
         covered.update(id(item) for item in texture_members(cv2, outer, others,

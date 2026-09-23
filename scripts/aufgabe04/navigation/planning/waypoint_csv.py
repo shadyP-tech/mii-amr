@@ -51,6 +51,7 @@ class SelectedRouteLeg:
     catalog_sha256: str = ""
     source_sha256: str = ""
     source_waypoint_count: int = 0
+    stationary_turn: bool = False
 
 
 def _parse_int(value: str, field: str, row_number: int) -> int:
@@ -133,6 +134,7 @@ def load_route_leg(
             str,
             str,
             str,
+            bool,
         ]
     ] = []
     seen_leg_indexes = set()
@@ -191,6 +193,9 @@ def load_route_leg(
             source_arrival_id = row.get("source_arrival_id", "").strip()
             target_arrival_id = row.get("target_arrival_id", "").strip()
             catalog_sha256 = row.get("catalog_sha256", "").strip()
+            stationary_turn = _parse_optional_bool(
+                row.get("stationary_turn", ""), "stationary_turn", row_number
+            )
             selected.append(
                 RouteWaypoint(
                     leg_index=row_leg_index,
@@ -212,6 +217,7 @@ def load_route_leg(
                     source_arrival_id,
                     target_arrival_id,
                     catalog_sha256,
+                    stationary_turn,
                 )
             )
 
@@ -241,11 +247,26 @@ def load_route_leg(
         source_arrival_id,
         target_arrival_id,
         catalog_sha256,
+        stationary_turn,
     ) = next(iter(unique_metadata))
+    if stationary_turn:
+        if route_kind != "admitted_candidate_pose" or simulation_only:
+            raise ValueError("stationary turn requires a physical admitted_candidate_pose route")
+        if (
+            len(selected) != 2
+            or any(waypoint.cumulative_length_m != 0.0 for waypoint in selected)
+            or (selected[0].pose.x_m, selected[0].pose.y_m)
+            != (selected[-1].pose.x_m, selected[-1].pose.y_m)
+            or not math.isfinite(selected[-1].pose.yaw_rad)
+        ):
+            raise ValueError(
+                "stationary turn requires exactly two identical XY points, "
+                "zero route length, and a finite target yaw"
+            )
     if require_motion:
         if len(selected) < 2:
             raise ValueError(f"leg_index {leg_index} has fewer than two points for motion")
-        if route_length_m <= 0.0:
+        if route_length_m <= 0.0 and not stationary_turn:
             raise ValueError(f"leg_index {leg_index} has non-positive route length")
 
     executable = thin_waypoints(selected, thinning_min_spacing_m)
@@ -270,6 +291,7 @@ def load_route_leg(
         catalog_sha256=catalog_sha256,
         source_sha256=source_sha256,
         source_waypoint_count=source_waypoint_count,
+        stationary_turn=stationary_turn,
     )
 
 

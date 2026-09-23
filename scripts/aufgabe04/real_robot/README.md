@@ -69,6 +69,37 @@ Logistics catalog promotion rejects an incomplete facing catalog. A stored QR
 viewpoint is historical discovery evidence, not a docking pose or a return-route
 permission. See [the fallback validation note](../../../docs/setups/aufgabe04_qr_observation_pose_fallback_20260916.md).
 
+After a full camera mission stores its catalogs, `mission/start_return.py`
+returns to the candidate whose QR text is exactly `Start`. It uses that
+candidate's admitted facing pose or verified QR observation pose, preserving
+its yaw. `mission/stored_start_pose.py` authenticates the completion records
+and source evidence. The return phase projects the stored pose and the full
+obstacle pool into a freshly admitted localization frame, plans and smooths
+a new exact-target route, and executes it with its own one-use
+`return_to_start` permit. Coverage-only and camera pilot checkpoints still
+stop at their requested checkpoint.
+If the robot is already at the exact target position but needs a different
+heading, a separately identified stationary route uses an isotropic clearance
+budget and permits angular commands only.
+
+This unloaded return uses a dedicated travel policy: up to **0.15 m/s** and
+**0.60 rad/s**, with **0.055 m/s / 0.18 rad/s** near the final pose and actual
+corners. Exploration speeds are unchanged. Fast travel requires sensor ages
+of at most 0.25 seconds and reserves 0.075 m for braking/latency in its route
+uncertainty budget. The existing live obstacle stop, route tube, localization,
+exclusive velocity ownership and dry-run checks remain mandatory. The speed
+policy is recorded in the dry preflight and must match during execution.
+These configured caps require hardware commissioning; they are not a measured
+maximum safe speed.
+
+The parent saves camera completion before returning. Only a successful return
+and fresh stationary arrival check set `start_pose_reached` and
+`fastapi_request_ready` true. `return_to_start/arrival.json` records the target
+and arrival evidence. A missing/ambiguous `Start`, altered artifact, unsafe
+route or failed motion leaves the robot's request readiness false and saves
+`return_to_start/failure.json`. The FastAPI request remains a subsequent task
+client action; this return phase sends no request.
+
 Cross-view rejected morphology and conservative visibility gaps are preserved
 as immutable candidate-source advisories by
 `navigation/coverage/coverage_morphology_conflict.py`. They survive registry,

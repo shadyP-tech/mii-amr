@@ -23,6 +23,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
     MissionLegMotionPermit,
     load_mission_leg_motion_authorization,
@@ -383,11 +384,7 @@ def _validate_receipt(receipt: MissionLegMotionConsumptionReceipt) -> None:
     )
     for name in ("session_id", "run_id", "target_id"):
         _require_nonempty(getattr(receipt, name), name)
-    if receipt.mission_leg_kind not in {
-        MissionLegKind.COVERAGE,
-        MissionLegKind.CANDIDATE_PREAPPROACH,
-        MissionLegKind.OPPOSITE_FACE,
-    }:
+    if receipt.mission_leg_kind not in ROUTINE_MISSION_LEG_KINDS:
         raise ValueError("mission_leg_kind must be a routine leg kind")
     if (
         isinstance(receipt.mission_leg_index, bool)

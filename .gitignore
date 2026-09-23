@@ -42,6 +42,11 @@ tests/aufgabe04/*
 !tests/aufgabe04/*.py
 !tests/aufgabe04/fixtures/
 tests/aufgabe04/fixtures/*
+!tests/aufgabe04/fixtures/facing_geometry_20260923/
+tests/aufgabe04/fixtures/facing_geometry_20260923/*
+!tests/aufgabe04/fixtures/facing_geometry_20260923/*.json
+!tests/aufgabe04/fixtures/facing_geometry_20260923/*.jpg
+!tests/aufgabe04/fixtures/facing_geometry_20260923/README.md
 !tests/aufgabe04/fixtures/opposite_reconciliation_20260923/
 tests/aufgabe04/fixtures/opposite_reconciliation_20260923/*
 !tests/aufgabe04/fixtures/opposite_reconciliation_20260923/README.md

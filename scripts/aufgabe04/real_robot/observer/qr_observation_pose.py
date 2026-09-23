@@ -194,7 +194,17 @@ def commit_qr_observation_pose(adapter):
             artifact_kind="qr_verified_observation_pose"):
         return None
     adapter.completed = True
+    # Identity is already committed. Optional geometry retention must neither
+    # delay its admission for more samples nor revoke it on a write failure.
+    geometry_path = None
+    try:
+        from scripts.aufgabe04.artifacts.bounded_front_geometry import save_bounded_front_geometry
+        geometry_path = save_bounded_front_geometry(
+            getattr(adapter, "_pending_bounded_head", None), output, payload)
+    except (OSError, TypeError, ValueError, KeyError, AttributeError) as exc:
+        current.metadata["bounded_front_geometry_retention_error"] = str(exc)
     return "qr_observation_pose_committed", {
+        "bounded_front_geometry_json": None if geometry_path is None else str(geometry_path),
         "qr_observation_pose": str(output),
         "qr_verified_observation_pose_sha256": payload["qr_verified_observation_pose_sha256"],
         "qr_texts": [qr_id], "stand_axis_rad": payload['stand_axis_rad'], "facing_ready": False,

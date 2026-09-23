@@ -79,8 +79,10 @@ class ResolvedAutonomousRunMode:
         ):
             return (
                 "exactly two center-corridor coverage legs followed by the "
-                "bounded camera inspection pool, ending when the configured "
-                "number of distinct QR identities and stand poses is validated"
+                "bounded camera inspection pool, then, after the configured "
+                "number of distinct QR identities and stand poses is validated "
+                "and admitted candidates are stored, one return to the admitted "
+                "pose of the candidate carrying the Start QR identity"
             )
         if (
             self.authorization_scope
@@ -90,7 +92,12 @@ class ResolvedAutonomousRunMode:
                 "exactly one next center-corridor coverage leg from an "
                 "admitted immutable checkpoint"
             )
-        return "the complete multi-leg stand exploration mission"
+        return (
+            "the complete multi-leg stand exploration mission followed, after "
+            "completed camera exploration and storage of admitted candidates, "
+            "by one return to the admitted pose of the candidate carrying the "
+            "Start QR identity"
+        )
 
     @property
     def camera_phase_enabled(self) -> bool:

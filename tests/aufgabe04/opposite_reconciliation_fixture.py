@@ -17,13 +17,70 @@ from tests.aufgabe04.test_target_reconciliation import recorded_inputs
 ROOT = Path(__file__).parent/'fixtures/opposite_reconciliation_20260923'
 
 
-def recorded_opposite(root):
+def write_recorded_bounded_receipt(path, raw):
+    """Publish through the real bounded writer, with proofs outside diagnostics.
+
+    Recorded window readiness supplies the upstream orientation evidence;
+    synthetic seven-frame accumulation is exercised by bounded-head tests.
+    Artifact validation, freshness and durable publication are not mocked.
+    """
+    from unittest.mock import patch
+    from scripts.aufgabe04.navigation.foundation.models import Pose2D
+    from scripts.aufgabe04.real_robot.observer.bounded_head_observation import CurrentBoundedHead, commit_bounded_head
+    from scripts.aufgabe04.real_robot.observer.bounded_head_window import BoundedHeadSample
+    from tests.aufgabe04.test_camera_observer_processing import CameraObserverProcessingTest
+
+    fixture = CameraObserverProcessingTest()
+    adapter = fixture.make_adapter()
+    fixture.clock_sec = raw['sensor_stamp_sec'] + .1
+    adapter.args.axis_observation_json = path
+    adapter.args.stream_id = raw['stream_id']
+    adapter.args.stand_id = raw['stand_id']
+    adapter.args.stand_x = raw['stand_center']['x_m']
+    adapter.args.stand_y = raw['stand_center']['y_m']
+    adapter.profile.map_frame = raw['planning_frame']
+    bounds = raw['bounded_orientation']
+    head = raw['head_position_evidence']['head_bounds']
+    sample = BoundedHeadSample(raw['sensor_stamp_sec'], bounds['center_rad'], bounds['half_width_rad'],
+        raw['stand_model_profile_sha256'], tuple(head['camera_matrix']), 'backside', None,
+        tuple((p['u_px'], p['v_px']) for p in head['corners']), (400., 300.), head['minimum_edge_length_px'])
+    current = CurrentBoundedHead(sample=sample,
+        scan_stamp_sec=raw['target_reconciliation']['entries'][-1]['scan']['scan_stamp_sec'],
+        robot_pose=Pose2D(**raw['robot_pose']), proof=None,
+        appearance=SimpleNamespace(head_scale_ratio=raw['head_scale_ratio'],
+            head_center_error_ratio=raw['head_center_error_ratio']),
+        registration=raw['target_registration'],
+        debug=SimpleNamespace(pose_reprojection_rmse_px=raw['pose_reprojection_rmse_px'],
+            pose_ambiguity_gap_px=raw['pose_ambiguity_gap_px']), metadata={},
+        target_reconciliation=raw['target_reconciliation'], head_position_evidence=raw['head_position_evidence'])
+    update = SimpleNamespace(snapshot=SimpleNamespace(poisoned=False, current_qr_sample_count=0,
+        tentative_qr_id=None, latched_qr_id=None))
+    adapter._bounded_head_ready = (current, bounds, update)
+    adapter._bounded_head_window = SimpleNamespace(metadata=raw['axis_measurement']['bounded_orientation_window'])
+    adapter._head_confidence_metadata = {'backside': {'confidence': raw['visible_face_confidence']}}
+    module = 'scripts.aufgabe04.real_robot.observer.bounded_head_observation.'
+    with patch(module+'real_robot_profile_sha256', return_value=raw['robot_profile_sha256']), \
+         patch(module+'camera_calibration_sha256', return_value=raw['calibration_profile_sha256']):
+        result = commit_bounded_head(adapter)
+    assert result is not None, current.metadata
+    assert result[0] == 'backside_axis_committed_qr_unresolved'
+    committed = json.loads(path.read_text())
+    assert committed['target_reconciliation'] == raw['target_reconciliation']
+    assert committed['head_position_evidence'] == raw['head_position_evidence']
+    assert committed['bounded_orientation'] == bounds
+
+
+def recorded_opposite(root, *, bounded_writer=False):
     data, rows, intrinsics, camera = recorded_inputs(json.loads((ROOT/'inputs.json').read_text()),
         root=ROOT,candidate_uid='survey_candidate_0001')
     raw = json.loads((ROOT/'backside_observation.json').read_text())
     raw['target_reconciliation']['snapshot_path'] = str((ROOT/'backside_snapshot.json').resolve())
     raw['head_position_evidence']['model_path']=str((Path(__file__).resolve().parents[2]/raw['head_position_evidence']['model_path']).resolve())
-    axis = root/'axis.json';axis.write_text(json.dumps(raw))
+    axis = root/'axis.json'
+    if bounded_writer:
+        write_recorded_bounded_receipt(axis, raw)
+    else:
+        axis.write_text(json.dumps(raw))
     from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
     source = root/'source.json';target = root/'target.json'
     uid=raw['stand_id']

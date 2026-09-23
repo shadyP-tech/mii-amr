@@ -6,7 +6,10 @@ import argparse
 import math
 from pathlib import Path
 
-from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    RECOVERABLE_MISSION_LEG_KINDS,
+    ROUTINE_MISSION_LEG_KINDS,
+)
 from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
     DEFAULT_COLLISION_MARGIN_M,
     DEFAULT_TRACKING_TUBE_RADIUS_M,
@@ -107,11 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--runtime-localization-mission-leg-kind",
-        choices=[
-            MissionLegKind.COVERAGE.value,
-            MissionLegKind.CANDIDATE_PREAPPROACH.value,
-            MissionLegKind.OPPOSITE_FACE.value,
-        ],
+        choices=[kind.value for kind in RECOVERABLE_MISSION_LEG_KINDS],
     )
     parser.add_argument("--runtime-localization-mission-leg-index", type=int)
     parser.add_argument("--runtime-localization-target-id", default="")
@@ -134,11 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--startup-reseal-mission-leg-kind",
-        choices=[
-            MissionLegKind.COVERAGE.value,
-            MissionLegKind.CANDIDATE_PREAPPROACH.value,
-            MissionLegKind.OPPOSITE_FACE.value,
-        ],
+        choices=[kind.value for kind in RECOVERABLE_MISSION_LEG_KINDS],
     )
     parser.add_argument("--startup-reseal-mission-leg-index", type=int)
     parser.add_argument("--startup-reseal-target-id", default="")
@@ -146,11 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--startup-reseal-semantic-map-id", default="")
     parser.add_argument(
         "--mission-leg-evidence-kind",
-        choices=[
-            MissionLegKind.COVERAGE.value,
-            MissionLegKind.CANDIDATE_PREAPPROACH.value,
-            MissionLegKind.OPPOSITE_FACE.value,
-        ],
+        choices=[kind.value for kind in ROUTINE_MISSION_LEG_KINDS],
         help=(
             "Non-authorizing routine-leg identity emitted into dry/live "
             "semantic evidence. It never bypasses operator confirmation."
@@ -173,11 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mission-leg-kind",
-        choices=[
-            MissionLegKind.COVERAGE.value,
-            MissionLegKind.CANDIDATE_PREAPPROACH.value,
-            MissionLegKind.OPPOSITE_FACE.value,
-        ],
+        choices=[kind.value for kind in ROUTINE_MISSION_LEG_KINDS],
     )
     parser.add_argument("--mission-leg-index", type=int)
     parser.add_argument("--mission-leg-target-id", default="")
@@ -246,6 +233,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-linear-mps", type=float, default=0.055)
     parser.add_argument("--max-angular-radps", type=float, default=0.18)
+    parser.add_argument(
+        "--motion-speed-policy",
+        choices=("exploration", "unloaded_return_to_start"),
+        default="exploration",
+        help="Higher travel ceiling only for the exact unloaded return-to-Start leg.",
+    )
     parser.add_argument("--goal-tolerance-m", type=float, default=0.08)
     parser.add_argument(
         "--physical-waypoint-tolerance-m",

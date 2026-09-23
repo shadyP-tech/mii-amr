@@ -54,8 +54,14 @@ def context(anchor, transform):
 
 class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
     def test_real_admission_publishes_v2_and_shares_stationary_budget_context_anchor(self):
+        self._assert_real_admission(stationary_turn=False)
+
+    def test_stationary_admitted_turn_keeps_odom_certificate_and_uncertainty_gates(self):
+        self._assert_real_admission(stationary_turn=True)
+
+    def _assert_real_admission(self, *, stationary_turn):
         transform = PlanarTransform2D(-4, 1, 0)
-        route = (Pose2D(1, 1, 0), Pose2D(1.3, 1, 0))
+        route = (Pose2D(1, 1, float("nan")), Pose2D(1, 1, 1)) if stationary_turn else (Pose2D(1, 1, 0), Pose2D(1.3, 1, 0))
         samples = []
         for index in range(2):
             stamp = 10 + index
@@ -84,6 +90,12 @@ class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
             arena_boundary_overlay=True, arena_bounds=dict(length_m=10., width_m=10.,
                 center_x_m=5., center_y_m=5., yaw_deg=0., margin_m=0.), map_bundle_sha256="d" * 64,
         ))
+        if stationary_turn:
+            diagnostics.metadata.update(
+                stationary_turn=True,
+                exact_start_connector={"exact_start": {"x_m": 1., "y_m": 1., "yaw_rad": 0.}},
+                target_evidence_sha256="e" * 64,
+            )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = SimpleNamespace(
@@ -102,7 +114,11 @@ class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
                  patch.object(module, "_resolved_map_execution_certificate", return_value=(
                      SimpleNamespace(route_kind="detected_stand_preapproach"), "b" * 64)):
                 _, admitted_context, evidence, gate = module._build_odom_execution_admission(
-                    args=args, resolved=resolved, leg=SimpleNamespace(executable_waypoints=[]),
+                    args=args, resolved=resolved, leg=SimpleNamespace(
+                        executable_waypoints=[],
+                        route_kind="admitted_candidate_pose" if stationary_turn else "detected_stand_preapproach",
+                        stationary_turn=stationary_turn,
+                    ),
                     preflight=preflight, diagnostics_snapshot=diagnostics,
                 )
             certificate = load_odom_execution_certificate(args.odom_execution_certificate_json)
@@ -118,6 +134,12 @@ class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
             self.assertEqual(evidence["drift_reference"], expected.to_evidence())
             self.assertEqual(gate._config.heading_reference_x_m, expected.map_x_m)
             self.assertEqual(gate._config.heading_reference_y_m, expected.map_y_m)
+            if stationary_turn:
+                self.assertEqual(
+                    budget["admission"]["sampling"]["method"],
+                    "stationary_circular_footprint_largest_covariance_eigenvalue",
+                )
+                self.assertEqual(budget["admission"]["sampling"]["target_evidence_sha256"], "e" * 64)
 
     def test_revision_keeps_original_anchor_and_consumes_its_full_lever_arm(self):
         transform = PlanarTransform2D(-4, 1, 0)

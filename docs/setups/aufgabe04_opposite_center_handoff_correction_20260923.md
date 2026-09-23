@@ -62,3 +62,40 @@ this frame's rectified isolated quad. The producer-path admission regression
 therefore supplies deterministic decoder output and separately checks saved-pixel
 payload availability. End-to-end decoding and motion with the deployed WeChat
 backend require a new real run. No robot motion or deployment was performed.
+
+## Follow-up: bounded receipt handoff after run 20260923T124047Z
+
+That run admitted all five identities, but its bounded-angle receipt dropped
+the current center proofs: the observer stored them in `axis_metadata`, while
+the bounded writer searched its nested `model_metadata` diagnostics. Opposite
+planning therefore still received `validated_target_center: null`.
+
+`CurrentBoundedHead` now carries `target_reconciliation` from the accepted
+current-head association and `head_position_evidence` as explicit fields. The
+observer supplies the position evidence directly at preparation; the bounded
+writer passes both fields to the existing receipt validator. Diagnostic nesting
+no longer controls the handoff. No angle fitting, association limits, uncertainty
+limits, QR completion policy, or robot command-line options changed.
+
+Verification:
+
+- The real observer processing path supplies current position evidence to
+  bounded preparation even though its diagnostic dictionary lacks those fields.
+- Seven fresh synthetic frames commit both proofs and preserve the angle
+  interval. A later frame without proof cannot borrow an earlier center;
+  a substituted candidate proof is rejected by the receipt validator.
+- Recorded opposite-side tests run both from the saved fixture receipt and
+  from a receipt published through the production bounded writer. Both variants
+  exercise frame projection, route materialization, arrival and immediate QR
+  admission, including existing tamper and bounded-recovery checks.
+- The latest run's final backside tuple was replayed locally through the writer
+  and validator. It yields center `(-1.1311387845, -0.4650142723)` m, approximately
+  4.35 cm from the immutable survey center, with position uncertainty
+  `0.0250473532` m. The retained angle remains `1.4490216426 ±0.1078974929` rad.
+  The replayed receipt is retained at
+  `results/implementation_checks/run_audit_20260923T124047Z/replayed_bounded_receipt.json`.
+- The 13-file observer/navigation regression suite passed **127 tests and
+  198 subtests** using `/tmp/a04-inspection-audit-venv/bin/python`.
+
+This follow-up is locally implemented and tested. Deployment and a real robot
+run with the repaired handoff have not been performed.

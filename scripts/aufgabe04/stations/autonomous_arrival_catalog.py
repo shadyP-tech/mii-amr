@@ -246,11 +246,19 @@ def promote_autonomous_arrival_catalog(
         current_head_front = recommendation_uses_current_head_front(recommendation)
         if current_head_front and recommendation.axis_measurement["qr_id"] != record["qr_id"]:
             raise ValueError("current-head QR identity differs from the observed facing record")
+        retained = recommendation.schema_version == 4
+        if retained:
+            from scripts.aufgabe04.artifacts.retained_facing import validate_retained_facing
+            retained_qr = validate_retained_facing(recommendation)
+            if (retained_qr["qr_id"] != record["qr_id"]
+                    or retained_qr["robot_profile_sha256"] != real_robot_profile_sha256(profile)
+                    or retained_qr["calibration_profile_sha256"] != calibration_sha):
+                raise ValueError("retained QR identity or profile differs from observed facing record")
         admitted_qr_policy = (
-            current_head_front and side.kind == "qr_observation"
+            (current_head_front or retained) and side.kind == "qr_observation"
             and side.provenance == "real/onboard_camera_qr_observation"
         ) or (
-            not current_head_front and recommendation.axis_sample_count >= 7
+            not current_head_front and not retained and recommendation.axis_sample_count >= 7
             and side.kind == "qr_consensus"
             and side.provenance == "real/onboard_camera_qr_consensus"
         )
@@ -263,9 +271,14 @@ def promote_autonomous_arrival_catalog(
             raise ValueError("original recommendation sensor stamp is stale or in the future")
         if not math.isclose(recommendation.sensor_stamp_sec, recommendation.observation_unix_sec, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("real recommendation observation time must preserve its original sensor stamp")
-        recommendation = _project_recommendation(recommendation, source_frame, target_frame)
+        if retained:
+            from scripts.aufgabe04.artifacts.projected_retained_facing import build_projected_retained
+            recommendation = build_projected_retained(Path(record['recommendation_json']),
+                Path(record['candidate_frame_projection_path']), inputs.target_frame_projection)
+        else:
+            recommendation = _project_recommendation(recommendation, source_frame, target_frame)
         candidate = full_projected.candidate_for(uid)
-        if math.hypot(recommendation.stand.center.x_m - candidate.geometry.x_m, recommendation.stand.center.y_m - candidate.geometry.y_m) > 1e-6:
+        if not retained and math.hypot(recommendation.stand.center.x_m - candidate.geometry.x_m, recommendation.stand.center.y_m - candidate.geometry.y_m) > 1e-6:
             raise ValueError("recommendation common-frame geometry differs from full projected pool")
         converted = arrival_pose_record_from_recommendation(
             recommendation, candidate_uid=uid, map_yaml_sha256=bundle.yaml_sha256, corridor_length_m=config.terminal_corridor_length_m,
@@ -273,12 +286,15 @@ def promote_autonomous_arrival_catalog(
             estimator=recommendation_axis_estimator(recommendation), source="real/autonomous_checked_catalog",
         )
         converted = replace(converted, stand_id=identity.for_candidate(uid).server_station_id)
-        target_config = replace(config, stand_radius_m=candidate.geometry.radius_m, stand_position_uncertainty_m=candidate.geometry.uncertainty_m, standoff_distance_m=converted.standoff_m, minimum_non_target_keepout_radius_m=candidate.geometry.keepout_radius_m)
+        target_config = replace(config, stand_radius_m=converted.stand.radius_m, stand_position_uncertainty_m=converted.stand.uncertainty_m, standoff_distance_m=converted.standoff_m, minimum_non_target_keepout_radius_m=candidate.geometry.keepout_radius_m)
         clearance = record.get("active_stand_clearance", {})
         required_standoff = clearance.get("minimum_active_standoff_m")
         if not isinstance(required_standoff, (float, int)) or not math.isfinite(required_standoff) or required_standoff <= 0 or converted.standoff_m + 1e-9 < required_standoff:
             raise ValueError("catalog target violates original active stand clearance")
         keepouts = tuple((item.geometry.x_m, item.geometry.y_m, replace(target_config, stand_radius_m=item.geometry.radius_m, stand_position_uncertainty_m=item.geometry.uncertainty_m, minimum_non_target_keepout_radius_m=item.geometry.keepout_radius_m).non_target_stand_keepout_radius_m) for item in full_projected.candidates if item.candidate_uid != uid)
+        if retained:
+            from scripts.aufgabe04.stations.retained_catalog_geometry import retained_catalog_keepouts
+            keepouts += retained_catalog_keepouts(converted, candidate, config, clearance)
         overlay = _known_stand_keepout_costmap(base_costmap, keepouts, start=target_frame.current_pose)
         fixed = FaceNormalCandidate(0, converted.face.outward_normal_rad, Pose2D(**asdict(converted.arrival_pose)), Pose2D(**asdict(converted.corridor_entry_pose)))
         result = plan_fixed_approach(overlay.costmap, overlay.egress_anchor or target_frame.current_pose, recommendation.stand.center, fixed, config=target_config)
@@ -288,11 +304,12 @@ def promote_autonomous_arrival_catalog(
         clearances = _validate_known_stand_route_clearance(result.plan, overlay.keepouts)
         checked_records.append(converted)
         checks.append({"candidate_uid": uid, "camera_recommendation_sha256": record["camera_recommendation_sha256"], "candidate_frame_projection_sha256": record["candidate_frame_projection_sha256"], "known_stand_clearances": clearances, "fixed_target_and_corridor_validated": True,
-                       "admission_policy": "current_head_and_bound_qr" if current_head_front else "seven_frame_qr_consensus",
+                       "admission_policy": ("retained_backside_current_qr_facing" if retained else
+                           "current_head_and_bound_qr" if current_head_front else "seven_frame_qr_consensus"),
                        "axis_sample_count": recommendation.axis_sample_count})
 
     survey_config = {"schema_version": 1, "config_kind": "checked_autonomous_arrival_catalog", "arena_bounds": plan.arena_bounds.to_metadata(), "dynamic_approach_config": asdict(config), "inflation_radius_m": inflation, "axis_sample_count": 7, "max_recommendation_age_sec": max_recommendation_age_sec, "motion_authorized": False}
-    if any(check["admission_policy"] == "current_head_and_bound_qr" for check in checks):
+    if any(check["admission_policy"] != "seven_frame_qr_consensus" for check in checks):
         # Mixed receipt policies retain their real counts, rather than claiming
         # that a single current fit supplied seven temporal measurements.
         survey_config.pop("axis_sample_count")

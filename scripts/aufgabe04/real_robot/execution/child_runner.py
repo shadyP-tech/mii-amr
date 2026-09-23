@@ -12,7 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 
+from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
+    RETURN_TO_START_ANGULAR_RADPS,
+    RETURN_TO_START_LINEAR_MPS,
+    return_to_start_speed_policy_arguments,
+)
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    RECOVERABLE_MISSION_LEG_KINDS,
     ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
 )
@@ -151,6 +157,10 @@ def build_child_runner_command(
     )
 
     run_phase = "dry" if dry_run else "execute"
+    travel_kind = mission_leg_evidence_kind if dry_run else mission_leg_kind
+    fast_start_travel = travel_kind == MissionLegKind.RETURN_TO_START
+    if fast_start_travel and getattr(profile, "use_sim_time", False):
+        raise ValueError("fast return-to-Start travel requires a physical profile")
     odom_fields = (
         uncertainty_map_yaml,
         str(localization_branch_proof_id).strip(),
@@ -199,9 +209,9 @@ def build_child_runner_command(
         "--localization-source",
         profile.localization_source,
         "--max-linear-mps",
-        str(profile.max_linear_speed_mps),
+        str(RETURN_TO_START_LINEAR_MPS if fast_start_travel else profile.max_linear_speed_mps),
         "--max-angular-radps",
-        str(profile.max_angular_speed_radps),
+        str(RETURN_TO_START_ANGULAR_RADPS if fast_start_travel else profile.max_angular_speed_radps),
         "--min-obstacle-distance-m",
         str(DEFAULT_LIDAR_STOP_DISTANCE_M),
         "--certified-route-tube-radius-m",
@@ -215,8 +225,10 @@ def build_child_runner_command(
         "--preflight-json",
         str(session_root / "preflight" / preflight_name),
         "--operator-note",
-        "UNLOADED autonomous stand exploration",
+        "UNLOADED return to admitted Start pose" if fast_start_travel else "UNLOADED autonomous stand exploration",
     ]
+    if fast_start_travel:
+        command.extend(return_to_start_speed_policy_arguments())
     if odom_execution_requested:
         if any(value is None or value == "" for value in odom_fields):
             raise ValueError(
@@ -398,7 +410,7 @@ def build_child_runner_command(
             runtime_kind = MissionLegKind(
                 runtime_localization_mission_leg_kind
             )
-            if runtime_kind not in ROUTINE_MISSION_LEG_KINDS:
+            if runtime_kind not in RECOVERABLE_MISSION_LEG_KINDS:
                 raise ValueError(
                     "runtime localization permit requires a routine leg kind"
                 )
@@ -593,7 +605,7 @@ def build_child_runner_command(
             )
         if generic_identity_requested:
             startup_kind = MissionLegKind(startup_reseal_mission_leg_kind)
-            if startup_kind not in ROUTINE_MISSION_LEG_KINDS:
+            if startup_kind not in RECOVERABLE_MISSION_LEG_KINDS:
                 raise ValueError(
                     "startup-reseal permit requires a routine leg kind"
                 )

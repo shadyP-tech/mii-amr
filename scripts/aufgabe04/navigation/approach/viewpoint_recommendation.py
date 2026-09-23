@@ -26,6 +26,8 @@ from scripts.aufgabe04.artifacts.current_head_front_observation import (
 RECOMMENDATION_SCHEMA_VERSION = 1
 BOUNDED_RECOMMENDATION_SCHEMA_VERSION = 2
 CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION = 3
+RETAINED_FACING_RECOMMENDATION_SCHEMA_VERSION = 4
+PROJECTED_RETAINED_FACING_SCHEMA_VERSION = 5
 REAL_VIEWPOINT_SOURCE = "synchronized_lidar_camera_viewpoint"
 
 _FACE_GEOMETRY_TOLERANCE_RAD = 1.0e-6
@@ -116,7 +118,8 @@ def validate_recommendation(
 
     if type(recommendation.schema_version) is not int or recommendation.schema_version not in (
         RECOMMENDATION_SCHEMA_VERSION, BOUNDED_RECOMMENDATION_SCHEMA_VERSION,
-        CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION,
+        CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION, RETAINED_FACING_RECOMMENDATION_SCHEMA_VERSION,
+        PROJECTED_RETAINED_FACING_SCHEMA_VERSION,
     ):
         raise ValueError(
             "unsupported viewpoint recommendation schema_version: "
@@ -126,6 +129,12 @@ def validate_recommendation(
         raise ValueError("schema-1 viewpoint recommendation cannot contain bounded orientation")
     if recommendation.schema_version == BOUNDED_RECOMMENDATION_SCHEMA_VERSION and recommendation.bounded_orientation is None:
         raise ValueError("schema-2 viewpoint recommendation requires bounded orientation")
+    retained = recommendation.schema_version in (RETAINED_FACING_RECOMMENDATION_SCHEMA_VERSION, PROJECTED_RETAINED_FACING_SCHEMA_VERSION)
+    projected_retained = recommendation.schema_version == PROJECTED_RETAINED_FACING_SCHEMA_VERSION
+    if not projected_retained and isinstance(recommendation.axis_measurement, Mapping) and recommendation.axis_measurement.get("policy") == "projected_retained_backside_current_qr_facing":
+        raise ValueError("retained projection requires schema 5")
+    if not retained and isinstance(recommendation.axis_measurement, Mapping) and recommendation.axis_measurement.get("policy") == "retained_backside_current_qr_facing":
+        raise ValueError("retained facing evidence requires schema 4")
     immediate = recommendation.schema_version == CURRENT_HEAD_FRONT_RECOMMENDATION_SCHEMA_VERSION
     if immediate and recommendation.bounded_orientation is not None:
         raise ValueError("schema-3 current head front cannot contain bounded orientation")
@@ -233,6 +242,12 @@ def validate_recommendation(
     matching_face = next(face for face in faces if face.face_id == target.face_id)
     if not _poses_close(target.pose, matching_face.pose):
         raise ValueError("material_target.pose must match its referenced face candidate")
+    if projected_retained:
+        from scripts.aufgabe04.artifacts.projected_retained_facing import validate_projected_retained
+        validate_projected_retained(recommendation)
+    elif retained:
+        from scripts.aufgabe04.artifacts.retained_facing import validate_retained_facing
+        validate_retained_facing(recommendation)
     if recommendation.side_evidence.hard and recommendation.side_evidence.valid:
         if recommendation.side_evidence.face_id != target.face_id:
             raise ValueError(
@@ -259,8 +274,8 @@ def validate_recommendation(
         if (recommendation.simulation_only or recommendation.source != REAL_VIEWPOINT_SOURCE
                 or recommendation.axis_state != "target_committed"
                 or not recommendation.side_evidence.hard or not recommendation.side_evidence.valid
-                or recommendation.side_evidence.kind != "qr_consensus"
-                or recommendation.side_evidence.provenance != "real/onboard_camera_qr_consensus"
+                or recommendation.side_evidence.kind != ("qr_observation" if retained else "qr_consensus")
+                or recommendation.side_evidence.provenance != ("real/onboard_camera_qr_observation" if retained else "real/onboard_camera_qr_consensus")
                 or not matching_face.identity_resolved):
             raise ValueError("bounded orientation requires committed real onboard QR face evidence")
         validate_bounded_endpoint(
@@ -399,6 +414,8 @@ def recommendation_axis_estimator(
     one-frame policy is checked independently by validate_recommendation.
     """
 
+    if recommendation.schema_version == PROJECTED_RETAINED_FACING_SCHEMA_VERSION:
+        return "real/projected_retained_backside_current_qr_facing"
     environment = "simulation" if recommendation.simulation_only else "real"
     measurement = recommendation.axis_measurement
     if isinstance(measurement, Mapping):

@@ -230,6 +230,97 @@ def evaluate_route_uncertainty_admission(
     )
 
 
+def evaluate_stationary_turn_uncertainty_admission(
+    costmap: Costmap,
+    map_route: Sequence[Pose2D],
+    covariance: PlanarCovariance,
+    config: RouteUncertaintyAdmissionConfig,
+    *,
+    start_pose: Pose2D,
+    target_evidence_sha256: str,
+) -> RouteUncertaintyAdmissionResult:
+    """Admit a certified point turn using the worst planar covariance axis.
+
+    Only the admitted-Start route calls this explicit entry point, after its
+    source pose and requested yaw were bound to the stored target.  The usual
+    polyline admission still rejects zero-length segments.  A circular robot
+    turning at a fixed point occupies the same disk at every yaw; every normal
+    direction therefore uses the largest covariance eigenvalue, with all
+    ordinary tracking, drift, heading and braking reserves retained.
+    """
+    from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
+        point_clearance_to_blocked_m,
+    )
+
+    errors: list[str] = []
+    poses = _route_poses_or_empty(map_route, errors)
+    valid_costmap = isinstance(costmap, Costmap)
+    if valid_costmap:
+        errors.extend(_validate_costmap_geometry(costmap))
+    else:
+        errors.append("costmap_missing_or_ambiguous")
+    if not isinstance(config, RouteUncertaintyAdmissionConfig):
+        errors.append("admission_config_missing_or_ambiguous")
+    if not isinstance(covariance, PlanarCovariance):
+        errors.append("planar_covariance_missing_or_ambiguous")
+    valid_start = isinstance(start_pose, Pose2D) and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        for v in (start_pose.x_m, start_pose.y_m, start_pose.yaw_rad)
+    )
+    if not valid_start:
+        errors.append("stationary_turn_start_pose_invalid")
+    if (
+        not isinstance(target_evidence_sha256, str)
+        or len(target_evidence_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in target_evidence_sha256)
+    ):
+        errors.append("stationary_turn_target_identity_invalid")
+    if len(poses) != 2 or not valid_start or any(
+        (p.x_m, p.y_m) != (start_pose.x_m, start_pose.y_m) for p in poses
+    ):
+        errors.append("stationary_turn_requires_two_identical_positions")
+    elif not _is_finite_number(poses[-1].yaw_rad) or abs(math.atan2(
+        math.sin(float(poses[-1].yaw_rad) - start_pose.yaw_rad),
+        math.cos(float(poses[-1].yaw_rad) - start_pose.yaw_rad),
+    )) <= 1e-9:
+        errors.append("stationary_turn_requires_nontrivial_finite_heading")
+
+    clearance = None
+    segments: tuple[RouteClearanceSegment, ...] = ()
+    if not errors:
+        clearance = point_clearance_to_blocked_m(costmap, start_pose)
+        if not _is_finite_number(clearance) or clearance < 0.:
+            errors.append("stationary_turn_clearance_invalid")
+        else:
+            segments = (_budget_segment(
+                segment_id="stationary_turn:0000", raw_clearance_m=clearance,
+                normal_x=1., normal_y=0., is_corner=True,
+                covariance=covariance, config=config,
+                heading_contribution_m=_heading_contribution_for_points(
+                    (start_pose,), config,
+                ),
+            ),)
+    decision = evaluate_route_uncertainty_budget(segments)
+    evidence = _admission_evidence(
+        costmap=costmap if valid_costmap else None, poses=poses,
+        covariance=covariance if isinstance(covariance, PlanarCovariance) else None,
+        config=config if isinstance(config, RouteUncertaintyAdmissionConfig) else None,
+        sampling_profile=None, sampled_segments=(), segments=segments,
+        decision=decision, validation_errors=errors,
+    )
+    evidence["sampling"] = {
+        "method": "stationary_circular_footprint_largest_covariance_eigenvalue",
+        "source_pose_count": len(poses), "sample_count": int(clearance is not None),
+        "clearance_lower_bound_m": clearance,
+        "start_pose": _route_pose_evidence(start_pose) if valid_start else None,
+        "target_evidence_sha256": target_evidence_sha256,
+        "translation_permitted": False,
+    }
+    for segment in evidence["budget_profile"]:
+        segment["isotropic_covariance"] = True
+    return RouteUncertaintyAdmissionResult(segments, decision, evidence)
+
+
 def route_uncertainty_admission_evidence_sha256(
     value: RouteUncertaintyAdmissionResult | Mapping[str, object],
 ) -> str:
@@ -612,5 +703,6 @@ __all__ = [
     "RouteUncertaintyAdmissionConfig",
     "RouteUncertaintyAdmissionResult",
     "evaluate_route_uncertainty_admission",
+    "evaluate_stationary_turn_uncertainty_admission",
     "route_uncertainty_admission_evidence_sha256",
 ]

@@ -6,8 +6,11 @@ from pathlib import Path
 
 from scripts.aufgabe04.artifacts.content_store import payload_sha256
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
+    RECOVERABLE_MISSION_LEG_KINDS,
     ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
     MissionLegMotionAuthorization,
@@ -221,6 +224,24 @@ class MissionLegMotionPermitTest(unittest.TestCase):
                 required_leg_kind="startup_reseal",
             )
 
+    def test_legacy_scope_hashes_remain_readable_without_return_authority(self):
+        for index, scope in enumerate((
+            LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        )):
+            with self.subTest(scope=scope):
+                legacy = replace(
+                    self.authorization,
+                    allowed_leg_kinds=RECOVERABLE_MISSION_LEG_KINDS,
+                    scope_text=scope,
+                )
+                path = self.root / f"legacy-master-{index}.json"
+                digest = write_mission_leg_motion_authorization(path, legacy)
+                self.assertEqual(digest, payload_sha256(legacy.to_payload()))
+                self.assertEqual(load_mission_leg_motion_authorization(path), legacy)
+                with self.assertRaisesRegex(ValueError, "explicit return-to-Start scope"):
+                    replace(legacy, allowed_leg_kinds=ROUTINE_MISSION_LEG_KINDS)
+
     def test_master_validation_rejects_each_live_identity_mismatch(self):
         good = {
             "session_id": self.authorization.session_id,
@@ -258,6 +279,7 @@ class MissionLegMotionPermitTest(unittest.TestCase):
             (MissionLegKind.COVERAGE, "viewpoint-001"),
             (MissionLegKind.CANDIDATE_PREAPPROACH, "candidate-001"),
             (MissionLegKind.OPPOSITE_FACE, "candidate-001"),
+            (MissionLegKind.RETURN_TO_START, "candidate-start"),
         )
         for index, (kind, target_id) in enumerate(cases):
             with self.subTest(kind=kind):
@@ -354,6 +376,22 @@ class MissionLegMotionPermitTest(unittest.TestCase):
             self.permit_path, **self._execution_kwargs()
         )
         self.assertEqual(validated.to_payload(), self.permit.to_payload())
+
+    def test_return_to_start_execution_binds_the_exact_admitted_target(self):
+        self.permit = replace(
+            self.permit,
+            mission_leg_kind=MissionLegKind.RETURN_TO_START,
+            target_id="candidate-start",
+        )
+        self._write_permit()
+        kwargs = self._execution_kwargs()
+        self.assertEqual(
+            validate_mission_leg_motion_permit_for_execution(self.permit_path, **kwargs),
+            self.permit,
+        )
+        kwargs["target_id"] = "another-candidate"
+        with self.assertRaisesRegex(ValueError, "target_id mismatch"):
+            validate_mission_leg_motion_permit_for_execution(self.permit_path, **kwargs)
 
     def test_execution_validator_rejects_every_live_identity_mismatch(self):
         self._write_permit()

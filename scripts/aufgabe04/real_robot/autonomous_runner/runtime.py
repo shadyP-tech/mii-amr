@@ -62,6 +62,9 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     write_mission_leg_motion_permit,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
+    RETURN_TO_START_LINEAR_MPS, RETURN_TO_START_ANGULAR_RADPS,
+)
 from scripts.aufgabe04.navigation.localization.preflight_session import (
     mission_preflight_session,
 )
@@ -258,6 +261,9 @@ from scripts.aufgabe04.real_robot.mission.modes import (
 )
 from scripts.aufgabe04.real_robot.mission.reporting import (
     build_completed_camera_mission_summary as _completed_camera_mission_summary,
+)
+from scripts.aufgabe04.real_robot.mission.start_return import (
+    StartReturnEffects, execute_start_return,
 )
 from scripts.aufgabe04.real_robot.readiness.post_observation import (
     PostObservationLocalizationConfig,
@@ -1763,7 +1769,8 @@ def _run_candidate_motion_leg(
         uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
         localization_branch_proof_id=request.localization_branch_proof_id,
         sensor_timing_readiness_phase=(
-            CANDIDATE_ROUTE_SENSOR_TIMING_PHASE
+            None if request.mission_leg_kind is MissionLegKind.RETURN_TO_START
+            else CANDIDATE_ROUTE_SENSOR_TIMING_PHASE
         ),
         mission_leg_permit_context=MissionLegPermitContext(
             mission_authorization_json=request.mission_authorization_json,
@@ -2426,12 +2433,23 @@ def _run_mission(parser, args) -> int:
             if coverage_scoped_mode
             else ROUTINE_MISSION_LEG_KINDS
         )
+        if args.stop_after_camera_candidates is not None:
+            authorized_leg_kinds = tuple(
+                kind for kind in authorized_leg_kinds if kind is not MissionLegKind.RETURN_TO_START
+            )
         authorized_leg_description = (
             "coverage child legs"
             if coverage_scoped_mode
-            else ("coverage, candidate, and opposite-face child legs, plus "
+            else ("coverage, candidate and opposite-face child legs, plus "
                   "bounded stopped inspection recenter turns (at most two 6-degree turns per view)")
         )
+        if MissionLegKind.RETURN_TO_START in authorized_leg_kinds:
+            authorized_leg_description += ", followed by one return to the admitted Start pose"
+            print(
+                "After stored camera completion, return to the admitted Start pose: "
+                f"unloaded travel up to {RETURN_TO_START_LINEAR_MPS:g} m/s and "
+                f"{RETURN_TO_START_ANGULAR_RADPS:g} rad/s, with slower corner and arrival control."
+            )
         print(
             "Preauthorization readiness passed without motion: the exact "
             "first route cleared its AMCL uncertainty budget and the LiDAR "
@@ -2531,7 +2549,10 @@ def _run_mission(parser, args) -> int:
             allowed_recovery_kind=(
                 RUNTIME_LOCALIZATION_RESEAL_RECOVERY_KIND
             ),
-            allowed_mission_leg_kinds=authorized_leg_kinds,
+            allowed_mission_leg_kinds=tuple(
+                kind for kind in authorized_leg_kinds
+                if kind is not MissionLegKind.RETURN_TO_START
+            ),
         )
         mission_motion_authorization_hash = (
             write_mission_motion_authorization(
@@ -2560,7 +2581,10 @@ def _run_mission(parser, args) -> int:
                 scope_text=STARTUP_RESEAL_MOTION_AUTHORIZATION_SCOPE,
                 operator_confirmation=STARTUP_RESEAL_RUN_CONFIRMATION,
                 allowed_recovery_kind=STARTUP_RESEAL_RECOVERY_KIND,
-                allowed_mission_leg_kinds=authorized_leg_kinds,
+                allowed_mission_leg_kinds=tuple(
+                    kind for kind in authorized_leg_kinds
+                    if kind is not MissionLegKind.RETURN_TO_START
+                ),
             )
         )
         startup_reseal_motion_authorization_hash = (
@@ -2918,73 +2942,75 @@ def _run_mission(parser, args) -> int:
             raise RuntimeError(
                 "candidate phase requires startup-reseal authorization evidence"
             )
-        candidate_phase = execute_candidate_approach_phase(
-            CandidateApproachConfig(
-                session_root=session_root,
-                survey_root=survey_root,
-                session_id=args.session_id,
-                semantic_map_id=args.semantic_map_id,
-                planning_frame=profile.map_frame,
-                map_yaml=args.map,
-                plan=plan,
-                snapshot=snapshot,
-                snapshot_path=snapshot_path,
-                expected_stand_count=args.expected_stand_count,
-                server_qr_mapping_evidence_path=args.server_qr_mapping_evidence,
-                server_robot_id=args.server_robot_id,
-                stop_after_camera_candidates=args.stop_after_camera_candidates,
-                calibration_profile_sha256=profile.calibration_profile_sha256,
-                robot_profile_sha256=real_robot_profile_sha256(profile),
-                approach_offset_m=args.candidate_approach_offset_m,
-                inflation_radius_m=inflation_radius_m,
-                candidate_transit_radius_m=candidate_keepout_radius_m,
-                physical_clearance=clearance,
-                uncertainty_sigma_multiplier=(
-                    args.uncertainty_sigma_multiplier
-                ),
-                localization_branch_proof_id=(
-                    args.localization_branch_proof_id
-                ),
-                mission_leg_motion_authorization_json=(
-                    mission_leg_motion_authorization_json
-                ),
-                startup_reseal_motion_authorization_json=(
-                    startup_reseal_motion_authorization_json
-                ),
-                max_startup_reseals_per_leg=(
-                    args.max_startup_reseals_per_leg
-                ),
-                mission_motion_authorization_json=(
-                    mission_motion_authorization_json
-                ),
-                max_runtime_localization_reseals_per_leg=(
-                    args.max_runtime_localization_reseals_per_leg
-                ),
-                exact_two_camera_handoff_path=(
-                    exact_two_camera_handoff_path
-                ),
-                exact_two_camera_handoff_sha256=(
-                    exact_two_camera_handoff_sha256
-                ),
-                camera_selection_linear_speed_mps=(
-                    profile.max_linear_speed_mps
-                ),
-                camera_selection_angular_speed_radps=(
-                    profile.max_angular_speed_radps
-                ),
-                max_camera_observation_attempts_per_candidate=(
-                    args.max_camera_observation_attempts_per_candidate
-                ),
-                max_candidate_inspection_views=(
-                    args.max_candidate_inspection_views
-                ),
-                camera_timeout_sec=args.camera_timeout_sec,
-                max_route_admission_attempts_per_candidate=(
-                    args.max_route_admission_attempts_per_candidate
-                ),
-                robot_radius_m=profile.robot_radius_m,
-                require_uncertainty_aware_selection=True,
+        candidate_config = CandidateApproachConfig(
+            session_root=session_root,
+            survey_root=survey_root,
+            session_id=args.session_id,
+            semantic_map_id=args.semantic_map_id,
+            planning_frame=profile.map_frame,
+            map_yaml=args.map,
+            plan=plan,
+            snapshot=snapshot,
+            snapshot_path=snapshot_path,
+            expected_stand_count=args.expected_stand_count,
+            server_qr_mapping_evidence_path=args.server_qr_mapping_evidence,
+            server_robot_id=args.server_robot_id,
+            stop_after_camera_candidates=args.stop_after_camera_candidates,
+            calibration_profile_sha256=profile.calibration_profile_sha256,
+            robot_profile_sha256=real_robot_profile_sha256(profile),
+            approach_offset_m=args.candidate_approach_offset_m,
+            final_facing_offset_m=args.final_facing_offset_m,
+            inflation_radius_m=inflation_radius_m,
+            candidate_transit_radius_m=candidate_keepout_radius_m,
+            physical_clearance=clearance,
+            uncertainty_sigma_multiplier=(
+                args.uncertainty_sigma_multiplier
             ),
+            localization_branch_proof_id=(
+                args.localization_branch_proof_id
+            ),
+            mission_leg_motion_authorization_json=(
+                mission_leg_motion_authorization_json
+            ),
+            startup_reseal_motion_authorization_json=(
+                startup_reseal_motion_authorization_json
+            ),
+            max_startup_reseals_per_leg=(
+                args.max_startup_reseals_per_leg
+            ),
+            mission_motion_authorization_json=(
+                mission_motion_authorization_json
+            ),
+            max_runtime_localization_reseals_per_leg=(
+                args.max_runtime_localization_reseals_per_leg
+            ),
+            exact_two_camera_handoff_path=(
+                exact_two_camera_handoff_path
+            ),
+            exact_two_camera_handoff_sha256=(
+                exact_two_camera_handoff_sha256
+            ),
+            camera_selection_linear_speed_mps=(
+                profile.max_linear_speed_mps
+            ),
+            camera_selection_angular_speed_radps=(
+                profile.max_angular_speed_radps
+            ),
+            max_camera_observation_attempts_per_candidate=(
+                args.max_camera_observation_attempts_per_candidate
+            ),
+            max_candidate_inspection_views=(
+                args.max_candidate_inspection_views
+            ),
+            camera_timeout_sec=args.camera_timeout_sec,
+            max_route_admission_attempts_per_candidate=(
+                args.max_route_admission_attempts_per_candidate
+            ),
+            robot_radius_m=profile.robot_radius_m,
+            require_uncertainty_aware_selection=True,
+        )
+        candidate_phase = execute_candidate_approach_phase(
+            candidate_config,
             CandidateApproachEffects(
                 read_current_pose=lambda: read_current_pose2d_from_amcl(
                     namespace=profile.namespace,
@@ -3112,6 +3138,27 @@ def _run_mission(parser, args) -> int:
                 exact_two_camera_handoff_sha256
             ),
         )
+        # Persist camera completion before starting the separate return leg.
+        # A failed return retains the discovery artifacts without claiming
+        # that the robot is ready to contact the task server.
+        result.update({
+            "status": "returning_to_start", "return_to_start_status": "pending",
+            "start_pose_reached": False, "fastapi_request_ready": False,
+            "fastapi_request_sent": False,
+        })
+        _write_json(session_root / "mission_summary.json", result)
+        try:
+            result.update(execute_start_return(candidate_phase, candidate_config, StartReturnEffects(
+                admit_planning_frame=lambda evidence_path: _admit_candidate_planning_frame(
+                    runtime, session_root, evidence_path=evidence_path,
+                ),
+                run_motion_leg=lambda request: _run_candidate_motion_leg(profile=profile, request=request),
+            )))
+        except (AssertionError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+            result.update({"status": "failed_closed", "return_to_start_status": "failed_closed"})
+            _write_json(session_root / "mission_summary.json", result)
+            raise
+        result["status"] = "complete"
         _write_json(session_root / "mission_summary.json", result)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

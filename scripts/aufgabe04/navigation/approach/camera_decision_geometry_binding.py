@@ -296,6 +296,13 @@ def require_camera_recommendation_binding(
             f"got {recommendation.stand_id!r}"
         )
     expected = candidate.geometry
+    if recommendation.schema_version == 4:
+        from scripts.aufgabe04.artifacts.retained_facing import validate_retained_facing
+        qr = validate_retained_facing(recommendation)
+        if (qr['stand_center'] != dict(x_m=expected.x_m, y_m=expected.y_m)
+                or recommendation.stand.radius_m != expected.radius_m):
+            raise ValueError("retained facing differs from immutable candidate anchor")
+        return
     observed = recommendation.stand
     geometry_pairs = (
         (observed.center.x_m, expected.x_m),

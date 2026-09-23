@@ -84,6 +84,13 @@ def _dry_certificate(*, reference=None, budget_hash="b" * 64):
 
 
 class RuntimeMotionAuthorizationTest(unittest.TestCase):
+    def test_return_to_start_does_not_inherit_runtime_recovery_authority(self):
+        with self.assertRaisesRegex(ValueError, "routine mission leg kind"):
+            replace(
+                self.authorization,
+                allowed_mission_leg_kinds=(MissionLegKind.RETURN_TO_START,),
+            )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

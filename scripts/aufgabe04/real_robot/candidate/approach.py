@@ -233,6 +233,7 @@ class CandidateApproachConfig:
     require_uncertainty_aware_selection: bool = False
     camera_arrival_max_bearing_error_rad: float = math.radians(3.0)
     camera_arrival_range_slack_m: float = 0.20
+    final_facing_offset_m: float = 0.35
     camera_timeout_sec: float = 90.0
     max_candidate_inspection_views: int = 8
     expected_stand_count: int | None = None
@@ -702,6 +703,11 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             f"got {recommendation.stand_id!r}"
         )
     target = recommendation.material_target.pose
+    retained_facing = getattr(recommendation, "schema_version", 1) == 4
+    view_center = (recommendation.stand.center if retained_facing else
+                   Pose2D(candidate.geometry.x_m, candidate.geometry.y_m))
+    view_uncertainty = (recommendation.stand.uncertainty_m if retained_facing else
+                        candidate.geometry.uncertainty_m)
     bounded_view = None
     if recommendation.bounded_orientation is not None:
         selected_face = next(face for face in recommendation.face_candidates
@@ -709,8 +715,8 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         bounded_view = validate_bounded_endpoint(
             recommendation.bounded_orientation,
             selected_normal_rad=selected_face.outward_normal_rad,
-            stand_x_m=candidate.geometry.x_m, stand_y_m=candidate.geometry.y_m,
-            stand_uncertainty_m=candidate.geometry.uncertainty_m,
+            stand_x_m=view_center.x_m, stand_y_m=view_center.y_m,
+            stand_uncertainty_m=view_uncertainty,
             target_x_m=target.x_m, target_y_m=target.y_m,
             expected_sample_count=recommendation.axis_sample_count,
         )
@@ -765,7 +771,15 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         for item in config.snapshot.candidates
         if item.candidate_uid != candidate.candidate_uid
     )
-    costmap = costmap.with_station_keepouts((active_keepout, *other_keepouts))
+    refined_keepouts = ()
+    if retained_facing:
+        center = recommendation.stand.center
+        refined_keepouts = (Station(candidate.candidate_uid + "_observed",
+            StationPose(center.x_m, center.y_m, 0.), 0.,
+            minimum_collision_standoff_m + max(0., recommendation.stand.uncertainty_m-candidate.geometry.uncertainty_m)),)
+        if math.hypot(target.x_m-center.x_m, target.y_m-center.y_m) < minimum_active_standoff_m:
+            raise ValueError("retained facing violates measured-center standoff")
+    costmap = costmap.with_station_keepouts((active_keepout, *refined_keepouts, *other_keepouts))
     route = plan_route(
         costmap,
         request.current_pose,
@@ -786,6 +800,11 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         goal=target,
         center=stand_center,
     )
+    if refined_keepouts:
+        measured_clearance = _continuous_route_clearance_m(route.route,
+            start=request.current_pose, goal=target, center=recommendation.stand.center)
+        if measured_clearance + 1e-9 < refined_keepouts[0].keepout_radius_m:
+            raise ValueError("retained facing route crosses measured-center envelope")
     if route_centerline_standoff_m + 1.0e-9 < minimum_collision_standoff_m:
         raise ValueError(
             "computed QR-facing route crosses the active-stand collision "
@@ -806,6 +825,14 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
         "active_stand_in_planning_costmap": True,
         "continuous_centerline_validated": True,
     }
+    if refined_keepouts:
+        clearance_evidence["measured_center_clearance"] = {
+            "stand_center": {"x_m": view_center.x_m, "y_m": view_center.y_m},
+            "uncertainty_m": view_uncertainty,
+            "minimum_collision_standoff_m": refined_keepouts[0].keepout_radius_m,
+            "route_centerline_minimum_standoff_m": measured_clearance,
+            "original_candidate_keepout_preserved": True,
+        }
     request.output_dir.mkdir(parents=True, exist_ok=True)
     route_path = request.output_dir / "facing_pose_validation_route.csv"
     diagnostics_path = (
@@ -2459,10 +2486,22 @@ def execute_candidate_approach_phase(
                 source_config=config, source_registry=source_registry,
                 source_registry_sha256=source_registry_sha256,
             )
-            unique_identity = goal.record_observed_identity(
-                candidate.candidate_uid, observation.qr_id,
-                observation_pose_path=observation.qr_observation_pose_path,
-            )
+            from scripts.aufgabe04.real_robot.candidate.retained_facing import try_retained_facing
+            retained = try_retained_facing(
+                observation=observation, discovery=discovery, frame=observation_frame,
+                effects=effects, output_dir=candidate_root)
+            if retained is not None:
+                observation, facing = retained
+                qr_only = False
+                if observation_frame.decision_binding is not None:
+                    facing.update(observation_frame.decision_binding.to_receipt_fields())
+                unique_identity = goal.record_validated_identity(candidate.candidate_uid, observation.qr_id,
+                    recommendation_path=observation.recommendation_path)
+            else:
+                unique_identity = goal.record_observed_identity(
+                    candidate.candidate_uid, observation.qr_id,
+                    observation_pose_path=observation.qr_observation_pose_path,
+                )
         else:
             stopped_pose = _read_finite_pose2d(
                 effects,

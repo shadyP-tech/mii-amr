@@ -168,6 +168,10 @@ from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import
     validate_transient_overlay_resume_state_diagnostics_binding,
 )
 from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
+from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
+    return_to_start_speed_policy_evidence,
+    validate_return_to_start_speed_evidence,
+)
 from scripts.aufgabe04.navigation.planning.waypoint_csv import (
     SelectedRouteLeg,
     load_route_leg,
@@ -678,7 +682,7 @@ def _validated_mission_leg_motion_permit(
         raise ValueError("mission-leg motion permit requires mission_session_id")
     assert args.mission_leg_kind is not None
     assert args.mission_leg_index is not None
-    return validate_mission_leg_motion_permit_for_execution(
+    permit = validate_mission_leg_motion_permit_for_execution(
         args.mission_leg_motion_permit_json,
         master_authorization_path=(
             args.mission_leg_motion_authorization_json
@@ -704,6 +708,8 @@ def _validated_mission_leg_motion_permit(
             args.mission_leg_dry_uncertainty_budget_json
         ),
     )
+    validate_return_to_start_speed_evidence(args, permit)
+    return permit
 
 
 
@@ -798,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose_console:
         print("Resolved runtime config:")
         print(json.dumps(resolved_log, indent=2, sort_keys=True))
-    if args.allow_noop and leg.route_length_m <= 0.0:
+    if args.allow_noop and leg.route_length_m <= 0.0 and not leg.stationary_turn:
         result = FollowerResult("noop", "zero-length leg", 0.0, 0.0, False)
         _append_result(args, resolved, leg, preflight_ok=False, result=result)
         emit_event(
@@ -907,7 +913,11 @@ def main(argv: list[str] | None = None) -> int:
             preflight_json_path=str(args.preflight_json or ""),
         )
         parser.exit(2, f"error: ROS preflight failed to run: {exc}\n")
-    preflight_text = json.dumps(preflight.to_json_dict(), indent=2, sort_keys=True)
+    preflight_payload = preflight.to_json_dict()
+    travel_speed_policy = return_to_start_speed_policy_evidence(args)
+    if travel_speed_policy:
+        preflight_payload["travel_speed_policy"] = travel_speed_policy
+    preflight_text = json.dumps(preflight_payload, indent=2, sort_keys=True)
     if args.preflight_json is not None:
         args.preflight_json.parent.mkdir(parents=True, exist_ok=True)
         args.preflight_json.write_text(preflight_text + "\n")
@@ -962,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         mission_leg_fields.get("mission_leg_kind") in {
             MissionLegKind.CANDIDATE_PREAPPROACH.value,
             MissionLegKind.OPPOSITE_FACE.value,
+            MissionLegKind.RETURN_TO_START.value,
         }
     )
     startup_rejection = None if candidate_odom_admission else _static_start_preflight_rejection(

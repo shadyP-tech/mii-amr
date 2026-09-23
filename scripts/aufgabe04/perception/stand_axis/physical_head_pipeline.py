@@ -142,7 +142,20 @@ def fit_physical_head_in_frame(
                 (math.dist((corners[0].u_px, corners[0].v_px), (corners[3].u_px, corners[3].v_px))
                  + math.dist((corners[1].u_px, corners[1].v_px), (corners[2].u_px, corners[2].v_px))) / 2.)
     refinement_out = {}
-    if all(value is not None for value in acquisition_expected):
+    acquisition = None
+    rim_budget = {"used": 0}
+    if color_support_mask is not None and candidate_search is not None:
+        from scripts.aufgabe04.perception.stand_axis.material_rim_acquisition import acquire_material_rim
+        acquisition = acquire_material_rim(cv2, frame, raw_edges=raw_edges,
+            candidate_search=candidate_search, model_profile=model_profile,
+            proposal_filter=proposal_filter, refinement_out=refinement_out, budget_out=rim_budget,
+            deadline_monotonic_sec=deadline_monotonic_sec)
+        if acquisition is not None:
+            diagnostics['source'] = 'current_material_rim_search'
+    from scripts.aufgabe04.perception.stand_axis.head_cold_acquisition import MAX_RAW_VERIFICATIONS
+    remaining_verifications = max(0, MAX_RAW_VERIFICATIONS - rim_budget["used"])
+    diagnostics["material_rim_verifications"] = rim_budget["used"]
+    if acquisition is None and all(value is not None for value in acquisition_expected):
         diagnostics["source"] = ("candidate_projection" if all(value is not None for value in expected)
                                  else "tracked_head_reacquisition")
         acquisition = acquire_cold_head_proposal(
@@ -156,8 +169,9 @@ def fit_physical_head_in_frame(
             expected_head_center_v_px=acquisition_expected[1],
             expected_head_height_px=acquisition_expected[2],
             expected_head_height_tolerance_ratio=.30, max_center_offset_ratio=1.5,
+            _verification_limit=remaining_verifications,
             deadline_monotonic_sec=deadline_monotonic_sec)
-    else:
+    elif acquisition is None:
         diagnostics["source"] = "cold_current_head_search"
         acquisition = acquire_cold_head_proposal(cv2, frame, raw_edges=raw_edges,
                                                model_profile=model_profile,
@@ -165,6 +179,7 @@ def fit_physical_head_in_frame(
                                                candidate_search=candidate_search,
                                                color_support_mask=color_support_mask,
                                                proposal_filter=proposal_filter,
+                                               _verification_limit=remaining_verifications,
                                                deadline_monotonic_sec=deadline_monotonic_sec)
     diagnostics["acquisition"] = asdict(acquisition)
     timing.mark("independent_head_acquisition")

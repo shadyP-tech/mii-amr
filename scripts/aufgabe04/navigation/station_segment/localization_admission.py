@@ -50,6 +50,7 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import (
     RouteUncertaintyAdmissionConfig,
     RouteUncertaintyAdmissionResult,
     evaluate_route_uncertainty_admission,
+    evaluate_stationary_turn_uncertainty_admission,
     route_uncertainty_admission_evidence_sha256,
 )
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
@@ -518,12 +519,20 @@ def _build_odom_execution_admission(
     route_yaw_lever_arm_m = max(
         route_yaw_lever_arm_m, admission_config.heading_lever_arm_m,
     )
-    admission = evaluate_route_uncertainty_admission(
-        base_costmap,
-        map_route,
-        covariance,
-        admission_config,
-    )
+    if (
+        getattr(leg, "route_kind", "") == "admitted_candidate_pose"
+        and getattr(leg, "stationary_turn", False) is True
+        and diagnostics_snapshot.metadata.get("stationary_turn") is True
+    ):
+        admission = evaluate_stationary_turn_uncertainty_admission(
+            base_costmap, map_route, covariance, admission_config,
+            start_pose=Pose2D(**diagnostics_snapshot.metadata["exact_start_connector"]["exact_start"]),
+            target_evidence_sha256=diagnostics_snapshot.metadata["target_evidence_sha256"],
+        )
+    else:
+        admission = evaluate_route_uncertainty_admission(
+            base_costmap, map_route, covariance, admission_config,
+        )
     map_certificate, map_certificate_sha256 = (
         _resolved_map_execution_certificate(args, diagnostics_snapshot)
     )

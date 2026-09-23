@@ -10,6 +10,19 @@ from scripts.aufgabe04.real_robot.mission.modes import (
 
 
 class AutonomousRunModeTests(unittest.TestCase):
+    def test_camera_modes_authorize_return_only_after_admitted_candidates_are_stored(self):
+        for mode in ("execute-full", "execute-exact-two-camera"):
+            with self.subTest(mode=mode):
+                scope = resolve_autonomous_run_mode(run_mode=mode).authorization_scope_text
+                self.assertIn("admitted candidates", scope)
+                self.assertIn("return to the admitted pose", scope)
+                self.assertIn("Start QR identity", scope)
+        checkpoint = resolve_autonomous_run_mode(
+            run_mode="execute-coverage-checkpoint", coverage_leg_limit=2,
+        )
+        self.assertNotIn("return", checkpoint.authorization_scope_text)
+        self.assertFalse(checkpoint.camera_phase_enabled)
+
     def test_default_is_safe_first_leg_dry_run(self):
         resolved = resolve_autonomous_run_mode()
 

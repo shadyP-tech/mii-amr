@@ -23,6 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from scripts.aufgabe04.stations.arrival_pose_models import (
     ARRIVAL_POSE_CATALOG_SCHEMA_VERSION,
+    BOUNDED_ARRIVAL_POSE_CATALOG_SCHEMA_VERSION,
     ArrivalPoseCatalog,
     ArrivalPoseRecord,
     ArrivalPoseValidation,
@@ -169,6 +170,8 @@ def upsert_arrival_pose(
         revision=catalog.revision + 1,
         updated_unix_sec=timestamp,
         records=records,
+        schema_version=(BOUNDED_ARRIVAL_POSE_CATALOG_SCHEMA_VERSION
+            if record.retained_facing is not None else catalog.schema_version),
     )
     validate_arrival_pose_catalog(updated)
     return updated
@@ -263,7 +266,7 @@ def validate_arrival_pose_catalog(
 ) -> None:
     """Validate a complete in-memory catalog snapshot."""
 
-    if catalog.schema_version != ARRIVAL_POSE_CATALOG_SCHEMA_VERSION:
+    if catalog.schema_version not in (ARRIVAL_POSE_CATALOG_SCHEMA_VERSION, BOUNDED_ARRIVAL_POSE_CATALOG_SCHEMA_VERSION):
         raise ArrivalPoseCatalogError(
             "schema_mismatch",
             f"unsupported arrival-pose catalog schema {catalog.schema_version!r}",
@@ -310,6 +313,8 @@ def validate_arrival_pose_catalog(
     record_ids: set[str] = set()
     observation_owners: dict[str, str] = {}
     for record in catalog.records:
+        if catalog.schema_version == 1 and (record.retained_facing is not None or record.axis.bounded_orientation is not None):
+            raise ArrivalPoseCatalogError("schema_mismatch", "bounded retained evidence requires catalog schema 2")
         validate_arrival_pose_record(record, provenance=catalog.provenance)
         if record.candidate_uid in record_ids:
             raise ArrivalPoseCatalogError(
@@ -388,6 +393,12 @@ def validate_arrival_pose_record(
 ) -> None:
     """Validate record shape and the perpendicular arrival geometry."""
 
+    if record.retained_facing is not None or record.axis.bounded_orientation is not None:
+        from scripts.aufgabe04.stations.retained_catalog_geometry import validate_retained_catalog_record
+        try:
+            validate_retained_catalog_record(record)
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ArrivalPoseCatalogError("invalid_retained_geometry", str(exc)) from exc
     _validate_safe_id(record.candidate_uid, "record.candidate_uid")
     _validate_safe_id(record.stand_id, "record.stand_id")
     stand_x = _finite_number(record.stand.x_m, "record.stand.x_m")
@@ -621,7 +632,7 @@ def _provenance_payload(provenance: CatalogProvenance) -> dict[str, object]:
 
 
 def _arrival_pose_record_payload(record: ArrivalPoseRecord) -> dict[str, object]:
-    return {
+    payload = {
         "candidate_uid": record.candidate_uid,
         "stand_id": record.stand_id,
         "stand": {
@@ -663,6 +674,12 @@ def _arrival_pose_record_payload(record: ArrivalPoseRecord) -> dict[str, object]
         "source": record.source,
     }
 
+    if record.axis.bounded_orientation is not None:
+        payload["axis"]["bounded_orientation"] = record.axis.bounded_orientation
+    if record.retained_facing is not None:
+        payload["retained_facing"] = record.retained_facing
+    return payload
+
 
 def _candidate_rejection_payload(rejection: CandidateRejection) -> dict[str, object]:
     return {
@@ -678,8 +695,8 @@ def _pose_payload(pose: CatalogPose2D) -> dict[str, object]:
 
 
 def _catalog_from_payload(payload: Mapping[str, object]) -> ArrivalPoseCatalog:
-    if _parse_integer(payload["schema_version"], "schema_version", minimum=1) != (
-        ARRIVAL_POSE_CATALOG_SCHEMA_VERSION
+    if _parse_integer(payload["schema_version"], "schema_version", minimum=1) not in (
+        ARRIVAL_POSE_CATALOG_SCHEMA_VERSION, BOUNDED_ARRIVAL_POSE_CATALOG_SCHEMA_VERSION
     ):
         raise ArrivalPoseCatalogError(
             "schema_mismatch",
@@ -692,7 +709,7 @@ def _catalog_from_payload(payload: Mapping[str, object]) -> ArrivalPoseCatalog:
     rejections_payload = _require_list(payload["rejections"], "rejections")
     frozen_unix_sec = payload["frozen_unix_sec"]
     return ArrivalPoseCatalog(
-        schema_version=ARRIVAL_POSE_CATALOG_SCHEMA_VERSION,
+        schema_version=payload["schema_version"],
         catalog_id=_require_string(payload["catalog_id"], "catalog_id"),
         provenance=_provenance_from_payload(payload["provenance"]),
         revision=_parse_integer(payload["revision"], "revision", minimum=0),
@@ -804,7 +821,7 @@ def _arrival_pose_record_from_payload(payload: object, index: int) -> ArrivalPos
                 "sensor_stamp_sec",
                 "source",
             }
-        ),
+        ) | ({"retained_facing"} if "retained_facing" in item else set()),
         name,
     )
     stand = _require_mapping(item["stand"], f"{name}.stand")
@@ -816,7 +833,7 @@ def _arrival_pose_record_from_payload(payload: object, index: int) -> ArrivalPos
         axis,
         frozenset(
             {"axis_rad", "confidence", "sample_count", "estimator", "observation_unix_sec"}
-        ),
+        ) | ({"bounded_orientation"} if "bounded_orientation" in axis else set()),
         f"{name}.axis",
     )
     face = _require_mapping(item["face"], f"{name}.face")
@@ -864,7 +881,9 @@ def _arrival_pose_record_from_payload(payload: object, index: int) -> ArrivalPos
                 stand["uncertainty_m"], f"{name}.stand.uncertainty_m"
             ),
         ),
+        retained_facing=(dict(_require_mapping(item["retained_facing"], f"{name}.retained_facing")) if "retained_facing" in item else None),
         axis=AxisEstimate(
+            bounded_orientation=(dict(_require_mapping(axis["bounded_orientation"], f"{name}.axis.bounded_orientation")) if "bounded_orientation" in axis else None),
             axis_rad=_parse_number(axis["axis_rad"], f"{name}.axis.axis_rad"),
             confidence=_parse_number(axis["confidence"], f"{name}.axis.confidence"),
             sample_count=_parse_integer(

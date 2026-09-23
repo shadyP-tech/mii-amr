@@ -1,4 +1,6 @@
 import json
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -7,6 +9,7 @@ import unittest
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MissionLegKind,
 )
+from scripts.aufgabe04.navigation.station_segment.cli import build_parser
 from scripts.aufgabe04.real_robot.execution.child_runner import (
     DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC,
     build_child_runner_command,
@@ -140,6 +143,28 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
             self._option(command, "--mission-leg-kind"),
             MissionLegKind.CANDIDATE_PREAPPROACH.value,
         )
+
+    def test_return_to_start_child_identity_parses_without_recovery_authority(self):
+        command = build_child_runner_command(
+            **self._base_arguments(),
+            dry_run=False,
+            **self._mission_leg_arguments(
+                kind=MissionLegKind.RETURN_TO_START,
+                mission_leg_index=0,
+            ),
+        )
+        self.assertEqual(self._option(command, "--mission-leg-kind"), "return_to_start")
+        parser = build_parser()
+        for option in ("--mission-leg-kind", "--mission-leg-evidence-kind"):
+            with self.subTest(option=option):
+                args = parser.parse_args(["--leg-index", "0", option, "return_to_start"])
+                self.assertEqual(getattr(args, option[2:].replace("-", "_")), "return_to_start")
+        for option in (
+            "--runtime-localization-mission-leg-kind",
+            "--startup-reseal-mission-leg-kind",
+        ):
+            with self.subTest(option=option), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(["--leg-index", "0", option, "return_to_start"])
 
     def test_explicit_nonzero_route_artifact_index_is_preserved(self):
         command = build_child_runner_command(

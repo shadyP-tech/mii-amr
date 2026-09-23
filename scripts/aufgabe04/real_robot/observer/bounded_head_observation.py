@@ -31,13 +31,16 @@ class CurrentBoundedHead:
     registration: dict | None
     debug: object
     metadata: dict
+    target_reconciliation: dict | None
+    head_position_evidence: dict | None
 
 
 def prepare_bounded_head(*, estimate, debug, association, crop, appearance_crop,
                          qr_binding, marker_verified, marker_seen_in_epoch,
                          image_stamp_sec, scan_stamp_sec, robot_pose, camera_heading_rad,
                          stand_x_m, stand_y_m, camera_signature, roi, metadata,
-                         projected_center_px, expected_head_height_px):
+                         projected_center_px, expected_head_height_px,
+                         head_position_evidence):
     """Bind this frame's head to its own scan and independently observed face."""
     proof = getattr(debug, "head_orientation_bounds", None)
     if (not validated_current_head_orientation_bounds(proof, estimate=estimate, debug=debug)
@@ -81,8 +84,12 @@ def prepare_bounded_head(*, estimate, debug, association, crop, appearance_crop,
         camera_signature, "front" if front else "backside", texts[0] if front else None,
         tuple((p.u_px + roi.x0, p.v_px + roi.y0) for p in estimate.corners),
         projected_center_px, expected_head_height_px)
+    # Proofs travel with the current sample, independently of the diagnostic
+    # dictionary's nesting. Only the accepted association can supply identity.
     return CurrentBoundedHead(sample, scan_stamp_sec, robot_pose, proof, appearance,
-                              registration, debug, metadata)
+                              registration, debug, metadata,
+                              target_reconciliation=association.target_reconciliation,
+                              head_position_evidence=head_position_evidence)
 
 
 def record_bounded_head(adapter, *, update, image_stamp_sec, observed_at_sec):
@@ -151,8 +158,8 @@ def commit_bounded_head(adapter):
             registration = current.registration
             confidence = adapter._head_confidence_metadata["backside"]["confidence"]
             payload = build_backside_axis_observation(
-                target_reconciliation=(current.metadata.get("current_head_candidate_association") or {}).get("target_reconciliation"),
-                head_position_evidence=current.metadata.get("head_position_evidence"),
+                target_reconciliation=current.target_reconciliation,
+                head_position_evidence=current.head_position_evidence,
                 stream_id=args.stream_id, stand_id=args.stand_id,
                 planning_frame=adapter.profile.map_frame, stand_x_m=args.stand_x, stand_y_m=args.stand_y,
                 robot_x_m=current.robot_pose.x_m, robot_y_m=current.robot_pose.y_m,

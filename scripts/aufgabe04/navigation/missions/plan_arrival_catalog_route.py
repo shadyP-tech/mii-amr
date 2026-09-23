@@ -9,6 +9,7 @@ import json
 import math
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
 
@@ -436,6 +437,13 @@ def _route_node(
         # DynamicApproachConfig expands it by tracking_margin_m exactly once.
         minimum_non_target_keepout_radius_m=frozen_keepout_radius_m,
     )
+    if record.retained_facing is not None and frozen_candidate is not None:
+        # Cover the complete original frozen envelope from the measured center,
+        # including its tracking tube, when this catalog is reused later.
+        required_radius = center_delta_m + frozen_keepout_radius_m + args.tracking_margin_m
+        config = replace(config, stand_position_uncertainty_m=max(
+            config.stand_position_uncertainty_m,
+            config.stand_position_uncertainty_m + required_radius - config.stand_keepout_radius_m))
     canonical_normals = tuple(
         face_normal_rad(record.axis.axis_rad, face_id) for face_id in (0, 1)
     )
@@ -901,7 +909,10 @@ def main(argv: list[str] | None = None) -> int:
                     record.stand.uncertainty_m
                     + frozen_candidate.geometry.uncertainty_m
                 )
-                if center_delta_m > allowed_delta_m + 1.0e-9:
+                if record.retained_facing is not None:
+                    from scripts.aufgabe04.stations.retained_catalog_geometry import require_retained_candidate_anchor
+                    require_retained_candidate_anchor(record, frozen_candidate)
+                elif center_delta_m > allowed_delta_m + 1.0e-9:
                     raise ValueError(
                         "catalog stand estimate moved outside frozen candidate "
                         f"uncertainty for {record.candidate_uid}"

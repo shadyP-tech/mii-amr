@@ -58,6 +58,7 @@ def validate_route_diagnostics_json(
     csv_point_count: int,
     require_motion: bool = True,
     diagnostics_payload: Mapping[str, object] | None = None,
+    route_leg: SelectedRouteLeg | None = None,
 ) -> PreflightStatus:
     failures: List[str] = []
     try:
@@ -91,6 +92,23 @@ def validate_route_diagnostics_json(
             f"diagnostics leg {leg_index} route_point_count {route_point_count} "
             f"does not match CSV count {csv_point_count}"
         )
+    stationary_turn = bool(route_leg is not None and route_leg.stationary_turn)
+    if stationary_turn:
+        metadata = payload.get("metadata")
+        if (
+            route_leg.route_kind != "admitted_candidate_pose"
+            or route_leg.simulation_only
+            or not isinstance(metadata, Mapping)
+            or metadata.get("route_kind") != route_leg.route_kind
+            or metadata.get("stationary_turn") is not True
+            or csv_point_count != 2
+            or len(route_leg.raw_waypoints) != 2
+            or route_leg.route_length_m != 0.0
+            or route_leg.raw_waypoints[0].pose.x_m != route_leg.raw_waypoints[-1].pose.x_m
+            or route_leg.raw_waypoints[0].pose.y_m != route_leg.raw_waypoints[-1].pose.y_m
+            or not math.isfinite(route_leg.raw_waypoints[-1].pose.yaw_rad)
+        ):
+            failures.append("stationary turn diagnostics do not match the scoped route")
     route_length = leg.get("route_length_m")
     if (
         isinstance(route_length, bool)
@@ -98,7 +116,9 @@ def validate_route_diagnostics_json(
         or not math.isfinite(route_length)
     ):
         failures.append(f"diagnostics leg {leg_index} route_length_m must be finite")
-    elif require_motion and route_length <= 0.0:
+    elif stationary_turn and route_length != 0.0:
+        failures.append("stationary turn diagnostics require zero route length")
+    elif require_motion and route_length <= 0.0 and not stationary_turn:
         failures.append(f"diagnostics leg {leg_index} route_length_m must be positive for motion")
 
     return PreflightStatus(ok=not failures, failures=failures)
@@ -416,7 +436,7 @@ def validate_speed_limits(
         "max_angular_radps": max_angular_radps,
     }
     for name, value in values.items():
-        if not isinstance(value, (int, float)) or not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             failures.append(f"{name} must be finite")
     if not failures:
         if max_linear_mps <= min_linear_mps:

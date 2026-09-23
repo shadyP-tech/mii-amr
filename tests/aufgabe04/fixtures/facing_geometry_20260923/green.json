@@ -1,0 +1,119 @@
+{
+  "run_id": "stand_explore_exact2_camera_all5_20260923T124047Z",
+  "candidate": "004_survey_candidate_0005",
+  "frame": "000023",
+  "image_sha256": "39429eee03ca07f4ce1eb21c9940bacf9ee0fadb994624a77eab5844423698a0",
+  "camera_info": {
+    "binning_x": 0,
+    "binning_y": 0,
+    "d": [
+      0.22098627234105042,
+      -0.5816953750895016,
+      -0.0014375648979169753,
+      -0.0008374637688387152,
+      0.446372026692927
+    ],
+    "distortion_model": "plumb_bob",
+    "header": {
+      "frame_id": "camera",
+      "stamp_nanosec": 635456997,
+      "stamp_sec": 1790168019
+    },
+    "height": 600,
+    "k": [
+      640.977317007246,
+      0.0,
+      405.8708878028196,
+      0.0,
+      641.1612206204627,
+      300.7059996561025,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "p": [
+      640.977317007246,
+      0.0,
+      405.8708878028196,
+      0.0,
+      0.0,
+      641.1612206204627,
+      300.7059996561025,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    "r": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "roi": {
+      "do_rectify": false,
+      "height": 0,
+      "width": 0,
+      "x_offset": 0,
+      "y_offset": 0
+    },
+    "width": 800
+  },
+  "search": {
+    "center_bounds_px": [
+      227.61667213666092,
+      191.1991897195402,
+      456.471604355615,
+      420.117487706602
+    ],
+    "center_tolerance_px": 70.01761868530578,
+    "center_u_px": 344.8639647974533,
+    "center_v_px": 305.4395474184971,
+    "edge_region": {
+      "bounds_xyxy": [
+        224,
+        147,
+        657,
+        405
+      ],
+      "image_shape": [
+        600,
+        800
+      ],
+      "motion_authorized": false,
+      "pixel_depth_measured": false,
+      "policy": "lidar_candidate_head_volume",
+      "raw_edges_unchanged": true,
+      "supplies_corners": false
+    },
+    "height_px": 100.02516955043683,
+    "hint_center_refinement_allowance_px": 10.0,
+    "image_scope": "full_image",
+    "max_center_offset_ratio": 0.7,
+    "measured_height_ratio": null,
+    "minimum_measured_side_balance": 0.65,
+    "motion_authorized": false,
+    "pixel_size": {
+      "depth_m": 0.49796980938135815,
+      "depth_uncertainty_m": 0.02,
+      "frontal_width_px": 100.40012423379021,
+      "height_px": 100.02516955043683,
+      "max_height_px": 125.62751119684721,
+      "max_width_px": 134.93056153908873,
+      "min_height_px": 79.34562536932467,
+      "policy": "metric_depth_pixel_size",
+      "supplies_corners": false,
+      "supplies_yaw": false
+    },
+    "policy": "conservative_candidate_head_screen",
+    "qr_used": false,
+    "supplies_corners": false
+  },
+  "expected_failure": "head_cold_acquisition_verification_budget_exceeded"
+}

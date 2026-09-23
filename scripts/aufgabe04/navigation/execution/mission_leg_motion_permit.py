@@ -43,13 +43,19 @@ LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "recovery motion, target changes, artifact changes, and motion without an "
     "exact permit are not authorized."
 )
-MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
     + " Separately sealed same-candidate inspection centering turns are also "
     "authorized: zero translation, at most two turns of six degrees each, "
     "at most twelve degrees of measured angular travel per inspection view, "
     "with current camera/LiDAR evidence, exclusive velocity ownership, fresh "
     "odometry, live clearance checks, and stopped-pose proof."
+)
+MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    + " After completed camera exploration and storage of admitted candidates, "
+    "one separately sealed return-to-Start leg may drive to the admitted pose "
+    "of the candidate carrying the Start QR identity."
 )
 
 
@@ -59,13 +65,20 @@ class MissionLegKind(str, Enum):
     COVERAGE = "coverage"
     CANDIDATE_PREAPPROACH = "candidate_preapproach"
     OPPOSITE_FACE = "opposite_face"
+    RETURN_TO_START = "return_to_start"
     STARTUP_RESEAL = "startup_reseal"
 
 
-ROUTINE_MISSION_LEG_KINDS = (
+RECOVERABLE_MISSION_LEG_KINDS = (
     MissionLegKind.COVERAGE,
     MissionLegKind.CANDIDATE_PREAPPROACH,
     MissionLegKind.OPPOSITE_FACE,
+)
+# The final return is a fresh, single-use leg. Its authorization does not add
+# startup or runtime recovery to the already bounded exploration scopes.
+ROUTINE_MISSION_LEG_KINDS = (
+    *RECOVERABLE_MISSION_LEG_KINDS,
+    MissionLegKind.RETURN_TO_START,
 )
 
 _LEG_KIND_ORDER = {
@@ -678,9 +691,15 @@ def _validate_authorization(
         _require_routine_leg_kind(kind, "allowed_leg_kinds")
     if authorization.scope_text not in (
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     ):
         raise ValueError("mission leg motion authorization scope_text mismatch")
+    if (
+        MissionLegKind.RETURN_TO_START in authorization.allowed_leg_kinds
+        and authorization.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    ):
+        raise ValueError("return_to_start requires the explicit return-to-Start scope")
     if authorization.operator_confirmation != MISSION_LEG_RUN_CONFIRMATION:
         raise ValueError(
             "mission leg motion authorization requires operator confirmation RUN"
@@ -947,6 +966,8 @@ def _boolean(value: object, name: str) -> bool:
 
 
 __all__ = [
+    "LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
+    "LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "MISSION_LEG_MOTION_AUTHORIZATION_HASH_FIELD",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCHEMA_VERSION",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
@@ -956,6 +977,7 @@ __all__ = [
     "MissionLegKind",
     "MissionLegMotionAuthorization",
     "MissionLegMotionPermit",
+    "RECOVERABLE_MISSION_LEG_KINDS",
     "ROUTINE_MISSION_LEG_KINDS",
     "file_sha256",
     "load_mission_leg_motion_authorization",

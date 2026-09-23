@@ -203,6 +203,8 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "exact_two_completion.py",
                 "modes.py",
                 "reporting.py",
+                "start_return.py",
+                "stored_start_pose.py",
                 "session_manifest.py",
             },
             "execution": {

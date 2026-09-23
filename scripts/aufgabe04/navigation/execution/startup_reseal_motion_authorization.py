@@ -27,7 +27,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     write_content_hashed_json,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
-    ROUTINE_MISSION_LEG_KINDS,
+    RECOVERABLE_MISSION_LEG_KINDS,
     MissionLegKind,
 )
 from scripts.aufgabe04.navigation.execution.startup_reseal_route_binding import (
@@ -140,7 +140,7 @@ def _mission_leg_kind(value: object, name: str) -> MissionLegKind:
         kind = MissionLegKind(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} is not a known mission leg kind") from exc
-    if kind not in ROUTINE_MISSION_LEG_KINDS:
+    if kind not in RECOVERABLE_MISSION_LEG_KINDS:
         raise ValueError(f"{name} must be a routine mission leg kind")
     return kind
 
@@ -158,7 +158,7 @@ def _canonical_allowed_mission_leg_kinds(
         if kind in result:
             raise ValueError("allowed_mission_leg_kinds contains duplicates")
         result.append(kind)
-    order = {kind: index for index, kind in enumerate(ROUTINE_MISSION_LEG_KINDS)}
+    order = {kind: index for index, kind in enumerate(RECOVERABLE_MISSION_LEG_KINDS)}
     if result != sorted(result, key=order.__getitem__):
         raise ValueError("allowed_mission_leg_kinds must use canonical order")
     return tuple(result)
@@ -902,7 +902,7 @@ def _validate_permit(permit: StartupResealMotionPermit) -> None:
         _require_canonical_path_string(getattr(permit, name), name)
     for name in ("run_id", "target_viewpoint_id", "rejected_run_id"):
         _require_nonempty(getattr(permit, name), name)
-    if permit.mission_leg_kind not in ROUTINE_MISSION_LEG_KINDS:
+    if permit.mission_leg_kind not in RECOVERABLE_MISSION_LEG_KINDS:
         raise ValueError("startup reseal permit mission_leg_kind is not routine")
     _nonnegative_integer(permit.mission_leg_index, "mission_leg_index")
     _require_nonempty(permit.target_id, "target_id")

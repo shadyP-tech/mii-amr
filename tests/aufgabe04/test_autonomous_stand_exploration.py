@@ -412,6 +412,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         candidate_a_failures: int,
         reject_candidate_sensor_timing: bool = False,
         pilot_limit: int | None = None,
+        return_failure: bool = False,
     ) -> dict[str, object]:
         """Run the real outer wrapper with ROS/motion replaced by typed effects."""
 
@@ -803,9 +804,24 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 clock=lambda: 10.0,
             )
 
+        start_returns = []
+
+        def return_to_start(completed, config, effects):
+            self.assertTrue(completed.stand_facing_catalog_path.is_file())
+            self.assertTrue(completed.qr_observation_catalog_path.is_file())
+            summary = json.loads((config.session_root / "mission_summary.json").read_text())
+            self.assertTrue(summary["camera_exploration_complete"])
+            self.assertFalse(summary["fastapi_request_ready"])
+            start_returns.append(completed)
+            if return_failure:
+                raise RuntimeError("fixture Start return blocked")
+            return {"return_to_start_status": "completed", "start_pose_reached": True,
+                    "fastapi_request_ready": True, "fastapi_request_sent": False}
+
         with (
             patch.multiple(
                 autonomous_wrapper,
+                execute_start_return=return_to_start,
                 load_real_robot_profile=lambda *_args, **_kwargs: profile,
                 real_robot_profile_sha256=lambda _profile: "e" * 64,
                 load_camera_calibration=lambda *_args, **_kwargs: SimpleNamespace(),
@@ -904,6 +920,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
 
         return {
             "exit_code": exit_code,
+            "start_return_count": len(start_returns),
             "session_root": session_root,
             "capture_order": capture_order,
             "motion_targets": motion_targets,
@@ -928,6 +945,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             )
             self.assertEqual(result["exit_code"], 0, result["failure"])
             self.assertEqual(result["capture_order"], ["candidate_a"])
+            self.assertEqual(result["start_return_count"], 0)
             self.assertEqual(result["motion_targets"], ["candidate_a"])
             root = result["session_root"]
             summary = json.loads((root / "mission_summary.json").read_text())
@@ -940,6 +958,19 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             self.assertTrue(Path(summary["camera_checkpoint"]).is_file())
             self.assertFalse((root / "stand_facing_catalog.json").exists())
             self.assertFalse((root / "station_identity_registry.json").exists())
+
+    def test_failed_start_return_retains_camera_completion_without_server_readiness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run_exact_two_camera_wrapper_retry_fixture(
+                Path(tmp), max_attempts=1, candidate_a_failures=0, return_failure=True,
+            )
+            self.assertNotEqual(result["exit_code"], 0)
+            self.assertEqual(result["start_return_count"], 1)
+            summary = json.loads((result["session_root"] / "mission_summary.json").read_text())
+            self.assertTrue(summary["camera_exploration_complete"])
+            self.assertEqual(summary["return_to_start_status"], "failed_closed")
+            self.assertFalse(summary["fastapi_request_ready"])
+            self.assertFalse(summary["start_pose_reached"])
 
     def test_camera_pilot_observation_failure_does_not_select_next_stand(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -959,6 +990,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             )
             session_root = result["session_root"]
             self.assertEqual(result["exit_code"], 0, result["failure"])
+            self.assertEqual(result["start_return_count"], 1)
             self.assertEqual(
                 result["capture_order"],
                 ["candidate_a", "candidate_a", "candidate_b", "candidate_c"],

@@ -5,13 +5,13 @@ ordinary observer evidence and receipt validators. They do not claim accuracy
 for a recorded stand or authorize motion.
 """
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy
@@ -38,6 +38,10 @@ from tests.aufgabe04.test_bounded_head_detection import bounded_detection
 from tests.aufgabe04 import test_camera_observer_processing as processing_fixtures
 from tests.aufgabe04 import test_current_head_association as association_fixtures
 from tests.aufgabe04.test_head_model_admission import outer_boundary
+from tests.aufgabe04.test_candidate_snapshot import _candidate, _snapshot
+from scripts.aufgabe04.stations.candidate_snapshot import write_candidate_snapshot
+from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
+from scripts.aufgabe04.real_robot.observer.target_reconciliation import StoppedTargetReconciliation
 
 
 class BoundedHeadObservationTests(unittest.TestCase):
@@ -91,7 +95,7 @@ class BoundedHeadObservationTests(unittest.TestCase):
     def frame(self, stamp, *, face="front", associated=True, complete=True,
               marker=None, marker_seen=None, age=.1, scan_stamp=None,
               scan_for_proof=None, qr_id="QR_003", qr_conflict=False,
-              pose=None, publish=True, no_appearance=False):
+              pose=None, publish=True, no_appearance=False, reconcile=False):
         marker = face == "front" if marker is None else marker
         marker_seen = marker if marker_seen is None else marker_seen
         scan_stamp = stamp if scan_stamp is None else scan_stamp
@@ -110,6 +114,22 @@ class BoundedHeadObservationTests(unittest.TestCase):
         options.update(estimate=current.estimate, debug=current.debug, attempt=current.attempt,
                        profile_sha256=self.profile.sha256, now_sec=stamp+.1,
                        scan=replace(options["scan"], scan_stamp_sec=scan_for_proof, receipt_sec=scan_for_proof))
+        if reconcile:
+            if not hasattr(self, "reconciliation"):
+                self.reconciliation = StoppedTargetReconciliation()
+                candidate = _candidate(uid=self.adapter.args.stand_id, x_m=.6)
+                candidate = replace(candidate, geometry=replace(candidate.geometry,
+                    y_m=0., radius_m=.04, uncertainty_m=.02))
+                self.snapshot_path = self.root / "snapshot.json"
+                write_candidate_snapshot(self.snapshot_path, _snapshot(candidate))
+            options["target_reconciliation"] = self.reconciliation.observe(
+                snapshot_path=self.snapshot_path, candidate_uid=self.adapter.args.stand_id,
+                planning_frame="map", stand_center=(.6, 0.), target_key="test", epoch=0,
+                scan=options["scan"], scan_from_map=RigidTransform("base_scan", "map",
+                    (0., 0., 0.), (0., 0., 0., 1.)), robot_pose=(pose.x_m, pose.y_m, pose.yaw_rad),
+                image_stamp_sec=stamp, now_sec=stamp+.1,
+                options={key: options[key] for key in ("map_bearing_rad", "cone_half_angle_rad",
+                    "max_camera_map_bearing_delta_rad", "accepted_range_m")})
         association = associate_current_measured_head(**options)
         if not associated:
             association = replace(association, accepted=False)
@@ -137,7 +157,11 @@ class BoundedHeadObservationTests(unittest.TestCase):
             image_stamp_sec=stamp, scan_stamp_sec=scan_stamp, robot_pose=pose,
             camera_heading_rad=0., stand_x_m=.6, stand_y_m=0.,
             camera_signature=(640., 640., 400., 300.), roi=current.attempt.roi,
-            metadata=metadata, projected_center_px=(400., 300.), expected_head_height_px=90.)
+            metadata=metadata, projected_center_px=(400., 300.), expected_head_height_px=90.,
+            head_position_evidence=(None if association.target_reconciliation is None else dict(
+                head_bounds=asdict(self.proof), scan_from_camera=asdict(options["scan_from_camera"]),
+                model_path=str(Path(__file__).resolve().parents[2] /
+                    "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json"))))
         self.adapter._qr_marker_seen_in_stationary_epoch = marker_seen
         self.adapter._pending_head_confidence = (HeadConfidenceInput(
             stamp, None if no_appearance else appearance, appearance_crop.accepted,
@@ -195,6 +219,91 @@ class BoundedHeadObservationTests(unittest.TestCase):
         self.assertIsNone(update.axis_consensus)
         self.assertIsNone(update.resolved_qr_id)
         self.assertIsNone(self.payload("front"))
+
+    def test_reconciled_backside_retains_metric_center_without_diagnostic_lookup(self):
+        for index in range(7):
+            _, metadata = self.frame(100.+index*.2, face="backside", reconcile=True)
+        # Production passes the nested metric diagnostics to the window. The
+        # current association/position proofs must not be looked up there.
+        self.assertNotIn("current_head_candidate_association", metadata)
+        self.assertNotIn("head_position_evidence", metadata)
+        payload = self.payload("backside")
+        self.assertIsNotNone(payload, metadata)
+        observation = validated_backside_axis_observation(payload)
+        self.assertEqual(observation.target_reconciliation["entries"][-1]["image_stamp_sec"], 101.2)
+        self.assertEqual(observation.head_position_evidence["head_bounds"],
+                         json.loads(json.dumps(asdict(self.proof))))
+        center = observation.validated_target_center
+        self.assertEqual(center["policy"], "reconciled_metric_head_position_engineering_bound")
+        self.assertGreater(math.dist((center["x_m"], center["y_m"]), (.6, 0.)), .03)
+        self.assertAlmostEqual(observation.bounded_orientation["half_width_rad"], self.proof.half_width_rad)
+        self.assertEqual(payload["stand_center"], {"x_m": .6, "y_m": 0.})
+
+    def test_node_passes_current_position_to_bounded_preparation(self):
+        # Inject an already tested current detector/association result, then
+        # execute the node's actual metadata assembly and preparation call.
+        for stamp in (99.6, 99.8, 100.):
+            self.frame(stamp, face="backside", reconcile=True, publish=False)
+        pending = self.adapter._pending_bounded_head
+        current = replace(self.current, debug=pending.debug, qr_observations=(),
+                          frame=numpy.zeros((160, 160, 3), dtype=numpy.uint8))
+        options = association_fixtures.CurrentHeadAssociationTests().options()
+        options.update(estimate=current.estimate, debug=current.debug, attempt=current.attempt,
+            profile_sha256=self.profile.sha256, now_sec=100.1,
+            scan=replace(options["scan"], scan_stamp_sec=100., receipt_sec=100.),
+            target_reconciliation=pending.target_reconciliation)
+        association = associate_current_measured_head(**options)
+        selection = register_current_tracked_head(tracked_head_selection(current),
+            association=association, observed_at_sec=100., now_sec=100.1,
+            max_age_sec=.5, expected_model_sha256=self.profile.sha256)
+        adapter = self.fixture.make_adapter()
+        adapter.stand_model_profile.sha256 = self.profile.sha256
+        adapter.args.stand_model_profile = Path(pending.head_position_evidence["model_path"])
+        adapter.args.candidate_crop_snapshot = self.snapshot_path
+        adapter._target_reconciliation = Mock(metadata={"ready": True})
+        adapter._target_reconciliation.observe.return_value = pending.target_reconciliation
+        adapter.backside_proposal_reuse.select = Mock(return_value=selection)
+        module = "scripts.aufgabe04.real_robot.observer.node."
+        frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)
+        # Stop at this boundary: downstream receipt/route consumers are covered
+        # separately with their real validators and recorded sensor evidence.
+        with patch(module+"camera_info_mismatches", return_value=()), \
+             patch(module+"transform_mismatches", return_value=()), \
+             patch(module+"compressed_msg_to_bgr_frame", return_value=frame), \
+             patch(module+"_rectify_bgr_frame", side_effect=lambda value, *a, **k: value), \
+             patch(module+"probe_identity_after_head_miss", side_effect=lambda value, **k: value), \
+             patch(module+"associate_current_measured_head", return_value=association), \
+             patch(module+"prepare_bounded_head", side_effect=StopIteration) as prepare:
+            with self.assertRaises(StopIteration):
+                adapter._process_latest()
+        fields = prepare.call_args.kwargs
+        self.assertNotIn("head_position_evidence", fields["metadata"])
+        self.assertNotIn("current_head_candidate_association", fields["metadata"])
+        self.assertEqual(fields["head_position_evidence"]["head_bounds"], asdict(self.proof))
+        prepared = prepare_bounded_head(**fields)
+        self.assertIsNotNone(prepared)
+        self.assertEqual(prepared.target_reconciliation, pending.target_reconciliation)
+        self.assertEqual(prepared.head_position_evidence, fields["head_position_evidence"])
+
+    def test_bounded_receipt_does_not_reuse_previous_frames_center(self):
+        for index in range(6):
+            self.frame(100.+index*.2, face="backside", reconcile=True)
+        self.frame(101.2, face="backside", reconcile=False)
+        payload = self.payload("backside")
+        self.assertIsNotNone(payload)
+        self.assertNotIn("target_reconciliation", payload)
+        self.assertNotIn("head_position_evidence", payload)
+        self.assertIsNone(validated_backside_axis_observation(payload).validated_target_center)
+
+    def test_bounded_receipt_rejects_reconciliation_for_another_candidate(self):
+        for index in range(7):
+            self.frame(100.+index*.2, face="backside", reconcile=True, publish=False)
+        current, bounds, update = self.adapter._bounded_head_ready
+        forged = {**current.target_reconciliation, "candidate_uid": "another_candidate"}
+        self.adapter._bounded_head_ready = (replace(current, target_reconciliation=forged), bounds, update)
+        self.assertIsNone(commit_bounded_head(self.adapter))
+        self.assertIsNone(self.payload("backside"))
+        self.assertIn("bounded_orientation_rejection", current.metadata)
 
     def test_no_complete_associated_current_head_or_fresh_sources_cannot_commit(self):
         for face in ("front", "backside"):

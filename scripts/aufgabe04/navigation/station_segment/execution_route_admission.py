@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
+    RETURN_TO_START_ANGULAR_RADPS,
+    RETURN_TO_START_LINEAR_MPS,
+    RETURN_TO_START_SPEED_POLICY,
+    return_to_start_speed_policy_failures,
+)
 from scripts.aufgabe04.navigation.control.driving_behavior import (
     CATALOG_PHYSICAL_ROUTE_KINDS,
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
@@ -12,6 +18,11 @@ from scripts.aufgabe04.navigation.control.driving_behavior import (
 from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
     DETECTED_STAND_PREAPPROACH_ROUTE_KIND,
     validate_detected_stand_preapproach_binding,
+)
+from scripts.aufgabe04.navigation.approach.admitted_pose_route import (
+    ADMITTED_POSE_ROUTE_KIND,
+    ADMITTED_POSE_ROUTE_PURPOSE,
+    validate_admitted_pose_route_binding,
 )
 from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
     validate_arena_boundary_evidence,
@@ -393,6 +404,7 @@ def admit_execution_route(
         csv_point_count=len(leg.raw_waypoints),
         require_motion=require_motion,
         diagnostics_payload=diagnostics_snapshot.payload,
+        route_leg=leg,
     )
     catalog_binding_status = (
         validate_catalog_route_binding_json(
@@ -412,6 +424,16 @@ def admit_execution_route(
             diagnostics_payload=diagnostics_snapshot.payload,
         )
         if leg.route_kind == DETECTED_STAND_PREAPPROACH_ROUTE_KIND
+        else None
+    )
+    admitted_pose_binding_status = (
+        validate_admitted_pose_route_binding(
+            diagnostics_json_path,
+            leg,
+            candidate_snapshot_path=args.candidate_snapshot,
+            diagnostics_payload=diagnostics_snapshot.payload,
+        )
+        if leg.route_kind == ADMITTED_POSE_ROUTE_KIND
         else None
     )
     stand_discovery_binding_status = (
@@ -461,6 +483,11 @@ def admit_execution_route(
                     raise ValueError(
                         "detected stand pre-approach requires --candidate-snapshot"
                     )
+            elif leg.route_kind == ADMITTED_POSE_ROUTE_KIND:
+                if route_purpose != ADMITTED_POSE_ROUTE_PURPOSE:
+                    raise ValueError("admitted pose route requires route_purpose=return_to_start")
+                if args.candidate_snapshot is None:
+                    raise ValueError("admitted pose route requires --candidate-snapshot")
             elif leg.route_kind == STAND_DISCOVERY_ROUTE_KIND:
                 if route_purpose != "stand_discovery":
                     raise ValueError(
@@ -535,7 +562,20 @@ def admit_execution_route(
             mission_execution_failures.append(
                 f"mission execution binding is invalid: {exc}"
             )
-    speed_status = validate_speed_limits(args.max_linear_mps, args.max_angular_radps)
+    speed_policy_failures = return_to_start_speed_policy_failures(
+        args, route_kind=leg.route_kind, simulation_only=leg.simulation_only,
+    )
+    fast_start_travel = (
+        getattr(args, "motion_speed_policy", "exploration") == RETURN_TO_START_SPEED_POLICY
+        and not speed_policy_failures
+    )
+    speed_status = validate_speed_limits(
+        args.max_linear_mps, args.max_angular_radps,
+        **({
+            "max_allowed_linear_mps": RETURN_TO_START_LINEAR_MPS,
+            "max_allowed_angular_radps": RETURN_TO_START_ANGULAR_RADPS,
+        } if fast_start_travel else {}),
+    )
     pure_failures = (
         diagnostics_status.failures
         + ([] if catalog_binding_status is None else catalog_binding_status.failures)
@@ -549,10 +589,16 @@ def admit_execution_route(
             if stand_discovery_binding_status is None
             else stand_discovery_binding_status.failures
         )
+        + (
+            []
+            if admitted_pose_binding_status is None
+            else admitted_pose_binding_status.failures
+        )
         + catalog_egress_failures
         + execution_certificate_failures
         + mission_execution_failures
         + speed_status.failures
+        + speed_policy_failures
     )
     if pure_failures:
         stop_reason = "; ".join(pure_failures)

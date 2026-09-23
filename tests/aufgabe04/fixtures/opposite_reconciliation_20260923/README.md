@@ -12,6 +12,13 @@ by the deployed revision. Tests remap local file references and rehash those
 path-bearing projection wrappers; sensor stamps, scans, images, head fits,
 candidate populations and frame transforms are unchanged.
 
+The reconciliation suite also runs with a receipt published by the production
+bounded-head writer, using the recorded window and current proofs. Its diagnostic
+metadata deliberately contains neither proof. Both variants pass through frame
+projection, route sealing, arrival admission and opposite QR handling. Separate
+synthetic tests exercise the observer's preparation call and seven-frame window,
+including disappearance of the current proof and candidate mismatch.
+
 Tests exercise the production opposite observer with deterministic decoder output,
 plus an independent native decode of the recorded search crop. Native OpenCV 5
 can decode `Start` at 4x there but not in the rectified isolated quad; deployed

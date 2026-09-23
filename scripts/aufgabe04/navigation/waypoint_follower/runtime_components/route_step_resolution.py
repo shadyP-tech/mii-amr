@@ -19,6 +19,9 @@ from scripts.aufgabe04.navigation.control.waypoint_controller import (
     compute_join_anchor_command,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
+    controller_for_return_to_start_phase,
+)
 from scripts.aufgabe04.navigation.waypoint_follower.directives import (
     StartupJoinAction,
 )
@@ -119,6 +122,12 @@ class RouteStepResolutionRuntimeMixin:
             physical_waypoint_tolerance_m=(
                 self.follower_config.physical_waypoint_tolerance_m
             ),
+        )
+        route_controller_config = controller_for_return_to_start_phase(
+            route_controller_config,
+            route_kind=self.current_route_kind,
+            pose=pose,
+            waypoints=self.waypoints,
         )
         if command_phase == RouteCommandPhase.DYNAMIC_JOIN:
             # During handoff, pursue only the collision-certified route start.

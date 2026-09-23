@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 
 ARRIVAL_POSE_CATALOG_SCHEMA_VERSION = 1
+BOUNDED_ARRIVAL_POSE_CATALOG_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class AxisEstimate:
     sample_count: int
     estimator: str
     observation_unix_sec: float
+    bounded_orientation: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,7 @@ class ArrivalPoseRecord:
     source_observation_ids: tuple[str, ...]
     sensor_stamp_sec: float
     source: str
+    retained_facing: dict | None = None
 
 
 @dataclass(frozen=True)

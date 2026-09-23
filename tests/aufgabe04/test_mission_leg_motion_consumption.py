@@ -2,6 +2,7 @@ import shutil
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import (
@@ -123,6 +124,25 @@ class MissionLegMotionConsumptionTest(unittest.TestCase):
 
         self.assertEqual(
             load_mission_leg_motion_consumption_receipt(expected), receipt
+        )
+        with self.assertRaisesRegex(ValueError, "already consumed"):
+            self._consume()
+
+    def test_return_to_start_is_consumed_exactly_once(self):
+        self.permit = replace(
+            self.permit,
+            mission_leg_kind=MissionLegKind.RETURN_TO_START,
+            target_id="candidate-start",
+        )
+        self.permit_path = self.root / "return-to-start-permit.json"
+        write_mission_leg_motion_permit(self.permit_path, self.permit)
+        receipt = self._consume()
+        self.assertIs(receipt.mission_leg_kind, MissionLegKind.RETURN_TO_START)
+        self.assertEqual(
+            load_mission_leg_motion_consumption_receipt(
+                default_mission_leg_motion_consumption_receipt_path(self.permit_path)
+            ),
+            receipt,
         )
         with self.assertRaisesRegex(ValueError, "already consumed"):
             self._consume()

@@ -43,7 +43,7 @@ def arrival_pose_record_from_recommendation(
     """Build one explicit record from a committed synchronized estimate."""
 
     validate_recommendation(recommendation)
-    if recommendation.bounded_orientation is not None:
+    if recommendation.bounded_orientation is not None and recommendation.schema_version != 5:
         raise ValueError("legacy arrival catalog cannot discard bounded orientation; use its checked candidate route")
     if recommendation.axis_state not in COMMITTED_AXIS_STATES:
         raise ValueError(
@@ -126,6 +126,7 @@ def arrival_pose_record_from_recommendation(
             sample_count=axis_sample_count,
             estimator=estimator,
             observation_unix_sec=recommendation.observation_unix_sec,
+            bounded_orientation=recommendation.bounded_orientation,
         ),
         face=FaceSelection(
             face_id=selected.face_id,
@@ -155,4 +156,5 @@ def arrival_pose_record_from_recommendation(
         source_observation_ids=tuple(sorted(observation_ids)),
         sensor_stamp_sec=recommendation.sensor_stamp_sec,
         source=source,
+        retained_facing=(dict(recommendation.axis_measurement) if recommendation.schema_version == 5 else None),
     )

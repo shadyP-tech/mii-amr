@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.artifacts.qr_verified_observation_pose import (
@@ -103,6 +104,26 @@ class QrPoseDiscoveryExecutionTest(unittest.TestCase):
         self.assertFalse(summary["facing_complete"])
         self.assertEqual(summary["qr_only_stand_count"], 5)
         validate_completed_qr_goal(summary, snapshot_sha256=candidate_snapshot_sha256(config.snapshot), coverage=None)
+
+    def test_validated_retained_recommendation_is_counted_once_as_facing(self):
+        config = self.case.config()
+        def promote(**fields):
+            observation = fields["observation"]
+            uid = fields["frame"].candidate.candidate_uid
+            if uid != "candidate_0":
+                return None
+            path = fields["output_dir"] / "retained_facing_recommendation.json"
+            path.write_text("validated retained-facing fixture")
+            return replace(observation, recommendation_path=path, qr_observation_pose_path=None), {
+                "candidate_uid": uid, "qr_id": observation.qr_id, "facing_ready": True}
+        with patch("scripts.aufgabe04.real_robot.candidate.retained_facing.try_retained_facing", side_effect=promote):
+            result = execute_candidate_approach_phase(config, self.effects(
+                config, qr_only={f"candidate_{i}" for i in range(6)}))
+        self.case.assert_bound_artifacts(config, result)
+        self.assertEqual(len(result.facing_records), 1)
+        self.assertEqual(len(result.qr_observation_records), 4)
+        self.assertEqual(self.case.committed, ["candidate_0"])
+        self.assertEqual(result.facing_records[0]["candidate_uid"], "candidate_0")
 
     def test_mixed_discovery_retains_only_geometry_records_in_facing_catalog(self):
         config = self.case.config()

@@ -27,16 +27,16 @@ DYNAMIC_PHYSICAL_ROUTE_KINDS = frozenset(
 )
 CATALOG_PHYSICAL_ROUTE_KINDS = frozenset({"catalog_face_approach"})
 STATIC_PHYSICAL_ROUTE_KINDS = CATALOG_PHYSICAL_ROUTE_KINDS | frozenset(
-    {"detected_stand_preapproach", "stand_discovery_corridor"}
+    {"detected_stand_preapproach", "stand_discovery_corridor", "admitted_candidate_pose"}
 )
 STATIC_STARTUP_SEGMENT_JOIN_ROUTE_KINDS = frozenset(
-    {"detected_stand_preapproach", "stand_discovery_corridor"}
+    {"detected_stand_preapproach", "stand_discovery_corridor", "admitted_candidate_pose"}
 )
 PHYSICAL_ROUTE_KINDS = DYNAMIC_PHYSICAL_ROUTE_KINDS | STATIC_PHYSICAL_ROUTE_KINDS
 # These routes carry a finite yaw as an endpoint inspection requirement.  It
 # must not compete with the segment bearing while the robot is still in transit.
 TERMINAL_HEADING_ONLY_PHYSICAL_ROUTE_KINDS = frozenset(
-    {"detected_stand_preapproach", "stand_discovery_corridor"}
+    {"detected_stand_preapproach", "stand_discovery_corridor", "admitted_candidate_pose"}
 )
 HEADING_CORRIDOR_ROUTE_KINDS = (
     PHYSICAL_ROUTE_KINDS - TERMINAL_HEADING_ONLY_PHYSICAL_ROUTE_KINDS

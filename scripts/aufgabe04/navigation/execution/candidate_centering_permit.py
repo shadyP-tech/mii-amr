@@ -10,6 +10,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json, payload_sha256, write_content_hashed_json,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MissionLegKind,
     load_mission_leg_motion_authorization,
@@ -40,7 +41,10 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
     if permit.get("schema_version") != 1 or permit.get("purpose") != "candidate_centering":
         raise ValueError("invalid candidate centering permit contract")
     master = load_mission_leg_motion_authorization(Path(str(permit["master_authorization_path"])))
-    if (master.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    if (master.scope_text not in {
+            MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        }
             or MissionLegKind.CANDIDATE_PREAPPROACH not in master.allowed_leg_kinds):
         raise ValueError("mission RUN does not authorize candidate centering")
     if permit.get("master_authorization_sha256") != mission_leg_motion_authorization_sha256(master):

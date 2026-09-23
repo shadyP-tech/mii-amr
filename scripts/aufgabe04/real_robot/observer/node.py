@@ -2277,6 +2277,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             robot_pose=robot_pose, camera_heading_rad=optical_heading_from_transform(map_from_camera),
             stand_x_m=self.args.stand_x, stand_y_m=self.args.stand_y,
             camera_signature=candidate_context.camera_signature, roi=roi, metadata=model_metadata,
+            head_position_evidence=axis_metadata.get("head_position_evidence"),
             projected_center_px=(projection.u_px, projection.v_px),
             expected_head_height_px=expected_head_height_px)
         if self._pending_bounded_head is not None:

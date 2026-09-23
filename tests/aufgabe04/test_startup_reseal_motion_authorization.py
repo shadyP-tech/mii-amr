@@ -42,6 +42,13 @@ from tests.aufgabe04.test_initial_map_tf_recovery import initial_map_tf_stop
 
 
 class StartupResealMotionAuthorizationTest(unittest.TestCase):
+    def test_return_to_start_does_not_inherit_startup_recovery_authority(self):
+        with self.assertRaisesRegex(ValueError, "routine mission leg kind"):
+            replace(
+                self.authorization,
+                allowed_mission_leg_kinds=(MissionLegKind.RETURN_TO_START,),
+            )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
