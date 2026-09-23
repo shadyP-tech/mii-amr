@@ -19,7 +19,7 @@ def _inverse_point(point, transform):
 def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec,
                              scan_from_camera, base_from_camera, model_profile,
                              fx, fy, cx, cy, image_shape, sync_tolerance_sec=.15,
-                             position_uncertainty_m=.02):
+                             position_uncertainty_m=.02, bounded_search=None, accepted_range_m=None):
     """Project the nearest isolated stand-sized scan cluster into the full image.
 
     Uses measured floor-relative extrinsics and model head height. This is a
@@ -70,8 +70,23 @@ def nearest_scan_head_search(*, scan, image_stamp_sec, now_sec, max_scan_age_sec
         distance = math.hypot(*center_base[:2])
         return distance, u, v, height, cluster, point[2]
 
+    if accepted_range_m is not None:
+        lo, hi = accepted_range_m
+        if not all(math.isfinite(v) for v in (lo, hi)) or not 0 < lo < hi:
+            return fail("nearest_head_candidate_range_invalid")
+        clusters = tuple(c for c in clusters if lo <= math.hypot(c.center_x_m, c.center_y_m) <= hi)
+        info["accepted_range_m"] = [lo, hi]
     projected = [p for cluster in clusters if (p := project_center(
         cluster.center_x_m, cluster.center_y_m, cluster)) is not None]
+    if bounded_search is not None:
+        # Exploration supplies a candidate-bounded acquisition region. Filtering
+        # precedes nearest selection: an out-of-region foreground cannot win.
+        x0,y0,x1,y1 = bounded_search.image_bounds(image_shape)
+        projected = [p for p in projected if x0 <= p[1] < x1 and y0 <= p[2] < y1
+            and bounded_search.accepts_center((p[1],p[2]))
+            and math.dist((p[1],p[2]),bounded_search.center) <= bounded_search.center_limit_px]
+        info['bounded_search'] = bounded_search.diagnostics()
+        info['candidate_association_required'] = True
     projected.sort(key=lambda p: p[0])
     info["candidates"] = [{"range_m": d, "center_u_px": u, "center_v_px": v,
                            "height_px": h, "scan_indices": c.source_indices,

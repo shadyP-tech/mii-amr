@@ -233,7 +233,7 @@ class QrObservationPoseTests(unittest.TestCase):
         adapter.stand_model_profile.environment = "physical"
         adapter.stand_model_profile.committable = True
         adapter.stand_model_profile.head_depth_m = .006
-        adapter.stand_model_profile.head_top_height_m = .21
+        adapter.stand_model_profile.head_top_height_m = adapter.stand_head_center_height_m + .039
         adapter.stand_model_profile.tolerance_m = .002
         adapter._write_status = PassiveRealViewpointNode._write_status.__get__(adapter)
         frame = numpy.zeros((600, 800, 3), dtype=numpy.uint8)

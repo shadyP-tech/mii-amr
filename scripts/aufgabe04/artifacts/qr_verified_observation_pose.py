@@ -138,6 +138,47 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
                 or len(envelope_indices) != len(set(envelope_indices))
                 or not set(indices).issubset(envelope_indices)):
             raise ValueError("independent QR registration must retain the same cluster")
+    reconciliation = binding.get('target_reconciliation')
+    finite = binding.get('finite_bearing')
+    if reconciliation is not None:
+        from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+        proof_scan, envelope, _, reference = validate_reconciliation(reconciliation,
+            candidate_uid=data['candidate_uid'],stand_center=tuple(data['stand_center'][k] for k in ('x_m','y_m')),
+            image_stamp_sec=image,scan_stamp_sec=scan)
+        if (reconciliation['target_key'] != data['target_key'] or reconciliation['epoch'] != data['motion_epoch']
+                or reconciliation['planning_frame'] != data['planning_frame']
+                or tuple(reconciliation['entries'][-1]['robot_pose']) != tuple(data['robot_pose'][k] for k in ('x_m','y_m','yaw_rad'))
+                or not set(indices).issubset(envelope.selected_cluster_source_indices)
+                or association.get('map_bearing_rad') != reference or finite is None):
+            raise ValueError('QR reconciliation differs from admitted tuple')
+        if (finite['range_m'] != envelope.distance_m
+                or tuple(finite['range_interval_m']) != tuple(envelope.accepted_range_m)
+                or abs(association.get('max_camera_map_bearing_delta_rad',math.inf)-math.radians(3)) > 1e-9):
+            raise ValueError('QR reconciliation range or cone changed')
+        from scripts.aufgabe04.perception.candidate_lidar_association import associate_camera_registered_candidate_lidar_target
+        recomputed = associate_camera_registered_candidate_lidar_target(proof_scan,
+            map_bearing_rad=reference,observed_camera_bearing_rad=binding['camera_bearing_rad'],
+            cone_half_angle_rad=math.radians(3),accepted_range_m=envelope.accepted_range_m,
+            now_sec=checked,max_scan_age_sec=.5,min_cluster_sample_count=1,
+            max_camera_map_bearing_delta_rad=math.radians(3))
+        if (not recomputed.associated or tuple(indices) != recomputed.search_association.selected_cluster_source_indices
+                or association['distance_m'] != recomputed.distance_m):
+            raise ValueError('QR reconciliation current scan no longer admits its ray')
+    if finite is not None:
+        from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
+        from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics
+        from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
+        corners = data['qr_corners_px']
+        bearing, uncertainty, depth = finite_target_bearing(
+            center_px=tuple(sum(p[k] for p in corners)/4 for k in (0,1)),
+            intrinsics=CameraIntrinsics(**finite['intrinsics']),
+            scan_from_camera=RigidTransform(**finite['scan_from_camera']),
+            distance_m=finite['range_m'],range_interval_m=finite['range_interval_m'])
+        if (any(abs(a-b)>1e-9 for a,b in ((bearing,binding['camera_bearing_rad']),
+                (bearing,finite['bearing_rad']),(uncertainty,finite['uncertainty_rad']),(depth,finite['optical_depth_m'])))
+                or abs(math.remainder(bearing-association['map_bearing_rad'],math.tau))+uncertainty
+                    > association.get('max_camera_map_bearing_delta_rad',association.get('cone_half_angle_rad',0.))+1e-9):
+            raise ValueError('QR finite ray differs from current calibrated geometry')
     if type(data.get("motion_epoch")) is not int or data["motion_epoch"] < 0:
         raise ValueError("QR observation needs a stopped motion epoch")
     signature = data.get("camera_signature")

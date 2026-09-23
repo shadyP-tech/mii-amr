@@ -4,7 +4,8 @@ import math
 import time
 
 from scripts.aufgabe04.perception.candidate_lidar_association import associate_camera_registered_candidate_lidar_target
-from scripts.aufgabe04.perception.stand_axis_handoff import rectified_pixel_bearing_in_scan
+from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
+from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
 from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 
 POLICY = 'current_opposite_qr_outline_unique_scan'
@@ -96,6 +97,11 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
     pixels = frame[roi.y0:roi.y1, roi.x0:roi.x1]
     detector = cv2.QRCodeDetector() if resources is None else resources.decoder('native')
     expected = attempt.expected_head_height_px*model_profile.qr_symbol_height_m/model_profile.head_height_m
+    envelope = qr_registration_envelope(scan,map_bearing_rad=map_bearing_rad,
+        cone_half_angle_rad=cone_half_angle_rad,max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
+        accepted_range_m=accepted_range_m,now_sec=now_sec,max_scan_age_sec=max_scan_age_sec)
+    if not envelope.associated or envelope.eligible_cluster_count != 1:
+        return None
     for scale in (4, 1):
         if time.monotonic()-started >= max_elapsed_sec:
             break
@@ -114,16 +120,20 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
             center = tuple(sum(p[k] for p in corners)/4 for k in (0, 1))
             if math.dist(center, (attempt.expected_center_u_px, attempt.expected_center_v_px)) > .75*attempt.expected_head_height_px:
                 continue
-            bearing = rectified_pixel_bearing_in_scan(u_px=center[0], v_px=center[1],
-                fx_px=intrinsics.fx_px, fy_px=intrinsics.fy_px, cx_px=intrinsics.cx_px, cy_px=intrinsics.cy_px,
-                scan_from_camera=scan_from_camera)
+            try:
+                bearing, uncertainty, depth = finite_target_bearing(center_px=center,intrinsics=intrinsics,
+                    scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=accepted_range_m)
+            except ValueError:
+                continue
+            if abs(math.remainder(bearing-map_bearing_rad,math.tau))+uncertainty > max_camera_map_bearing_delta_rad:
+                continue
             lidar = associate_camera_registered_candidate_lidar_target(scan,
                 map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=bearing,
                 cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
                 now_sec=now_sec+time.monotonic()-started, max_scan_age_sec=max_scan_age_sec,
                 min_cluster_sample_count=1, max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad)
             support = OppositeTargetSupport(corners, center, lidar, image_stamp_sec, tuple(frame.shape[:2]),
-                expected, intrinsics.fy_px*model_profile.head_height_m/attempt.expected_head_height_px)
+                expected, depth)
             try:
                 validate_target_support(support.metadata())
             except ValueError:

@@ -384,7 +384,9 @@ def execute_local_candidate_inspection(
                 retained_backside_axis_path=retained,
                 candidate_crop_snapshot_path=frame.decision_binding.camera_snapshot_path,
             ))
-        return capture_observation(observation_request_type(frame.candidate, output, index))
+        return capture_observation(observation_request_type(frame.candidate, output, index,
+            candidate_crop_snapshot_path=(None if frame.decision_binding is None
+                else frame.decision_binding.camera_snapshot_path)))
 
     def centered_capture(frame, output, index):
         def capture(current, destination, view, enabled, timeout, not_before):
@@ -392,7 +394,7 @@ def execute_local_candidate_inspection(
                 current.candidate, destination, view, allow_centering=enabled,
                 timeout_sec=timeout, observation_not_before_sec=not_before,
                 retained_backside_axis_path=current.retained_backside_axis_path,
-                candidate_crop_snapshot_path=(None if current.retained_backside_axis_path is None
+                candidate_crop_snapshot_path=(None if current.decision_binding is None
                     else current.decision_binding.camera_snapshot_path),
             ))
 

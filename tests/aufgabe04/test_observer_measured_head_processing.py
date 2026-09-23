@@ -80,12 +80,6 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         qr_geometry_priorities = []
         metric_options = []
         metric_frame_indices = []
-        scan_filters = []
-
-        def scan_filter(**options):
-            value = CurrentScanHeadProposalFilter(**options)
-            scan_filters.append(value)
-            return value
 
         def decode(crop, _cv2, *, diagnostics=None, max_elapsed_sec=None,
                    prefer_native_geometry=False, preferred_scale=None):
@@ -231,7 +225,6 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                 "detect_qr_observations_bgr": {"side_effect": full_decode},
                 "detect_native_qr_observations_bgr": {"side_effect": native_decode},
                 "estimate_stand_axis_from_metric_model": {"side_effect": metric},
-                "CurrentScanHeadProposalFilter": {"side_effect": scan_filter},
             }
             for name, options in patches.items():
                 stack.enter_context(patch(module + name, **options))
@@ -306,7 +299,6 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
             adapter._test_pose_hints = pose_hints
             adapter._test_head_calls = head_calls
             adapter._test_metric_options = metric_options
-            adapter._test_scan_filters = scan_filters
             adapter._test_qr_geometry_priorities = qr_geometry_priorities
             return adapter, payload
 
@@ -449,13 +441,10 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                             for item in adapter._test_metric_options))
         self.assertTrue(all(item["pose_hint"] is not None for item in tracked))
         self.assertTrue(all("current_head_proposal_corners" not in item for item in tracked))
-        filters = adapter._test_scan_filters
-        self.assertEqual(len({id(value) for value in filters}), 7)
-        self.assertEqual([value.scan.scan_stamp_sec for value in filters],
-                         [100. + index * .2 for index in range(7)])
-        self.assertTrue(all(callable(value.preview_lidar_association) for value in filters))
-        self.assertTrue(all(callable(value.current_ros_sec) for value in filters))
-        self.assertTrue(all(value.metadata()["persistence_read_only"] for value in filters))
+        # Acquisition uses nearest current geometry inside the candidate volume;
+        # identity association is no longer an early border-selection filter.
+        self.assertTrue(all(not isinstance(item['proposal_filter'], CurrentScanHeadProposalFilter)
+                            for item in adapter._test_metric_options))
         self.assertTrue(all(item["candidate_search"].edge_region is not None
                             for item in adapter._test_metric_options))
         first_metadata = adapter._write_status.call_args_list[0].kwargs["stand_axis_debug"]
@@ -471,8 +460,6 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
                             for item in adapter._test_metric_options))
         self.assertTrue(all(item["candidate_search"].center[0] < 340.
                             for item in adapter._test_metric_options))
-        self.assertTrue(all(value.optical_depth_m is not None
-                            for value in adapter._test_scan_filters))
         model = adapter._write_status.call_args_list[0].kwargs["stand_axis_debug"]["metric_model"]
         hint = model["candidate_head_search"]["stopped_target_search"]
         self.assertTrue(hint["accepted"])
@@ -487,8 +474,6 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         adapter, payload = self.run_view("physical_offset_scan_ambiguous")
         self.assertTrue(all(item["candidate_search"].edge_region is None
                             for item in adapter._test_metric_options))
-        self.assertTrue(all(value.optical_depth_m is None
-                            for value in adapter._test_scan_filters))
         self.assertIsNone(payload)
         self.assertFalse(adapter.completed)
 
@@ -556,17 +541,17 @@ class MeasuredHeadObserverProcessingTests(unittest.TestCase):
         self.assertIsNone(adapter._test_pose_hints[0])
         self.assertIsNotNone(adapter._test_pose_hints[1])
 
-    def test_physical_projection_behind_camera_still_fits_but_cannot_admit_visible_head(self):
+    def test_physical_projection_behind_camera_cannot_start_unbounded_head_search(self):
         adapter, payload = self.run_view("physical_projection_behind_camera", publish_immediate=True)
         self.assertIsNone(payload)
         self.assertFalse(adapter.completed)
-        self.assertEqual(adapter._test_head_calls, ["fit"] * 7)
-        self.assertIsNone(adapter._test_pose_hints[0])
-        self.assertTrue(all(hint is not None for hint in adapter._test_pose_hints[1:]))
+        self.assertEqual(adapter._test_head_calls, [])
         metadata = adapter._write_status.call_args.kwargs["stand_axis_debug"]
         self.assertLess(metadata["metric_model"]["target_projection"]["depth_m"], 0.)
-        self.assertFalse(metadata["current_head_candidate_association"]["accepted"])
-        self.assertFalse(adapter._last_observation_update.axis_sample_accepted)
+        self.assertNotIn("current_head_candidate_association", metadata)
+        self.assertEqual(metadata["metric_model"]["candidate_head_search"]["nearest_acquisition"]["reason"],
+                         "candidate_bounded_head_search_unavailable")
+        self.assertIsNone(adapter._last_observation_update)
 
 
 if __name__ == "__main__":

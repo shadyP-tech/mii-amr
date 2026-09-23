@@ -122,8 +122,9 @@ class QrObservationPoseFallback:
             self.qr_id = qr_id
         # Both sensor clock and monotonic time must cover the same-stop grace.
         # Neither a timestamp leap nor delayed processing alone completes it.
-        delay = 0. if crop_bound else self.delay_sec
+        delay = 0. if crop_bound or current.qr_binding.target_reconciliation is not None else self.delay_sec
         self.effective_delay_sec = delay
+        diagnostic["delay_sec"] = delay
         if crop_bound:
             diagnostic.update(delay_sec=0., stand_axis_rad=current.retained_backside_orientation['stand_axis_rad'],
                               orientation_source='certified_backside', current_angle_refit=False)

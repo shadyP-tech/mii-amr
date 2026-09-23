@@ -92,6 +92,7 @@ class PassiveObserverStatusEvidence:
     observation_evidence_poisoned: bool | None = None
     observation_evidence_poison_reason: str | None = None
     camera_framing: dict[str, object] | None = None
+    qr_binding_diagnostic: dict | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -246,6 +247,7 @@ def load_passive_observer_status(
             else None
         ),
         camera_framing=validate_camera_framing_hint(payload.get("camera_framing")),
+        qr_binding_diagnostic=dict(_mapping(payload.get('qr_binding_diagnostic'))) or None,
     )
 
 
@@ -270,6 +272,9 @@ def format_passive_observer_failure(
         f"child_returncode={process.returncode}",
         f"state={status.state}",
     ]
+    if status.qr_binding_diagnostic:
+        details.append(f"decoded_qr_frames={status.qr_binding_diagnostic.get('decoded_frame_count')}")
+        details.append(f"last_qr_binding={status.qr_binding_diagnostic.get('reason')}")
     if status.reason is not None:
         details.append(f"reason={status.reason}")
     if (

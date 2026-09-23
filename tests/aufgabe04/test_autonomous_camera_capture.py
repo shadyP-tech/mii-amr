@@ -158,6 +158,21 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
             self.assertEqual(command[command.index("--scan-topology-profile") + 1], "linear")
             self.assertEqual(command[command.index("--qr-pose-fallback-delay-sec") + 1], "1.5")
 
+            monitor.return_value = PassiveObserverProcessEvidence(
+                completion_kind="artifact", artifact_kind="inspection_observation",
+                artifact_path=root / "ordinary" / "inspection_observation.json",
+                deadline_expired=False, returncode=0, cleanup_actions=("graceful_wait",), signals_sent=())
+            load_bound.side_effect = None
+            load_bound.return_value = {"qr_id": "QR_001", "completion_authorized": False}
+            runtime._capture_camera_recommendation(
+                profile=SimpleNamespace(map_frame="map", calibration_profile_sha256="c" * 64),
+                args=_args(model_path), candidate=_candidate(), output_dir=root / "ordinary",
+                candidate_crop_snapshot_path=root / "arrival_snapshot.json")
+            ordinary_command = popen.call_args.args[0]
+            self.assertNotIn("--retained-backside-axis-json", ordinary_command)
+            self.assertEqual(ordinary_command[ordinary_command.index("--candidate-crop-snapshot") + 1],
+                             str(root / "arrival_snapshot.json"))
+
     @patch.object(runtime, "_capture_camera_recommendation")
     def test_capture_adapter_preserves_inspection_path_and_legacy_success(self, capture):
         request = SimpleNamespace(candidate=_candidate(), output_dir=Path("out"), attempt_index=2)

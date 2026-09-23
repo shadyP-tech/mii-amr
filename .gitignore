@@ -42,6 +42,11 @@ tests/aufgabe04/*
 !tests/aufgabe04/*.py
 !tests/aufgabe04/fixtures/
 tests/aufgabe04/fixtures/*
+!tests/aufgabe04/fixtures/target_reconciliation_20260923/
+tests/aufgabe04/fixtures/target_reconciliation_20260923/*
+!tests/aufgabe04/fixtures/target_reconciliation_20260923/inputs.json
+!tests/aufgabe04/fixtures/target_reconciliation_20260923/frame.jpg
+!tests/aufgabe04/fixtures/target_reconciliation_20260923/candidate_snapshot.json
 !tests/aufgabe04/fixtures/opposite_identity_background_overlap/
 tests/aufgabe04/fixtures/opposite_identity_background_overlap/*
 !tests/aufgabe04/fixtures/opposite_identity_background_overlap/frame.jpg

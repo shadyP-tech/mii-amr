@@ -26,6 +26,8 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
 )
 from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_detection_admission
 from scripts.aufgabe04.real_robot.observer.stopped_target_search import StoppedTargetSearch
+from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class CurrentHeadCandidateAssociation:
     lidar_association: CameraRegisteredCandidateLidarAssociation | None = None
     head_orientation_bounds: CurrentHeadOrientationBounds | None = None
     search_reconciliation: dict | None = None
+    target_reconciliation: dict | None = None
 
     def metadata(self) -> dict:
         return {**asdict(self), "schema_version": 1,
@@ -63,7 +66,7 @@ def associate_current_measured_head(
     accepted_range_m, now_sec, max_scan_age_sec, min_cluster_sample_count,
     max_center_offset_ratio, max_camera_map_bearing_delta_rad,
     resolve_lidar_association=None,
-    search_reconciliation=None,
+    search_reconciliation=None, target_reconciliation=None,
 ) -> CurrentHeadCandidateAssociation:
     """Require current geometry, original projection bounds and a unique scan target.
 
@@ -147,14 +150,31 @@ def associate_current_measured_head(
         )
     except (TypeError, ValueError, ArithmeticError):
         return replace(result, reason="current_head_projection_invalid")
+    association_reference, association_limit = map_bearing_rad, max_camera_map_bearing_delta_rad
+    if target_reconciliation is not None:
+        try:
+            proof_scan, envelope, _, association_reference = validate_reconciliation(target_reconciliation,
+                scan_stamp_sec=scan.scan_stamp_sec)
+            if (proof_scan.scan_frame_id != scan.scan_frame_id
+                    or tuple(envelope.accepted_range_m) != tuple(accepted_range_m)
+                    or envelope.map_bearing_rad != map_bearing_rad):
+                raise ValueError('reconciliation scan frame changed')
+            bearing, uncertainty, _ = finite_target_bearing(center_px=center,intrinsics=intrinsics,
+                scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=accepted_range_m)
+            if abs(math.remainder(bearing-association_reference,math.tau))+uncertainty > cone_half_angle_rad:
+                raise ValueError('head ray interval misses reconciled cluster')
+            association_limit = cone_half_angle_rad
+            result = replace(result,target_reconciliation=target_reconciliation,fitted_head_bearing_rad=bearing)
+        except (ValueError,TypeError,KeyError,ArithmeticError) as exc:
+            return replace(result,reason=str(exc))
     association = associate_camera_registered_candidate_lidar_target(
-        scan, map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=bearing,
+        scan, map_bearing_rad=association_reference, observed_camera_bearing_rad=bearing,
         cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
         now_sec=now_sec, max_scan_age_sec=max_scan_age_sec,
         min_cluster_sample_count=min_cluster_sample_count,
-        max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
+        max_camera_map_bearing_delta_rad=association_limit,
     )
-    if resolve_lidar_association is not None:
+    if resolve_lidar_association is not None and target_reconciliation is None:
         association = resolve_lidar_association(association, scan)
     rejection = association.rejection_reason
     if association.associated:

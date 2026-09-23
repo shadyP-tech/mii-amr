@@ -1542,8 +1542,9 @@ def _capture_camera_recommendation(
     if retained_backside_axis_path is not None:
         if candidate_crop_snapshot_path is None:
             raise ValueError("retained backside orientation needs its candidate crop snapshot")
-        command.extend(["--retained-backside-axis-json", str(retained_backside_axis_path),
-                        "--candidate-crop-snapshot", str(candidate_crop_snapshot_path)])
+        command.extend(["--retained-backside-axis-json", str(retained_backside_axis_path)])
+    if candidate_crop_snapshot_path is not None:
+        command.extend(["--candidate-crop-snapshot", str(candidate_crop_snapshot_path)])
     process = subprocess.Popen(command)
     process_evidence = monitor_passive_observer_process(
         process=process,

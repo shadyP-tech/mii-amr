@@ -12,6 +12,7 @@ import time
 from scripts.aufgabe04.perception.stand_axis.head_geometry_acquisition import estimate_current_head_geometry
 from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
 from scripts.aufgabe04.perception.stand_axis.metric_head_search import metric_head_search
+from scripts.aufgabe04.perception.stand_axis.nearest_scan_head import nearest_scan_head_search
 from scripts.aufgabe04.perception.stand_axis.head_frame_detection import head_frame_detection
 from scripts.aufgabe04.perception.stand_axis.head_backside_classification import classify_current_head_backside
 from scripts.aufgabe04.perception.stand_axis.marker_work_schedule import (
@@ -137,6 +138,7 @@ def evaluate_viewer_head(
     position_uncertainty_m=None,
     camera_vertical=(0., 1., 0.),
     previous_head_miss=False, identity_search_attempt=None, search_decoder=None,
+    nearest_context=None,
 ):
     """Measure full-frame geometry once, returning neutral side classification.
 
@@ -167,6 +169,15 @@ def evaluate_viewer_head(
                 max_center_offset_ratio=max_center_offset_ratio, edge_region=lidar_edge_region)
         except ValueError:
             candidate_search = None
+    nearest_metadata = None
+    if nearest_context is not None and candidate_search is not None:
+        nearest, nearest_metadata = nearest_scan_head_search(**nearest_context,
+            model_profile=model_profile,fx=intrinsics.fx_px,fy=intrinsics.fy_px,
+            cx=intrinsics.cx_px,cy=intrinsics.cy_px,image_shape=frame.shape,
+            position_uncertainty_m=depth_uncertainty_m,bounded_search=candidate_search)
+        if nearest is not None:
+            # Preserve the original candidate volume as a hard pixel boundary.
+            candidate_search = replace(nearest,edge_region=candidate_search.edge_region)
     # One periodic image services identity first after failed head fitting.
     # No previous pixels, payloads or head corners cross this scheduling boundary.
     identity_fallback = identity_search_attempt or fallback_attempt
@@ -178,17 +189,28 @@ def evaluate_viewer_head(
             full_decoder=search_decoder if identity_search_attempt is not None and search_decoder else full_decoder,
             now=now)
     geometry_started = now()
-    estimate, debug = estimate_current_head_geometry(
-        cv2, frame, model_profile=model_profile,
-        camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
-        camera_cx_px=intrinsics.cx_px, camera_cy_px=intrinsics.cy_px,
-        pose_hint=pose_hint, edge_preprocess=edge_preprocess,
-        canny_low=canny_low, canny_high=canny_high,
-        deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
-        candidate_search=candidate_search,
-        proposal_filter=proposal_filter,
-        source_support=source_support,
-    )
+    if nearest_context is not None and candidate_search is None:
+        # Exploration must never turn an invalid candidate projection into an
+        # unrestricted viewer search. Bounded QR acquisition can still run.
+        from scripts.aufgabe04.perception.stand_axis.geometry import _unusable
+        from scripts.aufgabe04.perception.stand_axis.models import StandAxisEdgeDebugArtifacts
+        reason = "candidate_bounded_head_search_unavailable"
+        estimate = _unusable(reason, source=VIEWER_HEAD_SOURCE)
+        debug = StandAxisEdgeDebugArtifacts(edges=frame[:, :, 0]*0,
+            model_reason=reason, evidence_state="unobservable")
+        nearest_metadata = dict(reason=reason, candidate_association_required=True)
+    else:
+        estimate, debug = estimate_current_head_geometry(
+            cv2, frame, model_profile=model_profile,
+            camera_fx_px=intrinsics.fx_px, camera_fy_px=intrinsics.fy_px,
+            camera_cx_px=intrinsics.cx_px, camera_cy_px=intrinsics.cy_px,
+            pose_hint=pose_hint, edge_preprocess=edge_preprocess,
+            canny_low=canny_low, canny_high=canny_high,
+            deadline_monotonic_sec=deadline_monotonic_sec, estimator=estimator,
+            candidate_search=candidate_search,
+            proposal_filter=proposal_filter,
+            source_support=source_support,
+        )
     geometry_completed = now()
     geometry_ms = (geometry_completed-geometry_started)*1000.
     height = _finite_or_zero(expected_head_height_px)
@@ -213,6 +235,7 @@ def evaluate_viewer_head(
         head_frame_detection=head_frame_detection(estimate, debug),
         candidate_screen=None if candidate_search is None else candidate_search.diagnostics(),
         current_scan_proposal_filter_applied=proposal_filter is not None,
+        nearest_acquisition=nearest_metadata,
         lidar_edge_region=lidar_edge_region_diagnostics,
         geometry_completed_monotonic_sec=geometry_completed,
         current_image_geometry_refit=False, **identity_metadata)

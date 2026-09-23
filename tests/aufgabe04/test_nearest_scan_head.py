@@ -107,3 +107,33 @@ def test_viewer_preserves_original_scan_geometry_and_recording_values():
     assert metadata["ranges"] == [.5, None, .6]
     assert metadata["angle_increment"] == math.tau/3
     assert metadata["scan_stamp_sec"] == 10.
+
+
+def test_exploration_selects_nearest_only_after_candidate_region_filter(profile):
+    from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+    # A closer neighbor exists at image left, outside this candidate's region.
+    current=scan(((0.,.7),(.4,.4)))
+    unbounded,info=search(profile,current)
+    assert unbounded.center[0] < 200
+    bound=CandidateHeadSearch((400.,250.),100.,center_bounds_px=(300.,100.,500.,400.))
+    selected,info=search(profile,current,bounded_search=bound)
+    assert selected is not None
+    assert selected.center[0] == pytest.approx(400.,abs=1.)
+    assert info['candidate_association_required']
+    assert not info['motion_authorized']
+
+
+def test_bounded_nearest_acquisition_preserves_tied_target_ambiguity(profile):
+    from scripts.aufgabe04.perception.stand_axis.candidate_head_search import CandidateHeadSearch
+    bound=CandidateHeadSearch((400.,250.),160.,center_bounds_px=(50.,50.,750.,500.))
+    result,info=search(profile,scan(((-.2,.5),(.2,.5))),bounded_search=bound)
+    assert result is None
+    assert info['reason']=='nearest_head_scan_candidates_ambiguous'
+
+
+def test_candidate_range_excludes_foreground_and_background_before_nearest_selection(profile):
+    current = scan(((-.25,.35),(0.,.7),(.3,1.2)))
+    result, info = search(profile,current,accepted_range_m=(.6,.8))
+    assert result.center[0] == pytest.approx(400.,abs=1.)
+    assert len(info['candidates']) == 1
+    assert search(profile,current,accepted_range_m=(.8,1.))[0] is None

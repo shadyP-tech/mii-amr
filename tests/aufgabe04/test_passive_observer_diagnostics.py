@@ -94,6 +94,16 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
         self.assertFalse(status.retry_exhausted)
         self.assertIsNone(status.load_error)
 
+    def test_qr_binding_reason_survives_terminal_tf_status(self):
+        diagnostic = dict(decoded_frame_count=71, texts=["QR_004"], accepted=False,
+            reason="camera_map_bearing_interval_exceeds_limit", diagnostic_only=True)
+        status = self._load_payload(dict(state="tf_retry_exhausted", qr_binding_diagnostic=diagnostic))
+        self.assertEqual(status.qr_binding_diagnostic, diagnostic)
+        message = format_passive_observer_failure(candidate_uid="candidate", process=self._process(),
+            status=status, process_evidence_path=Path("process.json"))
+        self.assertIn("71", message)
+        self.assertIn("camera_map_bearing_interval_exceeds_limit", message)
+
     def test_missing_status_is_explicit_and_does_not_raise(self) -> None:
         status = load_passive_observer_status(Path("missing-status.json"))
 

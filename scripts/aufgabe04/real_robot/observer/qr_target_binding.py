@@ -20,6 +20,8 @@ from scripts.aufgabe04.perception.candidate_lidar_association import (
 from scripts.aufgabe04.perception.stand_axis_handoff import rectified_pixel_bearing_in_scan
 from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
+from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
+from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,8 @@ class QrTargetBinding:
     association: dict | None = None
     current_head_binding: dict | None = None
     independent_registration: dict | None = None
+    target_reconciliation: dict | None = None
+    finite_bearing: dict | None = None
 
     def metadata(self) -> dict:
         return {**asdict(self), "motion_authorized": False,
@@ -46,6 +50,7 @@ def bind_qr_observations_to_target(
     camera_registration_accepted: bool,
     max_camera_map_bearing_delta_rad: float,
     allow_independent_registration: bool = False,
+    target_reconciliation=None,
 ) -> QrTargetBinding:
     observations = tuple(observations or ())
     count = len(observations)
@@ -86,10 +91,46 @@ def bind_qr_observations_to_target(
             cone_half_angle_rad=cone_half_angle_rad,
             max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
             accepted_range_m=accepted_range_m, now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
-    if camera_registration_accepted or independent:
+    finite = None
+    reference = map_bearing_rad
+    limit = max_camera_map_bearing_delta_rad
+    if target_reconciliation is not None or any(scan_from_camera.translation_xyz_m):
+        try:
+            depth_envelope = envelope or qr_registration_envelope(scan,
+                map_bearing_rad=map_bearing_rad, cone_half_angle_rad=cone_half_angle_rad,
+                max_camera_map_bearing_delta_rad=limit, accepted_range_m=accepted_range_m,
+                now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
+            if not depth_envelope.associated or depth_envelope.eligible_cluster_count != 1:
+                raise ValueError('finite_qr_range_not_unique')
+            bearing, uncertainty, depth = finite_target_bearing(
+                center_px=(sum(p[0] for p in corners)/4+roi.x0, sum(p[1] for p in corners)/4+roi.y0),
+                intrinsics=intrinsics, scan_from_camera=scan_from_camera,
+                distance_m=depth_envelope.distance_m, range_interval_m=accepted_range_m)
+            finite = dict(policy='calibrated_scan_range_ray', bearing_rad=bearing,
+                uncertainty_rad=uncertainty, optical_depth_m=depth,
+                range_m=depth_envelope.distance_m, range_interval_m=accepted_range_m,
+                scan_from_camera=asdict(scan_from_camera), intrinsics=asdict(intrinsics))
+            if target_reconciliation is not None:
+                proof_scan, proof_envelope, _, reference = validate_reconciliation(
+                    target_reconciliation, scan_stamp_sec=scan.scan_stamp_sec)
+                # Processing advances the clock after the stopped proof. Age
+                # diagnostics may differ; target geometry and indices may not.
+                fields = ('scan_stamp_sec','scan_frame_id','selected_cluster_source_indices',
+                          'distance_m','accepted_range_m','map_bearing_rad','cone_half_angle_rad')
+                if (any(getattr(proof_envelope,k) != getattr(depth_envelope,k) for k in fields)
+                        or proof_scan.scan_frame_id != scan.scan_frame_id):
+                    raise ValueError('reconciliation_different_current_cluster')
+                limit = cone_half_angle_rad
+            if abs(math.remainder(bearing-reference, math.tau))+uncertainty > limit:
+                raise ValueError('camera_map_bearing_interval_exceeds_limit')
+            common.update(observed_camera_bearing_rad=bearing, map_bearing_rad=reference)
+        except (ValueError,TypeError,KeyError,ArithmeticError) as exc:
+            return QrTargetBinding(False,str(exc),symbol_count=1,camera_bearing_rad=bearing,
+                finite_bearing=finite)
+    if camera_registration_accepted or independent or target_reconciliation is not None:
         association = associate_camera_registered_candidate_lidar_target(
             scan, **common,
-            max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
+            max_camera_map_bearing_delta_rad=limit,
         )
         cluster = association.search_association
     else:
@@ -110,6 +151,7 @@ def bind_qr_observations_to_target(
     return QrTargetBinding(
         accepted, "decoded_qr_target_associated" if accepted else reason,
         (observation.text,) if accepted else (), 1, bearing, asdict(association),
+        target_reconciliation=target_reconciliation, finite_bearing=finite,
         independent_registration=(None if envelope is None else {
             "policy": "decoded_quad_unique_registration_envelope",
             "envelope": asdict(envelope), "head_geometry_required": False,

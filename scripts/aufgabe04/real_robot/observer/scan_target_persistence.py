@@ -453,6 +453,10 @@ class StoppedScanTargetPersistence:
         and new parameters. Copy the lists/deque rather than every raw beam for
         each competing proposal. Commit the final selected head through resolve.
         """
+        # A failed bearing gate has no camera cone to validate or stitch.
+        # Preserve that rejection instead of disguising it as invalid input.
+        if association.search_association is None:
+            return association
         if (association.witnessed_fragmentation is None
                 and registered_target_is_unique(association)):
             # A unique current cluster needs no historical connecting beams.

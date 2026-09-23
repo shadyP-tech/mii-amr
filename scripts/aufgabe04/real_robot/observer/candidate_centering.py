@@ -12,6 +12,7 @@ import math
 from typing import Mapping
 
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector, transform_point
+from scripts.aufgabe04.real_robot.observer.finite_target_bearing import point_on_scan_range
 from scripts.aufgabe04.perception.stand_axis_handoff.models import RigidTransform
 from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, validate_intrinsics
 from scripts.aufgabe04.real_robot.observer.evidence import EvidencePose
@@ -54,19 +55,11 @@ def center_point_in_base(*, center_px, intrinsics, distance_m,
         _check_transform(transform)
     if scan_from_camera.child_frame != base_from_camera.child_frame:
         raise ValueError("camera transforms have different optical frames")
-    ray = ((u-intrinsics.cx_px)/intrinsics.fx_px, (v-intrinsics.cy_px)/intrinsics.fy_px, 1.)
-    d = rotate_vector(ray, scan_from_camera.rotation_xyzw)
-    t = scan_from_camera.translation_xyz_m
-    a, b = d[0]**2+d[1]**2, 2*(t[0]*d[0]+t[1]*d[1])
-    c = t[0]**2+t[1]**2-distance_m**2
-    discriminant = b*b-4*a*c
-    if a <= 1e-12 or discriminant < 0:
-        raise ValueError("camera ray does not intersect the scan range")
-    roots = tuple(depth for depth in ((-b-math.sqrt(discriminant))/(2*a),
-                                      (-b+math.sqrt(discriminant))/(2*a)) if depth > 1e-9)
-    if len(roots) != 1:
-        raise ValueError("scan range does not define a unique positive optical depth")
-    return transform_point(tuple(roots[0]*value for value in ray), base_from_camera)
+    _, depth = point_on_scan_range(center_px=center_px,intrinsics=intrinsics,
+        scan_from_camera=scan_from_camera,distance_m=distance_m)
+    return transform_point((depth*(u-intrinsics.cx_px)/intrinsics.fx_px,
+                            depth*(v-intrinsics.cy_px)/intrinsics.fy_px,depth),base_from_camera)
+
 
 
 def project_center_after_turn(*, point_base, yaw_rad, intrinsics, base_from_camera):
@@ -150,6 +143,7 @@ class CameraCenteringAdvisory:
     completed_turn_count: int
 
     target_support: dict | None = None
+    target_reconciliation: dict | None = None
 
     @property
     def deadband_px(self):
@@ -161,6 +155,8 @@ class CameraCenteringAdvisory:
             "target_u_px": self.intrinsics.width_px/2., "deadband_px": self.deadband_px,
             "remaining_rotation_budget_rad": MAX_CENTERING_TRAVEL_RAD-self.consumed_rotation_rad,
             "motion_authorized": False, "completion_authorized": False}
+        if self.target_reconciliation is None:
+            payload.pop('target_reconciliation')
         if self.target_support is None:
             payload.pop("target_support")
         return {**payload, _HASH_KEY: _digest(payload)}
@@ -217,7 +213,8 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
             search.selected_cluster_sample_count,
             math.copysign(min(abs(required), MAX_CENTERING_STEP_RAD), required), required,
             consumed_rotation_rad, completed_turn_count,
-            target_support=association.metadata() if qr_support else None)
+            target_support=association.metadata() if qr_support else None,
+            target_reconciliation=getattr(association,'target_reconciliation',None))
         # Same structural and derived-value validation applies at the process boundary.
         return validate_camera_centering_advisory(advisory.metadata())
     except (AttributeError, TypeError, ValueError, ArithmeticError):
@@ -296,6 +293,30 @@ def validate_camera_centering_advisory(payload: Mapping, *, candidate_uid=None,
                     or proof['lidar_association']['distance_m'] != result.associated_range_m
                     or cluster['selected_cluster_sample_count'] != result.selected_cluster_sample_count):
                 raise ValueError('centering QR support differs from current observation')
+        if result.target_reconciliation is not None:
+            from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+            from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
+            proof = result.target_reconciliation
+            proof_scan, envelope, _, reference = validate_reconciliation(proof,candidate_uid=result.candidate_uid,
+                image_stamp_sec=result.image_stamp_sec,scan_stamp_sec=result.scan_stamp_sec)
+            if (proof['target_key'] != result.target_key or proof['epoch'] != result.motion_epoch
+                    or proof['planning_frame'] != result.planning_frame
+                    or tuple(proof['entries'][-1]['robot_pose']) != tuple(asdict(result.anchor_pose).values())):
+                raise ValueError('centering reconciliation epoch changed')
+            bearing, uncertainty, _ = finite_target_bearing(center_px=result.measured_center_px,
+                intrinsics=result.intrinsics,scan_from_camera=result.scan_from_camera,
+                distance_m=envelope.distance_m,range_interval_m=envelope.accepted_range_m)
+            if abs(math.remainder(bearing-reference,math.tau))+uncertainty > math.radians(3)+1e-9:
+                raise ValueError('centering ray misses reconciled target')
+            from scripts.aufgabe04.perception.candidate_lidar_association import associate_camera_registered_candidate_lidar_target
+            current = associate_camera_registered_candidate_lidar_target(proof_scan,
+                map_bearing_rad=reference,observed_camera_bearing_rad=bearing,
+                cone_half_angle_rad=math.radians(3),accepted_range_m=envelope.accepted_range_m,
+                now_sec=result.created_at_sec,max_scan_age_sec=.5,min_cluster_sample_count=1,
+                max_camera_map_bearing_delta_rad=math.radians(3))
+            if (not current.associated or current.distance_m != result.associated_range_m
+                    or current.search_association.selected_cluster_sample_count != result.selected_cluster_sample_count):
+                raise ValueError('centering range differs from reconciled current cluster')
         required = solve_camera_centering(center_px=result.measured_center_px,
             intrinsics=result.intrinsics, distance_m=result.associated_range_m,
             scan_from_camera=result.scan_from_camera, base_from_camera=result.base_from_camera,
