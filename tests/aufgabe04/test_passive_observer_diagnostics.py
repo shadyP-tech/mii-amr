@@ -37,6 +37,20 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
             signals_sent=("SIGINT",),
         )
 
+    def test_opposite_identity_states_enter_bounded_recovery_but_not_after_conflict_or_crash(self):
+        for state in ('opposite_identity_collecting','opposite_identity_crop_conflict','opposite_identity_unavailable'):
+            with self.subTest(state=state):
+                status=self._load_payload(dict(state=state,observation_evidence=dict(
+                    accepted_frame_count=360,lidar_rejection_count=44,poisoned=False)))
+                self.assertTrue(is_candidate_local_observer_timeout(process=self._process(),status=status))
+                self.assertFalse(is_candidate_local_observer_timeout(process=self._process(),
+                    status=replace(status,observation_evidence_poisoned=True)))
+                self.assertFalse(is_candidate_local_observer_timeout(process=replace(self._process(),returncode=1),status=status))
+                message=format_passive_observer_failure(candidate_uid='candidate',process=self._process(),
+                    status=status,process_evidence_path=Path('process.json'))
+                self.assertIn('retained backside angle',message)
+                self.assertNotIn('without a usable axis',message)
+
     def test_loads_retry_and_consensus_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             status_path = Path(tmp) / "observer_status.json"

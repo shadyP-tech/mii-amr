@@ -32,6 +32,7 @@ from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
     CandidateArrivalAdmissionConfig, evaluate_candidate_arrival_admission,
 )
 from scripts.aufgabe04.real_robot.candidate.centering_execution import capture_with_centering
+from scripts.aufgabe04.real_robot.candidate.retained_orientation import retain_orientation_after_arrival
 from scripts.aufgabe04.navigation.planning.map_io import read_map_metadata
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionEffects, CandidateInspectionRouteUnavailableError,
@@ -127,7 +128,8 @@ def execute_local_candidate_inspection(
     def plan_and_move(frame, canonical_normal, root, index, source_path,
                       *, purpose="diverse_inspection", offset=None, camera_recovery=None):
         nonlocal motion_serial
-        frame = fresh_frame(root / "planning")
+        source_frame = frame
+        frame = retain_orientation_after_arrival(source_frame, fresh_frame(root / "planning"), root / "planning")
         current = pose(frame)
         if current is None:
             raise RuntimeError("inspection route lacks a fresh finite start pose")
@@ -226,7 +228,7 @@ def execute_local_candidate_inspection(
             )
         if result.planning_frame is None and result.observation_pose is None:
             result = replace(result, observation_pose=pose(fallback_frame))
-        return result
+        return retain_orientation_after_arrival(fallback_frame, result, root)
 
     def admit_corrected(root, fallback_frame, index):
         """Correct a bearing-only miss before spending an observer slot."""
@@ -385,12 +387,13 @@ def execute_local_candidate_inspection(
         return capture_observation(observation_request_type(frame.candidate, output, index))
 
     def centered_capture(frame, output, index):
-        if getattr(frame, "retained_backside_axis_path", None) is not None:
-            return capture_frame(frame, output, index), frame
         def capture(current, destination, view, enabled, timeout, not_before):
             return capture_observation(observation_request_type(
                 current.candidate, destination, view, allow_centering=enabled,
                 timeout_sec=timeout, observation_not_before_sec=not_before,
+                retained_backside_axis_path=current.retained_backside_axis_path,
+                candidate_crop_snapshot_path=(None if current.retained_backside_axis_path is None
+                    else current.decision_binding.camera_snapshot_path),
             ))
 
         def turn(current, advisory_path, root, serial, remaining, previous_result):
@@ -403,7 +406,7 @@ def execute_local_candidate_inspection(
             # The sealed yaw-only child proves its signed turn and stopped
             # odometry. Reproject localization/candidate geometry afresh; old
             # map-facing yaw is not an admission criterion for this new view.
-            updated = fresh_frame(root / "arrival")
+            updated = retain_orientation_after_arrival(current, fresh_frame(root / "arrival"), root / "arrival")
             decision = evaluate_candidate_arrival_admission(
                 pose(updated), target_x_m=updated.candidate.geometry.x_m,
                 target_y_m=updated.candidate.geometry.y_m,

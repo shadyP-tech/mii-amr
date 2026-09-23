@@ -15,6 +15,9 @@ from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vect
 from scripts.aufgabe04.perception.stand_axis_handoff.models import RigidTransform
 from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, validate_intrinsics
 from scripts.aufgabe04.real_robot.observer.evidence import EvidencePose
+from scripts.aufgabe04.real_robot.observer.opposite_target_support import (
+    OppositeTargetSupport, validate_target_support, POLICY as QR_SUPPORT_SOURCE,
+)
 
 MAX_CENTERING_STEP_RAD = math.radians(6.)
 MAX_CENTERING_TRAVEL_RAD = math.radians(12.)
@@ -146,16 +149,20 @@ class CameraCenteringAdvisory:
     consumed_rotation_rad: float
     completed_turn_count: int
 
+    target_support: dict | None = None
+
     @property
     def deadband_px(self):
         return self.intrinsics.fx_px*math.tan(CENTERING_DEADBAND_RAD)
 
     def metadata(self):
-        payload = {**asdict(self), "schema_version": 1, "association_source": _SOURCE,
+        payload = {**asdict(self), "schema_version": 1, "association_source": (_SOURCE if self.target_support is None else QR_SUPPORT_SOURCE),
             "eligible_cluster_count": 1, "image_width_px": self.intrinsics.width_px,
             "target_u_px": self.intrinsics.width_px/2., "deadband_px": self.deadband_px,
             "remaining_rotation_budget_rad": MAX_CENTERING_TRAVEL_RAD-self.consumed_rotation_rad,
             "motion_authorized": False, "completion_authorized": False}
+        if self.target_support is None:
+            payload.pop("target_support")
         return {**payload, _HASH_KEY: _digest(payload)}
 
 
@@ -173,7 +180,10 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
     try:
         lidar = association.lidar_association
         search = lidar.search_association if lidar is not None else None
-        if (not association.accepted or not (association.head_admission.accepted
+        qr_support = isinstance(association, OppositeTargetSupport)
+        if qr_support:
+            validate_target_support(association.metadata())
+        if (not association.accepted or not (qr_support or association.head_admission.accepted
                 or association.head_orientation_bounds is not None)
                 or lidar is None or not lidar.associated or search is None
                 or not search.associated or search.eligible_cluster_count != 1
@@ -206,7 +216,8 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
             tuple(association.full_image_center_px), lidar.distance_m,
             search.selected_cluster_sample_count,
             math.copysign(min(abs(required), MAX_CENTERING_STEP_RAD), required), required,
-            consumed_rotation_rad, completed_turn_count)
+            consumed_rotation_rad, completed_turn_count,
+            target_support=association.metadata() if qr_support else None)
         # Same structural and derived-value validation applies at the process boundary.
         return validate_camera_centering_advisory(advisory.metadata())
     except (AttributeError, TypeError, ValueError, ArithmeticError):
@@ -274,6 +285,17 @@ def validate_camera_centering_advisory(payload: Mapping, *, candidate_uid=None,
                 or abs(result.image_stamp_sec-result.scan_stamp_sec) > .1
                 or abs(result.image_stamp_sec-result.odom_stamp_sec) > .1):
             raise ValueError("centering sensor tuple or travel budget is invalid")
+        if result.target_support is not None:
+            proof = validate_target_support(result.target_support)
+            cluster = proof['lidar_association']['search_association']
+            if (tuple(proof['center_px']) != result.measured_center_px
+                    or proof['image_stamp_sec'] != result.image_stamp_sec
+                    or cluster['scan_stamp_sec'] != result.scan_stamp_sec
+                    or cluster['scan_frame_id'] != result.scan_from_camera.parent_frame
+                    or tuple(proof['image_shape']) != (result.intrinsics.height_px, result.intrinsics.width_px)
+                    or proof['lidar_association']['distance_m'] != result.associated_range_m
+                    or cluster['selected_cluster_sample_count'] != result.selected_cluster_sample_count):
+                raise ValueError('centering QR support differs from current observation')
         required = solve_camera_centering(center_px=result.measured_center_px,
             intrinsics=result.intrinsics, distance_m=result.associated_range_m,
             scan_from_camera=result.scan_from_camera, base_from_camera=result.base_from_camera,

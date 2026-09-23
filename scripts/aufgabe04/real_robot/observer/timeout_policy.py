@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES = frozenset(
     {
         "collecting_consensus",
+        "opposite_identity_collecting",
+        "opposite_identity_crop_conflict",
+        "opposite_identity_unavailable",
         "evidence_not_committable",
         "head_size_projection_mismatch",
         "lidar_target_mismatch",

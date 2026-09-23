@@ -192,6 +192,25 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
             or not box[0] < _number(center[0], 'crop center') < box[2]
             or not box[1] < _number(center[1], 'crop center') < box[3]):
         raise ValueError('QR identity crop excludes target center')
+    support = crop.get('target_support')
+    isolated = crop.get('sampling') == 'isolated_current_qr_quad'
+    if isolated:
+        from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_target_support
+        validate_target_support(support)
+        cluster = support['lidar_association']['search_association']
+        if (support['image_stamp_sec'] != image or tuple(support['image_shape']) != tuple(shape)
+                or tuple(support['center_px']) != tuple(center)
+                or cluster['scan_stamp_sec'] != scan
+                or cluster['scan_frame_id'] != data['qr_binding']['association']['scan_frame_id']
+                or not set(cluster['selected_cluster_source_indices']).issubset(
+                    data['qr_binding']['association']['selected_cluster_source_indices'])
+                or any(not box[0] <= p[0] < box[2] or not box[1] <= p[1] < box[3]
+                       for p in support['corners_px'])):
+            raise ValueError('isolated QR support differs from current crop')
+        target_depth = crop.get('target_depth_interval_m')
+        _depth_interval(target_depth)
+        if not target_depth[0] <= support['depth_m'] <= target_depth[1]:
+            raise ValueError('isolated target depth is outside its uncertainty interval')
     competitors = crop.get('competitors')
     if not isinstance(competitors, list):
         raise ValueError('QR identity crop lacks neighbor review')
@@ -199,10 +218,23 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
         other = competitor.get('bounds_xyxy') if isinstance(competitor, Mapping) else None
         if (not isinstance(other, (list, tuple)) or len(other) != 4
                 or any(type(x) is not int for x in other)
-                or other[0] >= other[2] or other[1] >= other[3]
-                or box[0] < other[2] and other[0] < box[2] and box[1] < other[3] and other[1] < box[3]):
+                or other[0] >= other[2] or other[1] >= other[3]):
             raise ValueError('QR identity crop overlaps a neighboring candidate')
+        overlap = box[0] < other[2] and other[0] < box[2] and box[1] < other[3] and other[1] < box[3]
+        if overlap:
+            if not isolated or competitor.get('occluded_by_target_symbol') is not True:
+                raise ValueError('QR identity crop overlaps a neighboring candidate')
+            _depth_interval(competitor.get('depth_interval_m'))
+            if competitor['depth_interval_m'][0] <= target_depth[1]:
+                raise ValueError('QR neighbor depth is not separated from target')
     search = crop.get('search')
     if (not isinstance(search, Mapping) or search.get('accepted') is not True
             or search.get('envelope') != data['qr_binding']['association']):
         raise ValueError('QR identity crop differs from current scan search')
+
+
+def _depth_interval(value):
+    if (not isinstance(value, (list, tuple)) or len(value) != 2
+            or any(type(v) not in (int, float) or not math.isfinite(v) for v in value)
+            or not 0 <= value[0] < value[1]):
+        raise ValueError('QR crop depth interval invalid')

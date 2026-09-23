@@ -1596,7 +1596,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     scan_translation, scan_rotation),
                 camera_from_map=RigidTransform(self.profile.camera_optical_frame, self.profile.map_frame,
                     camera_translation, camera_rotation),
-                map_bearing_rad=scan_bearing, accepted_range_m=(lower_surface_bound, upper_surface_bound))
+                map_bearing_rad=scan_bearing, accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                scan_from_camera=scan_from_camera_geometry,
+                base_from_camera=RigidTransform(self.profile.base_frame, self.profile.camera_optical_frame,
+                    *_transform_values(base_from_camera)), image_stamp=image_message.header.stamp)
             return
 
         # A metric pose is expressed in camera coordinates, so its tracking

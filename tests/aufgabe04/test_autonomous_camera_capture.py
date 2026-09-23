@@ -267,6 +267,65 @@ class AutonomousCameraCaptureTests(unittest.TestCase):
 
     @patch.object(runtime.subprocess, "Popen")
     @patch.object(runtime, "monitor_passive_observer_process")
+    def test_opposite_identity_deadline_becomes_typed_deferral(
+        self,
+        monitor,
+        _popen,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "attempt"
+
+            def expire(**kwargs):
+                status_path = kwargs["recommendation_path"].parent / (
+                    "observer_status.json"
+                )
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "state": "opposite_identity_collecting",
+                            "axis_consensus": {
+                                "sample_count": 2,
+                                "peak_sample_count": 6,
+                                "required_sample_count": 7,
+                            },
+                            "candidate_lidar_association": {
+                                "nearest_range_delta_m": 0.094,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return PassiveObserverProcessEvidence(
+                    completion_kind="deadline",
+                    artifact_kind=None,
+                    artifact_path=None,
+                    deadline_expired=True,
+                    returncode=130,
+                    cleanup_actions=("send_sigint", "wait_after_sigint"),
+                    signals_sent=("SIGINT",),
+                )
+
+            monitor.side_effect = expire
+            with self.assertRaises(CandidateObservationUnavailableError) as caught:
+                runtime._capture_camera_recommendation(
+                    profile=object(),
+                    args=_args(_write_measured_model(root)),
+                    candidate=_candidate(),
+                    output_dir=output_dir,
+                    observation_attempt_index=1,
+                )
+
+        error = caught.exception
+        self.assertEqual(error.candidate_uid, "survey_candidate_0004")
+        self.assertEqual(error.observation_attempt_index, 1)
+        self.assertEqual(error.process_evidence["completion_kind"], "deadline")
+        self.assertEqual(error.status_evidence["state"], "opposite_identity_collecting")
+        self.assertEqual(error.status_evidence["peak_consensus_sample_count"], 6)
+        self.assertIn("nearest_lidar_range_delta_m=0.094", str(error))
+
+    @patch.object(runtime.subprocess, "Popen")
+    @patch.object(runtime, "monitor_passive_observer_process")
     def test_axis_artifact_is_terminal_and_command_enables_event_history(
         self,
         monitor,

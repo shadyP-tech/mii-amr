@@ -85,6 +85,9 @@ class QrObservationPoseFallback:
         diagnostic = {"ready": False, "policy": "qr_verified_observation_pose",
                       "delay_sec": self.delay_sec, "stand_axis_rad": None,
                       "facing_ready": False, "motion_authorized": False}
+        if current.retained_backside_orientation is not None:
+            diagnostic.update(delay_sec=0., stand_axis_rad=current.retained_backside_orientation['stand_axis_rad'],
+                orientation_source='certified_backside', current_angle_refit=False)
         current.metadata["qr_observation_pose_fallback"] = diagnostic
 
         def reject(reason):

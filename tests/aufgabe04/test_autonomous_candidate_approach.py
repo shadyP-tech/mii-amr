@@ -784,6 +784,11 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                         Pose2D(0.70, 1.0, math.pi),
                         PlanarTransform2D(0.0, 0.0, math.pi / 2.0),
                     ),
+                    # A centering turn receives a newly admitted localization frame.
+                    CandidatePlanningFrame(
+                        Pose2D(.70*math.cos(.1)-math.sin(.1), .70*math.sin(.1)+math.cos(.1), math.pi+.15),
+                        PlanarTransform2D(0.0, 0.0, math.pi/2+.1),
+                    ),
                 )
             )
             axis_path = root / "axis.json"
@@ -853,12 +858,15 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     return CandidateObservation(None, None, axis_path)
                 self.assertIsNotNone(request.retained_backside_axis_path)
                 retained = load_backside_axis_planning_observation(request.retained_backside_axis_path)
-                self.assertAlmostEqual(retained.stand_axis_rad, math.pi / 2.0)
+                self.assertAlmostEqual(retained.stand_axis_rad, math.pi / 2.0 + (0. if request.observation_not_before_sec is None else .1))
                 self.assertAlmostEqual(retained.stand_x_m, request.candidate.geometry.x_m)
                 self.assertAlmostEqual(retained.stand_y_m, request.candidate.geometry.y_m)
                 self.assertEqual(retained.source_axis_observation_path.resolve(), axis_path.resolve())
                 self.assertTrue(request.candidate_crop_snapshot_path.is_file())
-                self.assertFalse(request.allow_centering)
+                self.assertTrue(request.allow_centering)
+                if request.observation_not_before_sec is None:
+                    return CandidateObservation(None,None,None,centering_advisory_path=root/'centering.json')
+                self.assertEqual(request.observation_not_before_sec,12.)
                 return CandidateObservation(
                     request.output_dir / "recommendation.json",
                     "QR_A",
@@ -880,6 +888,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     run_motion_leg=run_motion,
                     run_startup_reseal_motion_leg=run_replacement,
                     capture_observation=capture,
+                    run_centering_turn=lambda **kwargs: SimpleNamespace(result_path=root/'turn.json',
+                        result=dict(actual_angular_travel_rad=.05, stopped_at_sec=12.)),
                     validate_facing=lambda request: {
                         "candidate_uid": request.candidate.candidate_uid
                     },

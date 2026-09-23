@@ -84,6 +84,8 @@ class OppositeIdentityTests(unittest.TestCase):
             stack.enter_context(patch(module+'_rectify_bgr_frame', return_value=frame))
             fit = stack.enter_context(patch(module+'estimate_stand_axis_from_metric_model', side_effect=AssertionError('front fit requested')))
             viewer = stack.enter_context(patch(module+'evaluate_viewer_head', side_effect=AssertionError('front search requested')))
+            stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.current_scan_qr_search', return_value=(attempt, crop['search'])))
+            stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_opposite_target_support', return_value=None))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.exclusive_identity_crop', return_value=(attempt, crop)))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_qr_observations_bgr', side_effect=decode))
             adapter._process_latest()
@@ -149,11 +151,13 @@ class OppositeIdentityTests(unittest.TestCase):
         target = self.base.root / 'rotated_target.json'
         digest, x, y = write_candidate_frame_projection_fixture(target, candidate_uid='candidate',
             canonical_x_m=.6, canonical_y_m=0., transform_x_m=.1, transform_y_m=.2, transform_yaw_rad=.4)
-        retained = self.base.root / 'rotated_orientation.json'
-        write_backside_axis_frame_projection(retained, axis_evidence_path=self.path,
-            target_candidate_projection_path=target, target_candidate_projection_sha256=digest,
-            target_candidate_x_m=x, target_candidate_y_m=y)
-        record = orientation_record(retained)
+        from scripts.aufgabe04.real_robot.candidate.approach import _CandidateObservationFrame
+        from scripts.aufgabe04.real_robot.candidate.retained_orientation import retain_orientation_after_arrival
+        source = _CandidateObservationFrame(None,None,None,None,retained_backside_axis_path=self.path)
+        arrival = _CandidateObservationFrame(None,SimpleNamespace(geometry=SimpleNamespace(x_m=x,y_m=y)),
+            None,SimpleNamespace(projection_path=target,projection_sha256=digest))
+        arrived = retain_orientation_after_arrival(source,arrival,self.base.root/'new_arrival')
+        record = orientation_record(arrived.retained_backside_axis_path)
         self.assertAlmostEqual(math.remainder(record['stand_axis_rad'] - math.pi/2 - .4, math.pi), 0.)
         self.assertEqual(record['bounded_orientation']['half_width_rad'], bounds()['half_width_rad'])
         self.assertEqual(record['axis_sample_count'], 7)
@@ -189,13 +193,12 @@ class ExclusiveCropTests(unittest.TestCase):
             intrinsics=intr,model_profile=model,image_stamp_sec=100.,scan=SimpleNamespace(scan_stamp_sec=100.))
         with patch('scripts.aufgabe04.real_robot.observer.opposite_identity_crop.current_scan_qr_search', return_value=(attempt,search)):
             result, meta = exclusive_identity_crop(**opts)
-            self.assertIsNotNone(result)
-            for other in meta['competitors']:
-                self.assertLessEqual(result.roi.x1, other['bounds_xyxy'][0])
+            self.assertIsNone(result)
+            self.assertEqual(meta['reason'], 'target_crop_overlap_unresolved')
             neighbor.geometry.x_m=0.
             result, meta = exclusive_identity_crop(**opts)
             self.assertIsNone(result)
-            self.assertEqual(meta['reason'],'neighbor_overlaps_target_center')
+            self.assertEqual(meta['reason'],'target_crop_overlap_unresolved')
 
     def test_crop_search_failure_never_binds_text(self):
         with patch('scripts.aufgabe04.real_robot.observer.opposite_identity_crop.current_scan_qr_search',

@@ -331,7 +331,9 @@ def format_passive_observer_failure(
     if status.load_error is not None:
         details.append(f"status_load_error={status.load_error}")
     details.append(f"observer_process_evidence={process_evidence_path}")
-    return f"{lead} for {candidate_uid} without a usable axis; " + "; ".join(
+    missing = ("without a candidate-associated QR; retained backside angle does not need new consensus"
+               if status.state.startswith("opposite_identity_") else "without a usable axis")
+    return f"{lead} for {candidate_uid} {missing}; " + "; ".join(
         details
     )
 
