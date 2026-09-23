@@ -14,10 +14,15 @@ from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapsho
 
 
 def orientation_record(path):
+    from scripts.aufgabe04.artifacts.retained_orientation_cache import cached_orientation_record
+    return cached_orientation_record(path, _orientation_record)
+
+
+def _orientation_record(path):
     path = Path(path).resolve()
     axis = load_backside_axis_frame_projection(path)
     source = json.loads(axis.source_axis_observation_path.read_text())
-    return dict(policy="certified_backside_orientation_retained", path=str(path),
+    record = dict(policy="certified_backside_orientation_retained", path=str(path),
         file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         projection_sha256=axis.projection_sha256,
         candidate_uid=axis.stand_id, planning_frame=axis.planning_frame,
@@ -29,6 +34,9 @@ def orientation_record(path):
         opposite_face_normal_rad=axis.opposite_face_normal_rad,
         axis_sample_count=axis.axis_sample_count, current_angle_refit=False,
         motion_authorized=False)
+    if axis.validated_target_center is not None:
+        record["validated_target_center"] = axis.validated_target_center
+    return record
 
 
 def validate_retained_orientation(record, *, candidate_uid, planning_frame, stand_center, model_sha256):
@@ -46,7 +54,8 @@ def validate_retained_orientation(record, *, candidate_uid, planning_frame, stan
 
 
 def opposite_view_matches(record, pose):
-    side = math.atan2(pose.y_m-record['stand_center']['y_m'], pose.x_m-record['stand_center']['x_m'])
+    center = record.get('validated_target_center') or record['stand_center']
+    side = math.atan2(pose.y_m-center['y_m'], pose.x_m-center['x_m'])
     interval = record['bounded_orientation']
     half_width = 0. if interval is None else interval['half_width_rad']
     return abs(math.remainder(side-record['opposite_face_normal_rad'], math.tau))+half_width < math.pi/2

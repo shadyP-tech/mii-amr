@@ -7,9 +7,12 @@ route, and returns metrics without creating artifacts or authorizing motion.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 from pathlib import Path
 from typing import Mapping
+
+from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
 
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     INSPECTION_VIEW_BEARING_MODE,
@@ -68,6 +71,7 @@ def load_candidate_planning_context(
     inflation_radius_m: float,
     candidate_transit_radius_m: float,
     physical_clearance: Mapping[str, float],
+    validated_target_center: dict | None = None,
 ) -> CandidatePlanningContext:
     """Load immutable map inputs once and validate every evidence binding."""
 
@@ -100,6 +104,11 @@ def load_candidate_planning_context(
         )
         for candidate in snapshot.candidates
     }
+    if validated_target_center is not None:
+        estimate = validated_target_center
+        keepouts['current_target'] = Station('current_target',
+            StationPose(estimate['x_m'],estimate['y_m'],0.),0.,
+            candidate_transit_radius_m+estimate['uncertainty_m'])
     costmaps = build_station_route_costmaps(
         grid,
         station_map=keepouts,
@@ -107,6 +116,9 @@ def load_candidate_planning_context(
         transit_keepout_radius_m=candidate_transit_radius_m,
         arena_bounds=plan.arena_bounds,
     )
+    if validated_target_center is not None:
+        costmaps = replace(costmaps, planning_costmap=costmaps.planning_costmap.with_station_keepouts(
+            (keepouts['current_target'],)))
     return CandidatePlanningContext(
         grid=grid,
         map_bundle=map_bundle,
@@ -135,6 +147,7 @@ def compute_candidate_preapproach_plan(
     approach_normal_rad: float | None = None,
     inspection_view_normal_rad: float | None = None,
     planning_context: CandidatePlanningContext | None = None,
+    validated_target_center: dict | None = None,
 ) -> CandidatePreapproachPlan:
     """Compute the exact route used for both candidate scoring and sealing."""
 
@@ -153,6 +166,10 @@ def compute_candidate_preapproach_plan(
     candidate = snapshot.candidate_for(candidate_uid)
     if candidate is None:
         raise ValueError(f"unknown candidate {candidate_uid!r}")
+    geometry = planning_target_geometry(candidate, validated_target_center)
+    extra_uncertainty = 0. if validated_target_center is None else geometry.uncertainty_m
+    if validated_target_center is not None and (approach_normal_rad is None or planning_context is not None):
+        raise ValueError('reconciled target requires a fresh certified opposite-face plan')
     if snapshot.map_bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("candidate snapshot map differs from coverage plan")
 
@@ -165,8 +182,8 @@ def compute_candidate_preapproach_plan(
         bearing_mode = INSPECTION_VIEW_BEARING_MODE
     elif approach_normal_rad is None:
         bearing = math.atan2(
-            candidate.geometry.y_m - start.y_m,
-            candidate.geometry.x_m - start.x_m,
+            geometry.y_m - start.y_m,
+            geometry.x_m - start.x_m,
         )
         bearing_mode = ROBOT_TO_STAND_BEARING_MODE
     else:
@@ -183,6 +200,7 @@ def compute_candidate_preapproach_plan(
         inflation_radius_m=inflation_radius_m,
         candidate_transit_radius_m=candidate_transit_radius_m,
         physical_clearance=physical_clearance,
+        validated_target_center=validated_target_center,
     )
     _validate_context_binding(
         context,
@@ -203,6 +221,7 @@ def compute_candidate_preapproach_plan(
         target_bearing_rad=bearing,
         approach_offset_m=approach_offset_m,
         candidate_transit_radius_m=candidate_transit_radius_m,
+        target_geometry=geometry,
     )
     try:
         visits = tuple(build_station_visits(("D00",), stations))
@@ -226,15 +245,17 @@ def compute_candidate_preapproach_plan(
             start=start,
             requested_goal=requested_goal,
             stand=Pose2D(
-                candidate.geometry.x_m,
-                candidate.geometry.y_m,
+                geometry.x_m,
+                geometry.y_m,
                 0.0,
             ),
-            minimum_standoff_m=context.minimum_active_standoff_m,
+            minimum_standoff_m=context.minimum_active_standoff_m+extra_uncertainty,
             snap_radius_m=plan.config.snap_radius_m,
             required_start_clearance_m=inflation_radius_m,
             route_rejection_reason=lambda route: (
-                _candidate_route_clearance_failure(
+                (None if validated_target_center is None else _current_target_clearance_failure(route, geometry,
+                    context.minimum_candidate_transit_radius_m+extra_uncertainty))
+                or _candidate_route_clearance_failure(
                     candidate_uid=candidate_uid,
                     route=route,
                     snapshot=snapshot,
@@ -285,8 +306,8 @@ def compute_candidate_preapproach_plan(
     assert result.route is not None
     endpoint = result.route.points[-1].pose
     terminal_yaw = math.atan2(
-        candidate.geometry.y_m - endpoint.y_m,
-        candidate.geometry.x_m - endpoint.x_m,
+        geometry.y_m - endpoint.y_m,
+        geometry.x_m - endpoint.x_m,
     )
     initial_turn, turn_burden = route_turn_metrics(
         result.route,
@@ -294,12 +315,12 @@ def compute_candidate_preapproach_plan(
         terminal_yaw_rad=terminal_yaw,
     )
     distance_to_stand = math.hypot(
-        start.x_m - candidate.geometry.x_m,
-        start.y_m - candidate.geometry.y_m,
+        start.x_m - geometry.x_m,
+        start.y_m - geometry.y_m,
     )
     endpoint_standoff = math.hypot(
-        endpoint.x_m - candidate.geometry.x_m,
-        endpoint.y_m - candidate.geometry.y_m,
+        endpoint.x_m - geometry.x_m,
+        endpoint.y_m - geometry.y_m,
     )
     _validate_candidate_route_clearance(
         candidate_uid=candidate_uid,
@@ -311,6 +332,13 @@ def compute_candidate_preapproach_plan(
             context.minimum_candidate_transit_radius_m
         ),
     )
+    if validated_target_center is not None:
+        reason = _current_target_clearance_failure(result.route, geometry,
+            context.minimum_candidate_transit_radius_m+extra_uncertainty)
+        if reason or endpoint_standoff+1e-9 < context.minimum_active_standoff_m+extra_uncertainty:
+            raise CandidatePreapproachUnreachableError(candidate_uid, reason or 'current target standoff uncertainty')
+        if math.hypot(endpoint.x_m-candidate.geometry.x_m,endpoint.y_m-candidate.geometry.y_m)+1e-9 < context.minimum_active_standoff_m:
+            raise CandidatePreapproachUnreachableError(candidate_uid, 'frozen target standoff violated')
     return CandidatePreapproachPlan(
         candidate_uid=candidate_uid,
         candidate_snapshot_sha256=context.candidate_snapshot_sha256,
@@ -340,6 +368,7 @@ def compute_candidate_preapproach_plan(
         ),
         minimum_static_inflation_m=context.minimum_static_inflation_m,
         goal_cell_selection=goal_cell_selection,
+        validated_target_center=validated_target_center,
     )
 
 
@@ -448,15 +477,17 @@ def _candidate_station_map(
     target_bearing_rad: float,
     approach_offset_m: float,
     candidate_transit_radius_m: float,
+    target_geometry=None,
 ) -> Mapping[str, Station]:
     stations: dict[str, Station] = {}
     for index, item in enumerate(snapshot.candidates, start=1):
         station_id = "D00" if item.candidate_uid == target_uid else f"K{index:02d}"
+        geometry = target_geometry if item.candidate_uid == target_uid and target_geometry is not None else item.geometry
         stations[station_id] = Station(
             station_id,
             StationPose(
-                item.geometry.x_m,
-                item.geometry.y_m,
+                geometry.x_m,
+                geometry.y_m,
                 target_bearing_rad if item.candidate_uid == target_uid else 0.0,
             ),
             approach_offset_m,
@@ -581,3 +612,10 @@ __all__ = [
     "validate_approach_outside_transit_keepout",
     "validate_physical_clearance",
 ]
+
+
+def _current_target_clearance_failure(route, geometry, required):
+    measured = _minimum_route_clearance_m(route, geometry.x_m, geometry.y_m)
+    if measured+1e-9 < required:
+        return f"route clearance to current target is {measured:.3f} m, below {required:.3f} m"
+    return None

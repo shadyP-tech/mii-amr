@@ -77,6 +77,10 @@ def project_center_after_turn(*, point_base, yaw_rad, intrinsics, base_from_came
             intrinsics.fy_px*camera[1]/camera[2]+intrinsics.cy_px)
 
 
+class CenteringBudgetExceeded(ValueError):
+    """Current framing requires a new admitted view, not a larger turn."""
+
+
 def solve_camera_centering(*, center_px, intrinsics, distance_m,
                            scan_from_camera, base_from_camera,
                            remaining_rotation_rad=MAX_CENTERING_TRAVEL_RAD):
@@ -99,8 +103,10 @@ def solve_camera_centering(*, center_px, intrinsics, distance_m,
     lo, hi = -remaining_rotation_rad, remaining_rotation_rad
     # Reject exotic/invalid mount geometry instead of assuming the turn sign.
     samples = [residual(lo+(hi-lo)*index/8) for index in range(9)]
-    if samples[0] > 0 or samples[-1] < 0 or any(b <= a for a, b in zip(samples, samples[1:])):
-        raise ValueError("head cannot be centered within the bounded yaw interval")
+    if any(b <= a for a, b in zip(samples, samples[1:])):
+        raise ValueError("non-monotonic camera mount geometry")
+    if samples[0] > 0 or samples[-1] < 0:
+        raise CenteringBudgetExceeded("head cannot be centered within the bounded yaw interval")
     for _ in range(48):
         middle = (lo+hi)/2
         if residual(middle) < 0:
@@ -167,7 +173,7 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
         motion_epoch, anchor_pose, anchor_odom_pose, odom_stamp_sec,
         image_stamp_sec, now_sec, robot_profile_sha256, calibration_profile_sha256,
         stand_model_profile_sha256, max_age_sec=.5, max_image_scan_skew_sec=.1,
-        consumed_rotation_rad=0., completed_turn_count=0):
+        consumed_rotation_rad=0., completed_turn_count=0, diagnostics=None):
     """Prepare advice only from an already admitted, uniquely associated head.
 
     The observer must additionally commit it only after the same frame passes
@@ -217,6 +223,11 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
             target_reconciliation=getattr(association,'target_reconciliation',None))
         # Same structural and derived-value validation applies at the process boundary.
         return validate_camera_centering_advisory(advisory.metadata())
+    except CenteringBudgetExceeded as exc:
+        if diagnostics is not None:
+            diagnostics.update(ready=False, reason="centering_budget_exceeded",
+                detail=str(exc), motion_authorized=False, recovery="bounded_inspection_view")
+        return None
     except (AttributeError, TypeError, ValueError, ArithmeticError):
         return None
 

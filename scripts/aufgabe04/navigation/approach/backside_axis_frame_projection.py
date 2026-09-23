@@ -174,13 +174,22 @@ class BacksideAxisFrameProjection:
         ).payload()
 
     @property
+    def validated_target_center(self):
+        from scripts.aufgabe04.artifacts.current_target_estimate import project_current_target
+        return project_current_target(self.source_observation.validated_target_center,
+            source_center=(self.source_observation.stand_x_m,self.source_observation.stand_y_m),
+            target_center=(self.stand_x_m,self.stand_y_m),
+            yaw_delta=self.stand_axis_rad-self.source_observation.stand_axis_rad)
+
+    @property
     def opposite_face_normal_rad(self) -> float:
+        center = self.validated_target_center or dict(x_m=self.stand_x_m,y_m=self.stand_y_m)
         projected = BacksideAxisObservation(
             stand_id=self.stand_id,
             planning_frame=self.planning_frame,
             stand_axis_rad=self.stand_axis_rad,
-            stand_x_m=self.stand_x_m,
-            stand_y_m=self.stand_y_m,
+            stand_x_m=center["x_m"],
+            stand_y_m=center["y_m"],
             robot_x_m=self.robot_x_m,
             robot_y_m=self.robot_y_m,
             visible_face_confidence=self.visible_face_confidence,
@@ -246,6 +255,9 @@ def write_backside_axis_frame_projection(
         candidate_uid=source_observation.stand_id,
     )
     _validate_projection_pair(source_binding, target_binding)
+    if (source_observation.target_reconciliation is not None
+            and source_observation.target_reconciliation['snapshot_sha256'] != candidate_snapshot_sha256(source_binding.projected_snapshot)):
+        raise ValueError('backside target reconciliation differs from capture snapshot')
     if source_observation.planning_frame != source_binding.map_frame:
         raise ValueError(
             "source axis observation planning frame differs from capture proof"
@@ -399,6 +411,9 @@ def load_backside_axis_frame_projection(
         candidate_uid=stand_id,
     )
     _validate_projection_pair(source_binding, target_binding)
+    if (source_observation.target_reconciliation is not None
+            and source_observation.target_reconciliation['snapshot_sha256'] != candidate_snapshot_sha256(source_binding.projected_snapshot)):
+        raise ValueError('backside target reconciliation differs from capture snapshot')
     if source_observation.planning_frame != source_binding.map_frame:
         raise ValueError("source observation frame differs from capture proof")
     if planning_frame != target_binding.map_frame:

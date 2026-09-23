@@ -225,6 +225,8 @@ def execute_local_candidate_inspection(
                 source_config=source_config, effects=effects, source_registry=source_registry,
                 candidate_uid=candidate_uid, candidate_root=root, observation_attempt_index=0,
                 allow_centering_acquisition=effects.run_centering_turn is not None,
+                **({"retained_backside_axis_path": fallback_frame.retained_backside_axis_path}
+                   if fallback_frame.retained_backside_axis_path is not None else {}),
             )
         if result.planning_frame is None and result.observation_pose is None:
             result = replace(result, observation_pose=pose(fallback_frame))

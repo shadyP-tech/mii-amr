@@ -151,6 +151,8 @@ def commit_bounded_head(adapter):
             registration = current.registration
             confidence = adapter._head_confidence_metadata["backside"]["confidence"]
             payload = build_backside_axis_observation(
+                target_reconciliation=(current.metadata.get("current_head_candidate_association") or {}).get("target_reconciliation"),
+                head_position_evidence=current.metadata.get("head_position_evidence"),
                 stream_id=args.stream_id, stand_id=args.stand_id,
                 planning_frame=adapter.profile.map_frame, stand_x_m=args.stand_x, stand_y_m=args.stand_y,
                 robot_x_m=current.robot_pose.x_m, robot_y_m=current.robot_pose.y_m,

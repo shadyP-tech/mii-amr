@@ -20,6 +20,8 @@ class OppositeTargetSupport:
     image_shape: tuple
     expected_symbol_height_px: float
     depth_m: float
+    target_reconciliation: dict | None = None
+    finite_bearing: dict | None = None
 
     @property
     def accepted(self):
@@ -30,7 +32,8 @@ class OppositeTargetSupport:
             center_px=self.full_image_center_px, image_shape=self.image_shape,
             image_stamp_sec=self.image_stamp_sec, expected_symbol_height_px=self.expected_symbol_height_px,
             depth_m=self.depth_m, lidar_association=asdict(self.lidar_association),
-            supplies_angle=False, supplies_identity=False)
+            supplies_angle=False, supplies_identity=False,
+            target_reconciliation=self.target_reconciliation, finite_bearing=self.finite_bearing)
 
 
 def validate_target_support(value):
@@ -76,13 +79,38 @@ def validate_target_support(value):
             or abs(stamp-cluster.get('scan_stamp_sec', -1.)) > .1
             or value.get('supplies_angle') is not False or value.get('supplies_identity') is not False):
         raise ValueError('opposite QR outline lacks its unique synchronized scan')
+    proof = value.get('target_reconciliation')
+    if proof is not None:
+        from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+        from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
+        from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics
+        scan, envelope, _, reference = validate_reconciliation(proof,
+            image_stamp_sec=stamp, scan_stamp_sec=cluster['scan_stamp_sec'])
+        geometry = value['finite_bearing']
+        bearing, uncertainty, optical_depth = finite_target_bearing(center_px=center,
+            intrinsics=CameraIntrinsics(**geometry['intrinsics']),
+            scan_from_camera=RigidTransform(**geometry['scan_from_camera']),
+            distance_m=envelope.distance_m, range_interval_m=envelope.accepted_range_m)
+        if abs(math.remainder(bearing-reference,math.tau))+uncertainty > math.radians(3)+1e-9:
+            raise ValueError('opposite QR ray misses reconciled target')
+        current = associate_camera_registered_candidate_lidar_target(scan,
+            map_bearing_rad=reference, observed_camera_bearing_rad=bearing,
+            cone_half_angle_rad=math.radians(3), accepted_range_m=envelope.accepted_range_m,
+            now_sec=proof['entries'][-1]['checked_at_sec'], max_scan_age_sec=.5,
+            min_cluster_sample_count=1,max_camera_map_bearing_delta_rad=math.radians(3))
+        if (not current.associated or abs(optical_depth-depth)>1e-9
+                or current.distance_m != lidar['distance_m']
+                or tuple(current.search_association.selected_cluster_source_indices) != tuple(indices)
+                or abs(current.camera_map_bearing_delta_rad-lidar['camera_map_bearing_delta_rad'])>1e-9):
+            raise ValueError('opposite QR reconciliation differs from current scan')
     return value
 
 
 def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_profile,
         scan_from_camera, scan, image_stamp_sec, now_sec, map_bearing_rad,
         cone_half_angle_rad, accepted_range_m, max_scan_age_sec,
-        max_camera_map_bearing_delta_rad, resources=None, max_elapsed_sec=.06):
+        max_camera_map_bearing_delta_rad, resources=None, max_elapsed_sec=.06,
+        target_reconciliation=None):
     """Locate a complete foreground symbol before the payload decoder sees it.
 
     Two bounded scale attempts; background-sized symbols cannot become target
@@ -102,6 +130,19 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
         accepted_range_m=accepted_range_m,now_sec=now_sec,max_scan_age_sec=max_scan_age_sec)
     if not envelope.associated or envelope.eligible_cluster_count != 1:
         return None
+    reference, limit = map_bearing_rad, max_camera_map_bearing_delta_rad
+    if target_reconciliation is not None:
+        from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+        try:
+            proof_scan, original, _, reference = validate_reconciliation(target_reconciliation,
+                image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan.scan_stamp_sec)
+            fields = ('scan_stamp_sec','scan_frame_id','selected_cluster_source_indices',
+                      'distance_m','accepted_range_m','map_bearing_rad','cone_half_angle_rad')
+            if any(getattr(original,k) != getattr(envelope,k) for k in fields):
+                return None
+            limit = min(cone_half_angle_rad, math.radians(3))
+        except (ValueError, TypeError, KeyError, OSError):
+            return None
     for scale in (4, 1):
         if time.monotonic()-started >= max_elapsed_sec:
             break
@@ -125,15 +166,16 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
                     scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=accepted_range_m)
             except ValueError:
                 continue
-            if abs(math.remainder(bearing-map_bearing_rad,math.tau))+uncertainty > max_camera_map_bearing_delta_rad:
+            if abs(math.remainder(bearing-reference,math.tau))+uncertainty > limit:
                 continue
             lidar = associate_camera_registered_candidate_lidar_target(scan,
-                map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=bearing,
+                map_bearing_rad=reference, observed_camera_bearing_rad=bearing,
                 cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
                 now_sec=now_sec+time.monotonic()-started, max_scan_age_sec=max_scan_age_sec,
-                min_cluster_sample_count=1, max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad)
+                min_cluster_sample_count=1, max_camera_map_bearing_delta_rad=limit)
             support = OppositeTargetSupport(corners, center, lidar, image_stamp_sec, tuple(frame.shape[:2]),
-                expected, depth)
+                expected, depth, target_reconciliation,
+                dict(intrinsics=asdict(intrinsics), scan_from_camera=asdict(scan_from_camera)))
             try:
                 validate_target_support(support.metadata())
             except ValueError:

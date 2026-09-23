@@ -210,6 +210,9 @@ def validate_detected_stand_preapproach_binding(
         failures.append("selected candidate UID is absent from candidate snapshot")
         return PreflightStatus(ok=False, failures=failures)
 
+    from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+    geometry = selected.geometry
+    estimate = None
     if bearing_mode == CAMERA_AXIS_FACE_BEARING_MODE:
         axis_path_value = metadata.get("axis_observation_json")
         if not isinstance(axis_path_value, str) or not axis_path_value:
@@ -230,12 +233,22 @@ def validate_detected_stand_preapproach_binding(
                     metadata.get("approach_offset_m"), "approach_offset_m"
                 )
                 observed_normal = axis_observation.opposite_face_normal_rad
+                estimate = axis_observation.validated_target_center
+                if metadata.get('validated_target_center') != estimate:
+                    raise ValueError('route current target differs from certified observation')
+                geometry = planning_target_geometry(selected, estimate)
+                if estimate is not None:
+                    bound_snapshot = (json.loads(axis_observation.target_candidate_projection_path.read_text())['projected_candidate_snapshot_sha256']
+                        if isinstance(axis_observation, BacksideAxisFrameProjection)
+                        else axis_observation.target_reconciliation['snapshot_sha256'])
+                    if bound_snapshot != snapshot_digest:
+                        raise ValueError('current target observation belongs to another candidate snapshot')
                 bounded_view = None
                 if axis_observation.bounded_orientation is not None:
                     bounded_view = validate_bounded_endpoint(
                         axis_observation.bounded_orientation, selected_normal_rad=observed_normal,
-                        stand_x_m=selected.geometry.x_m, stand_y_m=selected.geometry.y_m,
-                        stand_uncertainty_m=selected.geometry.uncertainty_m,
+                        stand_x_m=geometry.x_m, stand_y_m=geometry.y_m,
+                        stand_uncertainty_m=geometry.uncertainty_m,
                         target_x_m=final.pose.x_m, target_y_m=final.pose.y_m,
                         expected_sample_count=axis_observation.axis_sample_count,
                         observing_robot_x_m=axis_observation.robot_x_m,
@@ -310,19 +323,19 @@ def validate_detected_stand_preapproach_binding(
                 if perpendicular_error > 0.15:
                     failures.append("selected face normal is not perpendicular to axis")
                 initial_side_angle = math.atan2(
-                    axis_observation.robot_y_m - selected.geometry.y_m,
-                    axis_observation.robot_x_m - selected.geometry.x_m,
+                    axis_observation.robot_y_m - geometry.y_m,
+                    axis_observation.robot_x_m - geometry.x_m,
                 )
                 if math.cos(face_normal - initial_side_angle) > -0.5:
                     failures.append(
                         "camera-axis approach does not inspect the opposite face"
                     )
                 expected_x = (
-                    selected.geometry.x_m
+                    geometry.x_m
                     + approach_offset * math.cos(face_normal)
                 )
                 expected_y = (
-                    selected.geometry.y_m
+                    geometry.y_m
                     + approach_offset * math.sin(face_normal)
                 )
                 if math.hypot(
@@ -397,8 +410,8 @@ def validate_detected_stand_preapproach_binding(
     if target_distance + 1.0e-9 < minimum_active:
         failures.append("terminal pose violates the selected stand LiDAR standoff")
     expected_yaw = math.atan2(
-        selected.geometry.y_m - final.pose.y_m,
-        selected.geometry.x_m - final.pose.x_m,
+        geometry.y_m - final.pose.y_m,
+        geometry.x_m - final.pose.x_m,
     )
     if (
         math.isfinite(final.pose.yaw_rad)
@@ -406,6 +419,15 @@ def validate_detected_stand_preapproach_binding(
         > terminal_yaw_tolerance_rad
     ):
         failures.append("terminal yaw does not face the selected stand")
+
+    if estimate is not None:
+        current_distance = math.hypot(final.pose.x_m-geometry.x_m,final.pose.y_m-geometry.y_m)
+        if current_distance+1e-9 < minimum_active+geometry.uncertainty_m:
+            failures.append('terminal pose violates uncertain current target standoff')
+        if _minimum_route_clearance_m(leg,geometry.x_m,geometry.y_m)+1e-9 < minimum_transit+geometry.uncertainty_m:
+            failures.append('route violates uncertain current target keepout')
+    elif metadata.get('validated_target_center') is not None:
+        failures.append('current target has no certified backside source')
 
     for candidate in snapshot.candidates:
         if candidate.candidate_uid == selected_uid:

@@ -8,6 +8,7 @@ selection evidence before creating the output directory.
 from __future__ import annotations
 
 from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint
+from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
 
 import json
 import math
@@ -142,6 +143,18 @@ def materialize_candidate_preapproach_plan(
             candidate_x_m=candidate.geometry.x_m,
             candidate_y_m=candidate.geometry.y_m,
         )
+    estimate = None if axis_observation is None else axis_observation.validated_target_center
+    if estimate is not None:
+        if isinstance(axis_observation, BacksideAxisFrameProjection):
+            binding = json.loads(axis_observation.target_candidate_projection_path.read_text())
+            bound_snapshot = binding['projected_candidate_snapshot_sha256']
+        else:
+            bound_snapshot = axis_observation.target_reconciliation['snapshot_sha256']
+        if bound_snapshot != snapshot_sha256:
+            raise ValueError('current target observation belongs to another candidate snapshot')
+    if prepared.validated_target_center != estimate:
+        raise ValueError('prepared current target differs from certified observation')
+    geometry = planning_target_geometry(candidate, estimate)
     if inspection_view is None:
         _validate_approach_bearing_binding(
             prepared=prepared,
@@ -152,8 +165,8 @@ def materialize_candidate_preapproach_plan(
         )
     _validate_goal_cell_policy_binding(
         prepared=prepared,
-        candidate_x_m=candidate.geometry.x_m,
-        candidate_y_m=candidate.geometry.y_m,
+        candidate_x_m=geometry.x_m,
+        candidate_y_m=geometry.y_m,
         approach_normal_rad=approach_normal_rad,
     )
     bounded_view = None
@@ -161,8 +174,8 @@ def materialize_candidate_preapproach_plan(
         bounded_view = validate_bounded_endpoint(
             axis_observation.bounded_orientation,
             selected_normal_rad=axis_observation.opposite_face_normal_rad,
-            stand_x_m=candidate.geometry.x_m, stand_y_m=candidate.geometry.y_m,
-            stand_uncertainty_m=candidate.geometry.uncertainty_m,
+            stand_x_m=geometry.x_m, stand_y_m=geometry.y_m,
+            stand_uncertainty_m=geometry.uncertainty_m,
             target_x_m=prepared.selected_approach_pose.x_m,
             target_y_m=prepared.selected_approach_pose.y_m,
             expected_sample_count=axis_observation.axis_sample_count,
@@ -248,6 +261,8 @@ def materialize_candidate_preapproach_plan(
     )
     if selection_evidence is not None:
         metadata["camera_candidate_selection"] = dict(selection_evidence)
+    if estimate is not None:
+        metadata["validated_target_center"] = estimate
     if bounded_view is not None:
         metadata["bounded_orientation_view"] = bounded_view
     if inspection_view_path is not None:
@@ -337,6 +352,7 @@ def plan_candidate_preapproach(
         validate_candidate_inspection_view_binding(
             inspection_view, snapshot=snapshot, candidate_uid=candidate_uid, start=start,
         )
+    estimate = None if axis_observation_path is None else load_backside_axis_planning_observation(axis_observation_path).validated_target_center
     selected = prepared_plan or compute_candidate_preapproach_plan(
         map_yaml=map_yaml,
         semantic_map_id=semantic_map_id,
@@ -349,6 +365,7 @@ def plan_candidate_preapproach(
         candidate_transit_radius_m=candidate_transit_radius_m,
         physical_clearance=physical_clearance,
         approach_normal_rad=approach_normal_rad,
+        validated_target_center=estimate,
         inspection_view_normal_rad=(None if inspection_view is None else float(
             inspection_view["view_normal_rad"]
         )),
@@ -505,7 +522,7 @@ def _validate_goal_cell_policy_binding(
         result=prepared.result,
         expected_requested_goal=expected_requested_goal,
         stand=Pose2D(candidate_x_m, candidate_y_m, 0.0),
-        minimum_standoff_m=prepared.minimum_active_standoff_m,
+        minimum_standoff_m=prepared.minimum_active_standoff_m+(0. if prepared.validated_target_center is None else prepared.validated_target_center["uncertainty_m"]),
     )
 
 

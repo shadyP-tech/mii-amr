@@ -87,7 +87,8 @@ def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_
             calibration_profile_sha256=camera_calibration_sha256(adapter.calibration),
             stand_model_profile_sha256=adapter.stand_model_profile.sha256,
             max_age_sec=adapter.args.max_sensor_age_sec,
-            max_image_scan_skew_sec=adapter.args.sync_tolerance_sec)
+            max_image_scan_skew_sec=adapter.args.sync_tolerance_sec,
+            diagnostics=current.metadata.setdefault("candidate_centering", {}))
     except (TypeError, ValueError, ArithmeticError) as exc:
         current.metadata["candidate_centering"] = {
             "ready": False, "reason": "centering_advisory_rejected", "detail": str(exc)}

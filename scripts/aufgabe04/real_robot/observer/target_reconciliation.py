@@ -27,7 +27,17 @@ def load_reconciliation_snapshot(path, *, candidate_uid, planning_frame, center)
     return snapshot
 
 
-def _entry_result(entry, snapshot, uid):
+def _retained_center(record, snapshot, uid):
+    if record is None:
+        return None
+    from scripts.aufgabe04.artifacts.retained_backside_orientation import validate_retained_orientation
+    g = snapshot.candidate_for(uid).geometry
+    return validate_retained_orientation(record,candidate_uid=uid,
+        planning_frame=snapshot.planning_frame,stand_center=dict(x_m=g.x_m,y_m=g.y_m),
+        model_sha256=record['stand_model_profile_sha256']).get('validated_target_center')
+
+
+def _entry_result(entry, snapshot, uid, retained_center=None):
     raw = entry['scan']
     scan = PlainLaserScan(**{**raw, 'ranges': tuple(math.nan if v is None else v for v in raw['ranges'])})
     tf = RigidTransform(**entry['scan_from_map'])
@@ -61,8 +71,12 @@ def _entry_result(entry, snapshot, uid):
                scan.ranges[i]*math.sin(scan.angle_min+i*scan.angle_increment)) for i in ids]
     x,y = (sum(p[k] for p in points)/len(points) for k in (0,1))
     limit = min(.16, 2*(g.radius_m+g.uncertainty_m))
+    reference = options['map_bearing_rad']
+    if retained_center is not None:
+        projected = transform_point((retained_center['x_m'],retained_center['y_m'],0.),tf)
+        reference = math.atan2(projected[1],projected[0])
     if (max(math.dist(a,b) for a in points for b in points) > limit
-            or abs(math.remainder(math.atan2(y,x)-options['map_bearing_rad'],math.tau)) > options['max_camera_map_bearing_delta_rad']):
+            or abs(math.remainder(math.atan2(y,x)-reference,math.tau)) > options['max_camera_map_bearing_delta_rad']):
         raise ValueError('reconciliation cluster exceeds original registration bounds')
     qx,qy,qz,qw = tf.rotation_xyzw
     world = rotate_vector(tuple(a-b for a,b in zip((x,y,0.),tf.translation_xyz_m)),(-qx,-qy,-qz,qw))[:2]
@@ -94,7 +108,8 @@ def validate_reconciliation(proof, *, candidate_uid=None, stand_center=None, ima
     entries = proof['entries']
     if len(entries) != 3:
         raise ValueError('three independent stopped observations required')
-    results = [_entry_result(e,snapshot,uid) for e in entries]
+    retained_center = _retained_center(proof.get("retained_orientation"),snapshot,uid)
+    results = [_entry_result(e,snapshot,uid,retained_center) for e in entries]
     for old,new in zip(entries,entries[1:]):
         if not old['image_stamp_sec'] < new['image_stamp_sec'] or not old['scan']['scan_stamp_sec'] < new['scan']['scan_stamp_sec']:
             raise ValueError('reconciliation reuses or regresses sensor samples')
@@ -118,8 +133,10 @@ class StoppedTargetReconciliation:
         self.metadata = {}
 
     def observe(self, *, snapshot_path, candidate_uid, planning_frame, stand_center,
-                target_key, epoch, scan, scan_from_map, robot_pose, image_stamp_sec, now_sec, options):
-        context = (str(snapshot_path),candidate_uid,planning_frame,tuple(stand_center),target_key,epoch)
+                target_key, epoch, scan, scan_from_map, robot_pose, image_stamp_sec, now_sec, options,
+                retained_orientation=None):
+        context = (str(snapshot_path),candidate_uid,planning_frame,tuple(stand_center),target_key,epoch,
+                   None if retained_orientation is None else retained_orientation.get("projection_sha256"))
         if context != self.context:
             self.entries = []
             self.context = context
@@ -130,7 +147,7 @@ class StoppedTargetReconciliation:
             raw['ranges'] = [v if math.isfinite(v) else None for v in scan.ranges]
             entry = dict(scan=raw,scan_from_map=asdict(scan_from_map),robot_pose=list(robot_pose),
                 image_stamp_sec=image_stamp_sec,checked_at_sec=now_sec,options=options)
-            _entry_result(entry,snapshot,candidate_uid)
+            _entry_result(entry,snapshot,candidate_uid,_retained_center(retained_orientation,snapshot,candidate_uid))
             if self.entries and (image_stamp_sec <= self.entries[-1]['image_stamp_sec'] or scan.scan_stamp_sec <= self.entries[-1]['scan']['scan_stamp_sec']):
                 self.entries = []
                 raise ValueError('duplicate or regressed reconciliation tuple')
@@ -139,6 +156,8 @@ class StoppedTargetReconciliation:
                 stand_center=list(stand_center),snapshot_path=str(Path(snapshot_path).resolve()),
                 snapshot_sha256=candidate_snapshot_sha256(snapshot),target_key=target_key,epoch=epoch,
                 entries=self.entries.copy(),candidate_geometry_updated=False,motion_authorized=False)
+            if retained_orientation is not None:
+                proof["retained_orientation"] = retained_orientation
             if len(self.entries) < 3:
                 self.metadata = dict(ready=False,reason='collecting_stopped_target',sample_count=len(self.entries))
                 return None

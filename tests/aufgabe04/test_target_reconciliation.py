@@ -18,10 +18,11 @@ from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapsho
 ROOT = Path(__file__).parent/'fixtures/target_reconciliation_20260923'
 
 
-def recorded_inputs(data=None):
+def recorded_inputs(data=None, *, root=ROOT, candidate_uid="survey_candidate_0005"):
+    snapshot_path = root/"candidate_snapshot.json"
     data = data or json.loads((ROOT/'inputs.json').read_text())
-    snapshot = load_candidate_snapshot(ROOT/'candidate_snapshot.json')
-    g = snapshot.candidate_for('survey_candidate_0005').geometry
+    snapshot = load_candidate_snapshot(snapshot_path)
+    g = snapshot.candidate_for(candidate_uid).geometry
     rows = []
     for f in data['frames']:
         s = f['sensors']['scan']
@@ -38,8 +39,8 @@ def recorded_inputs(data=None):
         options=dict(map_bearing_rad=e['map_bearing_rad'],cone_half_angle_rad=math.radians(3),
             max_camera_map_bearing_delta_rad=math.radians(12),accepted_range_m=tuple(e['accepted_range_m']))
         ci=dict(f['sensors']['camera_info']);ci['header']=SimpleNamespace(**ci['header'])
-        rows.append(dict(snapshot_path=ROOT/'candidate_snapshot.json',candidate_uid='survey_candidate_0005',
-            planning_frame='map',stand_center=(g.x_m,g.y_m),target_key='fixture/0005',epoch=0,
+        rows.append(dict(snapshot_path=snapshot_path,candidate_uid=candidate_uid,
+            planning_frame='map',stand_center=(g.x_m,g.y_m),target_key=f"fixture/{candidate_uid}",epoch=0,
             scan=scan,scan_from_map=tf('base_scan','map'),robot_pose=pose,image_stamp_sec=f['image_stamp_sec'],
             now_sec=max(f['image_stamp_sec'],scan.scan_stamp_sec,scan.receipt_sec)+.1,options=options))
     return data, rows, intrinsics_from_camera_info(SimpleNamespace(**ci)), tf('base_scan','camera')

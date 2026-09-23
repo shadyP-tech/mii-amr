@@ -1182,6 +1182,7 @@ def _admit_camera_arrival_geometry(
     candidate_root: Path,
     observation_attempt_index: int,
     allow_centering_acquisition: bool = False,
+    retained_backside_axis_path: Path | None = None,
 ) -> _CandidateObservationFrame:
     """Reproject once more while stopped and gate camera startup geometry."""
 
@@ -1225,10 +1226,25 @@ def _admit_camera_arrival_geometry(
         source_config.physical_clearance,
         "minimum_active_standoff_m",
     )
+    current_target = None
+    arrival_axis_path = None
+    if retained_backside_axis_path is not None:
+        from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+        arrival_axis_path = arrival_path.with_name('arrival_backside_orientation.json')
+        write_backside_axis_frame_projection(arrival_axis_path,
+            axis_evidence_path=retained_backside_axis_path,
+            target_candidate_projection_path=artifacts.evidence_path,
+            target_candidate_projection_sha256=artifacts.evidence_sha256,
+            target_candidate_x_m=candidate.geometry.x_m,
+            target_candidate_y_m=candidate.geometry.y_m)
+        current_target = load_backside_axis_planning_observation(arrival_axis_path).validated_target_center
+        target_geometry = planning_target_geometry(candidate,current_target)
+    else:
+        target_geometry = candidate.geometry
     decision = evaluate_candidate_arrival_admission(
         planning_frame.current_pose,
-        target_x_m=candidate.geometry.x_m,
-        target_y_m=candidate.geometry.y_m,
+        target_x_m=target_geometry.x_m,
+        target_y_m=target_geometry.y_m,
         config=CandidateArrivalAdmissionConfig(
             min_range_m=minimum_range_m,
             max_range_m=(
@@ -1250,14 +1266,16 @@ def _admit_camera_arrival_geometry(
         # a separately certified turn; no map-only correction is authorized.
         decision = evaluate_candidate_arrival_admission(
             planning_frame.current_pose,
-            target_x_m=candidate.geometry.x_m,
-            target_y_m=candidate.geometry.y_m,
+            target_x_m=target_geometry.x_m,
+            target_y_m=target_geometry.y_m,
             config=replace(strict_decision.config, max_bearing_error_rad=max(
                 strict_decision.config.max_bearing_error_rad, MAX_CENTERING_STEP_RAD,
             )),
         )
     arrival_evidence = {
         **decision.to_evidence_dict(),
+        "validated_target_center": current_target,
+        "retained_backside_axis_path": None if arrival_axis_path is None else str(arrival_axis_path),
         "strict_arrival": strict_decision.to_evidence_dict(),
         "acquisition_only": decision.accepted and not strict_decision.accepted,
         "camera_centered": False,
@@ -1297,6 +1315,7 @@ def _admit_camera_arrival_geometry(
         candidate=candidate,
         planning_frame=planning_frame,
         decision_binding=artifacts.camera_decision_binding(),
+        retained_backside_axis_path=arrival_axis_path,
     )
 
 
@@ -1954,6 +1973,8 @@ def _move_certified_opposite_face(
         candidate_uid=candidate.candidate_uid,
         candidate_root=candidate_root,
         observation_attempt_index=1,
+        allow_centering_acquisition=effects.run_centering_turn is not None,
+        retained_backside_axis_path=(axis_planning_evidence_path if opposite_planning_frame is not None else None),
     )
     return opposite_arrival_frame
 

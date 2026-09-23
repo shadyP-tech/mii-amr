@@ -35,6 +35,11 @@ def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrins
     if support is not None:
         from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_target_support
         validate_target_support(support.metadata())
+        proof = support.target_reconciliation
+        if proof is not None:
+            from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256
+            if proof['candidate_uid'] != candidate_uid or proof['snapshot_sha256'] != candidate_snapshot_sha256(snapshot):
+                return None, {**info, 'reason': 'outline_candidate_snapshot_mismatch'}
         indices = support.lidar_association.search_association.selected_cluster_source_indices
         if not set(indices).issubset(search['envelope']['selected_cluster_source_indices']):
             return None, {**info, 'reason': 'outline_search_cluster_mismatch'}

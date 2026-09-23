@@ -160,6 +160,23 @@ class InspectionObserverIntegrationTests(unittest.TestCase):
             self.assertFalse(load_candidate_inspection_observation(path)["completion_authorized"])
             self.assertTrue(node.completed)
 
+    def test_opposite_states_finish_through_bounded_recovery(self):
+        for state in ('opposite_identity_collecting','opposite_identity_crop_conflict','candidate_centering_budget_exceeded'):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp, \
+                 patch('scripts.aufgabe04.real_robot.observer.node.real_robot_profile_sha256',return_value='a'*64), \
+                 patch('scripts.aufgabe04.real_robot.observer.node.camera_calibration_sha256',return_value='b'*64):
+                path=Path(tmp)/'progress.json';node=self.make_node(path)
+                node.args.qr_observation_pose_json=Path(tmp)/'qr.json'
+                for i in range(7):
+                    self.set_current_frame(node,100.+i)
+                    with patch('scripts.aufgabe04.real_robot.observer.inspection_progress.time.monotonic',return_value=100.+i):
+                        result=node._maybe_commit_inspection_progress(state,{})
+                self.assertIsNotNone(result)
+                self.assertIn(state,result['reasons'])
+                self.assertFalse(result['completion_authorized'])
+                self.assertIsNone(result['qr_id'])
+                self.assertTrue(node.completed)
+
     def test_delayed_seventh_advisory_frame_cannot_publish_expired_sources(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch("scripts.aufgabe04.real_robot.observer.node.real_robot_profile_sha256",return_value="a"*64), \

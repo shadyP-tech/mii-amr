@@ -1589,8 +1589,27 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             return
 
         opposite_context = getattr(self, '_opposite_identity_context', None)
+        target_reconciliation = None
+        if getattr(self.args, 'candidate_crop_snapshot', None) is not None:
+            if not hasattr(self, '_target_reconciliation'):
+                self._target_reconciliation = StoppedTargetReconciliation()
+            target_reconciliation = self._target_reconciliation.observe(
+                retained_orientation=None if opposite_context is None else opposite_context.orientation,
+                snapshot_path=self.args.candidate_crop_snapshot,candidate_uid=self.args.stand_id,
+                planning_frame=self.profile.map_frame,stand_center=(self.args.stand_x,self.args.stand_y),
+                target_key=self._target_evidence_key(),
+                epoch=0 if self.observation_evidence is None else self.observation_evidence.snapshot().motion_epoch,
+                scan=plain_scan, scan_from_map=RigidTransform(self.profile.scan_frame,self.profile.map_frame,
+                    scan_translation,scan_rotation),robot_pose=(robot_pose.x_m,robot_pose.y_m,robot_pose.yaw_rad),
+                image_stamp_sec=image.stamp_sec,now_sec=self.node.get_clock().now().nanoseconds/1e9,
+                options=dict(map_bearing_rad=scan_bearing,
+                    cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                    max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
+                    accepted_range_m=(lower_surface_bound,upper_surface_bound)))
+
         if opposite_context is not None:
             process_opposite_identity(self, context=opposite_context, frame=frame,
+                target_reconciliation=target_reconciliation,
                 intrinsics=intrinsics, robot_pose=robot_pose,
                 camera_signature=calibrated_camera_signature, image_stamp_sec=image.stamp_sec,
                 scan=plain_scan,
@@ -1775,7 +1794,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         search_metadata = dict(candidate_search.last_metadata)
         tracking_evaluation = None
         search_reconciliation = None
-        target_reconciliation = None
         if viewer_geometry:
             search_reconciliation, reconciliation_metadata = reconcile_stopped_target_search(
                 scan=plain_scan, candidate_xy=(self.args.stand_x, self.args.stand_y),
@@ -1793,21 +1811,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 intrinsics=intrinsics, model_profile=self.stand_model_profile,
                 stand_radius_m=self.args.stand_radius_m,
                 stand_uncertainty_m=self.args.stand_uncertainty_m)
-            if getattr(self.args, 'candidate_crop_snapshot', None) is not None:
-                if not hasattr(self, '_target_reconciliation'):
-                    self._target_reconciliation = StoppedTargetReconciliation()
-                target_reconciliation = self._target_reconciliation.observe(
-                    snapshot_path=self.args.candidate_crop_snapshot,candidate_uid=self.args.stand_id,
-                    planning_frame=self.profile.map_frame,stand_center=(self.args.stand_x,self.args.stand_y),
-                    target_key=self._target_evidence_key(),
-                    epoch=0 if self.observation_evidence is None else self.observation_evidence.snapshot().motion_epoch,
-                    scan=plain_scan, scan_from_map=RigidTransform(self.profile.scan_frame,self.profile.map_frame,
-                        scan_translation,scan_rotation),robot_pose=(robot_pose.x_m,robot_pose.y_m,robot_pose.yaw_rad),
-                    image_stamp_sec=image.stamp_sec,now_sec=self.node.get_clock().now().nanoseconds/1e9,
-                    options=dict(map_bearing_rad=scan_bearing,
-                        cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
-                        max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
-                        accepted_range_m=(lower_surface_bound,upper_surface_bound)))
             head_search_projection = (projection if search_reconciliation is None
                                       else search_reconciliation.projection)
             region_association = preliminary_lidar_association
@@ -2148,6 +2151,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             return
         if current_head_association is not None:
             axis_metadata["current_head_candidate_association"] = current_head_association.metadata()
+            if (target_reconciliation is not None and current_head_association.accepted
+                    and current_head_association.head_orientation_bounds is not None):
+                axis_metadata['head_position_evidence'] = dict(
+                    head_bounds=asdict(current_head_association.head_orientation_bounds),
+                    scan_from_camera=asdict(scan_from_camera_geometry),
+                    model_path=str(self.args.stand_model_profile.resolve()))
             model_metadata["scan_target_persistence"] = dict(self._scan_target_persistence.last_metadata)
         selected_qr_observations = getattr(selected, "qr_observations", None)
         if selected_qr_observations is None and selected.qr_decode_metadata is None:
@@ -2837,6 +2846,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             snapshot = update.snapshot
             try:
                 axis_observation = build_backside_axis_observation(
+                    target_reconciliation=target_reconciliation,
+                    head_position_evidence=axis_metadata.get("head_position_evidence"),
                     stream_id=self.args.stream_id,
                     stand_id=self.args.stand_id,
                     planning_frame=self.profile.map_frame,
@@ -3035,6 +3046,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if state not in {
             "metric_model_measurement_unavailable", "evidence_not_committable",
             "axis_observation_not_committable", "collecting_consensus",
+            "opposite_identity_collecting", "opposite_identity_crop_conflict",
+            "candidate_centering_budget_exceeded",
         }:
             return None
         if current is None:

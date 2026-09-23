@@ -62,6 +62,8 @@ def build_backside_axis_observation(
     calibration_profile_sha256: str,
     target_registration: Mapping[str, object],
     bounded_orientation: Mapping[str, object] | None = None,
+    target_reconciliation: dict | None = None,
+    head_position_evidence: dict | None = None,
 ) -> dict[str, object]:
     """Build schema 3 from repeated, registered current-frame evidence."""
 
@@ -157,6 +159,10 @@ def build_backside_axis_observation(
         # This variant supplies an interval, never a precise axis confidence.
         # Navigation must validate the whole interval at its selected endpoint.
         payload["bounded_orientation"] = dict(bounded_orientation)
+    if target_reconciliation is not None:
+        payload["target_reconciliation"] = target_reconciliation
+    if head_position_evidence is not None:
+        payload["head_position_evidence"] = head_position_evidence
     validate_backside_axis_observation(payload)
     return payload
 

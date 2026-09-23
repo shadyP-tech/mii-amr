@@ -75,6 +75,7 @@ class CandidatePreapproachPlan:
     minimum_candidate_transit_radius_m: float
     minimum_static_inflation_m: float
     goal_cell_selection: GoalCellSelectionEvidence | None
+    validated_target_center: dict | None = None
 
     @property
     def map_bundle_sha256(self) -> str:

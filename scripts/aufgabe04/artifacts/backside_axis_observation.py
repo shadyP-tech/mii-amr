@@ -100,12 +100,26 @@ class BacksideAxisObservation:
     stand_model_profile_sha256: str
     bounded_orientation: Mapping[str, object] | None = None
 
+    target_reconciliation: dict | None = None
+    head_position_evidence: dict | None = None
+
+    @property
+    def validated_target_center(self):
+        if self.target_reconciliation is None:
+            return None
+        from scripts.aufgabe04.artifacts.current_target_estimate import current_target_estimate, measured_target_estimate
+        if self.head_position_evidence is not None:
+            return measured_target_estimate(self.target_reconciliation,self.head_position_evidence,
+                model_sha256=self.stand_model_profile_sha256)
+        return current_target_estimate(self.target_reconciliation)
+
     @property
     def opposite_face_normal_rad(self) -> float:
         """Return the stand normal antipodal to the observing robot."""
 
-        relative_x_m = self.robot_x_m - self.stand_x_m
-        relative_y_m = self.robot_y_m - self.stand_y_m
+        center = self.validated_target_center or dict(x_m=self.stand_x_m,y_m=self.stand_y_m)
+        relative_x_m = self.robot_x_m - center["x_m"]
+        relative_y_m = self.robot_y_m - center["y_m"]
         if math.hypot(relative_x_m, relative_y_m) <= 1.0e-9:
             raise ValueError(
                 "axis observation robot pose coincides with stand center"
@@ -336,7 +350,15 @@ def validated_backside_axis_observation(
     stand = _mapping(payload.get("stand_center"), "stand_center")
     robot = _mapping(payload.get("robot_pose"), "robot_pose")
     _finite_number(robot.get("yaw_rad"), "robot_pose.yaw_rad")
-    return BacksideAxisObservation(
+    reconciliation = payload.get('target_reconciliation')
+    if reconciliation is not None:
+        from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+        validate_reconciliation(reconciliation,candidate_uid=stand_id,
+            stand_center=(stand.get('x_m'),stand.get('y_m')),image_stamp_sec=payload['sensor_stamp_sec'])
+        if (reconciliation['planning_frame'] != planning_frame
+                or tuple(reconciliation['entries'][-1]['robot_pose']) != tuple(robot[k] for k in ('x_m','y_m','yaw_rad'))):
+            raise ValueError('backside target reconciliation differs from observation frame')
+    result = BacksideAxisObservation(
         stand_id=stand_id,
         planning_frame=planning_frame,
         stand_axis_rad=_finite_number(
@@ -351,7 +373,15 @@ def validated_backside_axis_observation(
         axis_sample_count=axis_sample_count,
         stand_model_profile_sha256=model_sha256,
         bounded_orientation=None if bounded_payload is None else dict(bounded_payload),
+        target_reconciliation=reconciliation,
+        head_position_evidence=payload.get("head_position_evidence"),
     )
+
+    if result.head_position_evidence is not None:
+        if reconciliation is None:
+            raise ValueError("head position requires current target reconciliation")
+        result.validated_target_center  # Validate the derived position at receipt admission.
+    return result
 
 
 def validate_backside_axis_observation(
