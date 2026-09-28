@@ -17,6 +17,7 @@ from scripts.aufgabe04.navigation.control.driving_behavior import (
 from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
     RETURN_TO_START_ANGULAR_RADPS,
     RETURN_TO_START_LINEAR_MPS,
+    STORED_POSE_TOUR_SPEED_POLICY,
     controller_for_return_to_start_phase,
     return_to_start_speed_policy_evidence,
     return_to_start_speed_policy_failures,
@@ -40,6 +41,26 @@ from scripts.aufgabe04.real_robot.execution.child_runner import build_child_runn
 
 
 class ReturnToStartSpeedPolicyTest(unittest.TestCase):
+    def test_tour_has_the_same_caps_under_its_own_exact_mission_policy(self):
+        for dry in (True, False):
+            with self.subTest(dry=dry):
+                args = self.parsed_child(kind=MissionLegKind.STORED_POSE_TOUR, dry=dry)
+                self.assertEqual(args.motion_speed_policy, STORED_POSE_TOUR_SPEED_POLICY)
+                self.assertEqual((args.max_linear_mps, args.max_angular_radps), (.15, .60))
+                self.assertEqual(args.uncertainty_braking_latency_distance_m, .075)
+                self.assertEqual(return_to_start_speed_policy_failures(
+                    args, route_kind="admitted_candidate_pose", simulation_only=False,
+                ), [])
+                args.motion_speed_policy = "unloaded_return_to_start"
+                self.assertTrue(return_to_start_speed_policy_failures(
+                    args, route_kind="admitted_candidate_pose", simulation_only=False,
+                ))
+        args = self.parsed_child(dry=False)
+        args.motion_speed_policy = STORED_POSE_TOUR_SPEED_POLICY
+        self.assertTrue(return_to_start_speed_policy_failures(
+            args, route_kind="admitted_candidate_pose", simulation_only=False,
+        ))
+
     def child_arguments(self, *, kind=MissionLegKind.RETURN_TO_START, dry=True):
         profile = SimpleNamespace(
             robot_id="turtlebot1", namespace="", scan_topic="scan",

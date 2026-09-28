@@ -80,6 +80,14 @@ MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "association, calibrated camera bearing, and the same live motion checks "
     "are required; no stand angle or survey landmark is rewritten."
 )
+TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    "Authorize only this newly confirmed stored-pose tour session. Each visit "
+    "must name its exact stored QR identity, candidate, source pose and source "
+    "artifacts, with at most four separately sealed stages per visit. Every "
+    "stage requires fresh stopped localization, an exact collision-checked "
+    "route, a passed dry run and its own single-use permit. This scope grants "
+    "no exploration, Start-return reuse, startup reseal or recovery motion."
+)
 
 
 class MissionLegKind(str, Enum):
@@ -89,6 +97,7 @@ class MissionLegKind(str, Enum):
     CANDIDATE_PREAPPROACH = "candidate_preapproach"
     OPPOSITE_FACE = "opposite_face"
     RETURN_TO_START = "return_to_start"
+    STORED_POSE_TOUR = "stored_pose_tour"
     STARTUP_RESEAL = "startup_reseal"
 
 
@@ -103,9 +112,12 @@ ROUTINE_MISSION_LEG_KINDS = (
     *RECOVERABLE_MISSION_LEG_KINDS,
     MissionLegKind.RETURN_TO_START,
 )
+# Kept separate: autonomous exploration must never acquire tour authority by
+# importing its established routine-kind tuple.
+PERMITTABLE_MISSION_LEG_KINDS = (*ROUTINE_MISSION_LEG_KINDS, MissionLegKind.STORED_POSE_TOUR)
 
 _LEG_KIND_ORDER = {
-    kind: index for index, kind in enumerate(ROUTINE_MISSION_LEG_KINDS)
+    kind: index for index, kind in enumerate(PERMITTABLE_MISSION_LEG_KINDS)
 }
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _AUTHORIZATION_FIELDS = frozenset(
@@ -714,6 +726,7 @@ def _validate_authorization(
     for kind in authorization.allowed_leg_kinds:
         _require_routine_leg_kind(kind, "allowed_leg_kinds")
     if authorization.scope_text not in (
+        TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -721,6 +734,11 @@ def _validate_authorization(
         LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     ):
         raise ValueError("mission leg motion authorization scope_text mismatch")
+    is_tour_scope = authorization.scope_text == TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    if is_tour_scope != (authorization.allowed_leg_kinds == (MissionLegKind.STORED_POSE_TOUR,)):
+        raise ValueError("stored_pose_tour requires a separate tour-only authorization scope")
+    if MissionLegKind.STORED_POSE_TOUR in authorization.allowed_leg_kinds and not is_tour_scope:
+        raise ValueError("stored_pose_tour requires a separate tour-only authorization scope")
     if (
         MissionLegKind.RETURN_TO_START in authorization.allowed_leg_kinds
         and authorization.scope_text not in {
@@ -800,14 +818,75 @@ def _validate_permit_references(permit: MissionLegMotionPermit) -> None:
     _validate_return_to_start_route_scope(permit, authorization)
 
 
+def validate_stored_pose_tour_target_evidence(evidence: object) -> None:
+    """Re-read the original admitted catalog instead of trusting a QR relabel."""
+    if not isinstance(evidence, Mapping):
+        raise ValueError("stored_pose_tour target evidence must be an object")
+    for name in ("tour_id", "qr_id", "candidate_uid"):
+        _require_nonempty(evidence.get(name), name)
+    _nonnegative_integer(evidence.get("visit_index"), "visit_index")
+    source_artifacts = evidence.get("source_artifacts")
+    if not isinstance(source_artifacts, list) or not source_artifacts:
+        raise ValueError("stored_pose_tour requires its original source artifacts")
+    sources = {}
+    for source in source_artifacts:
+        if not isinstance(source, Mapping) or not isinstance(source.get("path"), str):
+            raise ValueError("stored_pose_tour source artifact is invalid")
+        path = Path(source["path"])
+        if file_sha256(path) != source.get("sha256"):
+            raise ValueError("stored_pose_tour source artifact hash mismatch")
+        sources[str(path.resolve())] = source["sha256"]
+    catalog_path = Path(str(evidence.get("catalog_path", "")))
+    # Historical catalog references may be repository-relative while their
+    # source-artifact entries are absolute. Check the original path before
+    # resolving it so a symlink cannot bypass the normal-file requirement.
+    catalog_file_sha256 = file_sha256(catalog_path)
+    catalog_path = catalog_path.resolve()
+    if sources.get(str(catalog_path)) != catalog_file_sha256:
+        raise ValueError("stored_pose_tour catalog is missing from source artifacts")
+    kind = evidence.get("pose_kind")
+    if kind == "geometry_validated_facing_pose":
+        hash_field, catalog_kind, pose_field = (
+            "stand_facing_catalog_sha256", "real_autonomous_stand_facing_poses", "facing_pose",
+        )
+    elif kind == "qr_verified_observation_pose":
+        hash_field, catalog_kind, pose_field = (
+            "qr_observation_pose_catalog_sha256", "real_autonomous_qr_observation_poses", "robot_observation_pose",
+        )
+    else:
+        raise ValueError("stored_pose_tour requires an admitted catalog pose kind")
+    try:
+        catalog = load_content_hashed_json(catalog_path, hash_field=hash_field)
+    except ContentStoreError as exc:
+        raise ValueError(f"stored_pose_tour catalog is invalid: {exc}") from exc
+    if payload_sha256(catalog) != evidence.get("catalog_sha256") or catalog.get("catalog_kind") != catalog_kind:
+        raise ValueError("stored_pose_tour catalog identity mismatch")
+    records = catalog.get("records")
+    if not isinstance(records, list) or any(not isinstance(record, Mapping) for record in records):
+        raise ValueError("stored_pose_tour catalog records are invalid")
+    matches = [record for record in records if (
+        record.get("candidate_uid") == evidence["candidate_uid"]
+        or record.get("qr_id") == evidence["qr_id"]
+    )]
+    if (
+        len(matches) != 1
+        or matches[0].get("candidate_uid") != evidence["candidate_uid"]
+        or matches[0].get("qr_id") != evidence["qr_id"]
+        or matches[0].get(pose_field) != evidence.get("stored_pose")
+    ):
+        raise ValueError("stored_pose_tour QR, candidate or pose differs from admitted catalog")
+
+
 def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bool:
     """Bind a return stage to its Start identity and return its final-stage flag.
 
     This is an artifact check, not motion authorization. The route admission
     layer independently verifies endpoint geometry, projection and clearance.
     """
-    if permit.mission_leg_kind is not MissionLegKind.RETURN_TO_START:
+    is_tour = permit.mission_leg_kind is MissionLegKind.STORED_POSE_TOUR
+    if permit.mission_leg_kind not in {MissionLegKind.RETURN_TO_START, MissionLegKind.STORED_POSE_TOUR}:
         raise ValueError("return stage binding requires return_to_start")
+    stage_index = permit.mission_leg_index % MAX_RETURN_TO_START_LEGS if is_tour else permit.mission_leg_index
     _validate_bound_artifact("diagnostics", permit.diagnostics_path, permit.diagnostics_sha256)
     try:
         payload = json.loads(Path(permit.diagnostics_path).read_text(encoding="utf-8"))
@@ -816,7 +895,7 @@ def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bo
             raise ValueError("return_to_start requires route metadata")
         expected = {
             "route_kind": "admitted_candidate_pose",
-            "route_purpose": "return_to_start",
+            "route_purpose": "stored_pose_tour" if is_tour else "return_to_start",
             "selected_candidate_stand_id": permit.target_id,
             "route_csv_sha256": permit.route_csv_sha256,
         }
@@ -827,15 +906,27 @@ def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bo
         if file_sha256(evidence_path) != metadata.get("target_evidence_sha256"):
             raise ValueError("return_to_start target evidence hash mismatch")
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        if is_tour:
+            validate_stored_pose_tour_target_evidence(evidence)
+            for name, value in (
+                ("tour_id", permit.session_id),
+                ("visit_index", permit.mission_leg_index // MAX_RETURN_TO_START_LEGS),
+                ("qr_id", evidence["qr_id"]),
+            ):
+                if (
+                    evidence.get(name) != value or metadata.get(name) != value
+                    or (name == "visit_index" and type(metadata.get(name)) is not int)
+                ):
+                    raise ValueError(f"stored_pose_tour {name} mismatch")
         if (
             not isinstance(evidence, Mapping)
             or evidence.get("candidate_uid") != permit.target_id
-            or evidence.get("qr_id") != "Start"
+            or (not is_tour and evidence.get("qr_id") != "Start")
         ):
             raise ValueError("return_to_start target evidence identity mismatch")
         stage = metadata.get("return_to_start_stage")
         if stage is None:
-            if permit.mission_leg_index != 0:
+            if stage_index != 0:
                 raise ValueError("return_to_start stage metadata is required after index 0")
             final_stage = True
         else:
@@ -843,13 +934,13 @@ def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bo
                 raise ValueError("return_to_start stage metadata must be an object")
             if (
                 type(stage.get("stage_index")) is not int
-                or stage["stage_index"] != permit.mission_leg_index
+                or stage["stage_index"] != stage_index
                 or stage.get("start_candidate_uid") != permit.target_id
                 or type(stage.get("final_stage")) is not bool
             ):
                 raise ValueError("return_to_start stage identity mismatch")
             final_stage = stage["final_stage"]
-            if not final_stage and permit.mission_leg_index == MAX_RETURN_TO_START_LEGS - 1:
+            if not final_stage and stage_index == MAX_RETURN_TO_START_LEGS - 1:
                 raise ValueError("last return_to_start stage must reach the admitted Start pose")
         stored_target = evidence.get("target_pose")
         if (
@@ -874,7 +965,7 @@ def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bo
 def _validate_return_to_start_route_scope(
     permit: MissionLegMotionPermit, authorization: MissionLegMotionAuthorization,
 ) -> None:
-    if permit.mission_leg_kind is not MissionLegKind.RETURN_TO_START:
+    if permit.mission_leg_kind not in {MissionLegKind.RETURN_TO_START, MissionLegKind.STORED_POSE_TOUR}:
         return
     final_stage = validate_return_to_start_stage_binding(permit)
     if (
@@ -1024,7 +1115,7 @@ def _mission_leg_kind(value: object, name: str) -> MissionLegKind:
 def _require_routine_leg_kind(kind: MissionLegKind, name: str) -> None:
     if kind is MissionLegKind.STARTUP_RESEAL:
         raise ValueError(f"{name} startup_reseal requires a separate typed RUN")
-    if kind not in ROUTINE_MISSION_LEG_KINDS:
+    if kind not in PERMITTABLE_MISSION_LEG_KINDS:
         raise ValueError(f"{name} is not a routine mission leg kind")
 
 
@@ -1096,6 +1187,7 @@ __all__ = [
     "MISSION_LEG_MOTION_AUTHORIZATION_HASH_FIELD",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCHEMA_VERSION",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
+    "TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "MISSION_LEG_MOTION_PERMIT_HASH_FIELD",
     "MISSION_LEG_MOTION_PERMIT_SCHEMA_VERSION",
     "MISSION_LEG_RUN_CONFIRMATION",
@@ -1103,6 +1195,7 @@ __all__ = [
     "MissionLegMotionAuthorization",
     "MissionLegMotionPermit",
     "RECOVERABLE_MISSION_LEG_KINDS",
+    "PERMITTABLE_MISSION_LEG_KINDS",
     "ROUTINE_MISSION_LEG_KINDS",
     "file_sha256",
     "load_mission_leg_motion_authorization",
@@ -1113,6 +1206,7 @@ __all__ = [
     "validate_mission_leg_motion_permit",
     "validate_mission_leg_motion_permit_for_execution",
     "validate_return_to_start_stage_binding",
+    "validate_stored_pose_tour_target_evidence",
     "write_mission_leg_motion_authorization",
     "write_mission_leg_motion_permit",
 ]

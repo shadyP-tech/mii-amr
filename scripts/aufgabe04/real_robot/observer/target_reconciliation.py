@@ -1,8 +1,9 @@
 """Bounded stopped scan-to-candidate reconciliation; never rewrites survey geometry.
 
-Three independently fresh, unique current clusters must agree in the admitted
-map frame. The original range/envelope bounds and all competing candidates are
-rechecked when the proof crosses the discovery/centering process boundary.
+Survey reconciliation uses three fresh stopped scans. An already certified
+retained metric center can instead be confirmed by one fresh unique cluster at
+the opposite view. Both policies recheck their source geometry and competitors
+when the proof crosses the discovery/centering process boundary.
 """
 from dataclasses import asdict
 from pathlib import Path
@@ -12,10 +13,12 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
+from scripts.aufgabe04.real_robot.observer.opposite_target_geometry import RETAINED_TARGET, retained_scan_target
 from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique
 from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapshot, candidate_snapshot_sha256
 
 POLICY = 'three_stopped_scans_candidate_reconciliation'
+RETAINED_POLICY = 'certified_center_current_scan_confirmation'
 MAX_HISTORY_SEC = 1.5
 
 
@@ -50,9 +53,14 @@ def _entry_result(entry, snapshot, uid, retained_center=None):
         raise ValueError('reconciliation sources are stale or frame mismatched')
     g = snapshot.candidate_for(uid).geometry
     options = entry['options']
-    # Original scan-origin candidate bearing and range interval cannot be replaced.
+    # A new target basis must recompute from the certified retained position.
+    # Legacy receipts continue to validate against their original survey bounds.
+    basis = entry.get('target_geometry_basis')
+    if basis not in (None, RETAINED_TARGET) or basis is not None and retained_center is None:
+        raise ValueError('retained target geometry lacks certified center')
     from scripts.aufgabe04.perception.stand_axis_handoff.geometry import transform_point
-    point = transform_point((g.x_m, g.y_m, 0.), tf)
+    center = (g.x_m, g.y_m) if basis is None else (retained_center["x_m"], retained_center["y_m"])
+    point = transform_point((*center, 0.), tf)
     if abs(math.remainder(math.atan2(point[1],point[0])-options['map_bearing_rad'], math.tau)) > 1e-6:
         raise ValueError('reconciliation original bearing differs from candidate')
     if (not 0 < options['cone_half_angle_rad'] <= math.radians(3)+1e-9
@@ -60,10 +68,16 @@ def _entry_result(entry, snapshot, uid, retained_center=None):
         raise ValueError('reconciliation cone exceeds bound')
     lo, hi = options['accepted_range_m']
     distance = math.hypot(*point[:2])
-    tolerance = hi-distance
+    tolerance = hi-distance-(0. if basis is None else retained_center["uncertainty_m"])
     if (not 0 < lo < hi or not 0 <= tolerance <= .05+1e-9
-            or abs(lo-(distance-2*g.radius_m-g.uncertainty_m-tolerance)) > 1e-6):
+            or abs(lo-(distance-2*g.radius_m-g.uncertainty_m-tolerance
+                -(0. if basis is None else retained_center["uncertainty_m"]))) > 1e-6):
         raise ValueError('reconciliation range is outside candidate surface envelope')
+    if basis is not None:
+        retained_scan_target(point, center=retained_center, stand_radius_m=g.radius_m,
+            stand_uncertainty_m=g.uncertainty_m, lidar_range_tolerance_m=max(0., tolerance))
+        if entry.get('position_epoch') is not None:
+            raise ValueError('retained target cannot borrow position epoch recovery')
     if entry.get('position_epoch') is not None:
         if entry.get('fragmentation') is not None:
             raise ValueError('epoch recovery requires a raw contiguous cluster')
@@ -74,7 +88,9 @@ def _entry_result(entry, snapshot, uid, retained_center=None):
     if entry.get('fragmentation') is not None:
         from scripts.aufgabe04.real_robot.observer.scan_target_persistence import scan_pose_in_map
         context = entry['fragmentation']['current']['context']
-        if (any(context[k] != v for k,v in (('candidate_x_m',g.x_m),('candidate_y_m',g.y_m),
+        if ((context.get('retained_orientation') or {}).get('validated_target_center') !=
+                (retained_center if basis is not None else None)
+                or any(context[k] != v for k,v in (('candidate_x_m',g.x_m),('candidate_y_m',g.y_m),
                 ('stand_radius_m',g.radius_m),('stand_uncertainty_m',g.uncertainty_m)))
                 or tuple(context['robot_pose'][k] for k in ('x_m','y_m','yaw_rad')) != tuple(entry['robot_pose'])
                 or context['image_stamp_sec'] != image
@@ -111,7 +127,7 @@ def _entry_result(entry, snapshot, uid, retained_center=None):
 
 
 def validate_reconciliation(proof, *, candidate_uid=None, stand_center=None, image_stamp_sec=None, scan_stamp_sec=None):
-    if (not isinstance(proof,dict) or proof.get('policy') != POLICY
+    if (not isinstance(proof,dict) or proof.get('policy') not in (POLICY, RETAINED_POLICY)
             or proof.get('candidate_geometry_updated') is not False or proof.get('motion_authorized') is not False):
         raise ValueError('invalid target reconciliation proof')
     uid = proof['candidate_uid']
@@ -122,13 +138,24 @@ def validate_reconciliation(proof, *, candidate_uid=None, stand_center=None, ima
     if stand_center is not None and math.dist(stand_center,proof['stand_center']) > 1e-6:
         raise ValueError('reconciliation stand center changed')
     entries = proof['entries']
-    if len(entries) != 3:
-        raise ValueError('three independent stopped observations required')
+    retained_confirmation = proof['policy'] == RETAINED_POLICY
+    required = 1 if retained_confirmation else 3
+    if len(entries) != required:
+        raise ValueError('incorrect number of current target observations')
+    if retained_confirmation:
+        from scripts.aufgabe04.artifacts.retained_backside_orientation import opposite_view_matches
+        from scripts.aufgabe04.navigation.foundation.models import Pose2D
+        if (entries[0].get('target_geometry_basis') != RETAINED_TARGET
+                or not proof.get('retained_orientation')
+                or not opposite_view_matches(proof['retained_orientation'], Pose2D(*entries[0]['robot_pose']))):
+            raise ValueError('current confirmation requires certified opposite target')
     for entry in entries:
         if entry.get('fragmentation') is not None:
             context = entry['fragmentation']['current']['context']
             if context['target_key'] != proof['target_key'] or context['epoch_key'] != str(proof['epoch']):
                 raise ValueError('fragmentation differs from reconciliation target epoch')
+    if any(e.get('target_geometry_basis') != entries[0].get('target_geometry_basis') for e in entries):
+        raise ValueError('reconciliation target geometry basis changed')
     epoch_refs = [e.get('position_epoch') for e in entries]
     if any(ref != epoch_refs[0] for ref in epoch_refs):
         raise ValueError('reconciliation position epochs changed')
@@ -158,10 +185,10 @@ class StoppedTargetReconciliation:
 
     def observe(self, *, snapshot_path, candidate_uid, planning_frame, stand_center,
                 target_key, epoch, scan, scan_from_map, robot_pose, image_stamp_sec, now_sec, options,
-                retained_orientation=None, fragmentation=None, position_epoch_path=None):
+                retained_orientation=None, fragmentation=None, position_epoch_path=None, use_retained_target=False):
         context = (str(snapshot_path),candidate_uid,planning_frame,tuple(stand_center),target_key,epoch,
                    None if retained_orientation is None else retained_orientation.get("projection_sha256"),
-                   str(position_epoch_path))
+                   str(position_epoch_path), use_retained_target)
         if context != self.context:
             self.entries = []
             self.context = context
@@ -172,12 +199,14 @@ class StoppedTargetReconciliation:
             raw['ranges'] = [v if math.isfinite(v) else None for v in scan.ranges]
             entry = dict(scan=raw,scan_from_map=asdict(scan_from_map),robot_pose=list(robot_pose),
                 image_stamp_sec=image_stamp_sec,checked_at_sec=now_sec,options=options)
+            if use_retained_target:
+                entry['target_geometry_basis'] = RETAINED_TARGET
             if fragmentation is not None:
                 entry['fragmentation'] = fragmentation
             try:
                 _entry_result(entry,snapshot,candidate_uid,_retained_center(retained_orientation,snapshot,candidate_uid))
             except ValueError:
-                if position_epoch_path is None:
+                if position_epoch_path is None or use_retained_target:
                     raise
                 from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import epoch_reference
                 entry.pop('fragmentation',None)
@@ -190,17 +219,20 @@ class StoppedTargetReconciliation:
                 self.entries = []
                 raise ValueError('duplicate or regressed reconciliation tuple')
             self.entries = [e for e in self.entries if image_stamp_sec-e['image_stamp_sec'] <= MAX_HISTORY_SEC][-2:]+[entry]
-            proof = dict(policy=POLICY,candidate_uid=candidate_uid,planning_frame=planning_frame,
+            if use_retained_target:
+                self.entries = self.entries[-1:]
+            proof = dict(policy=RETAINED_POLICY if use_retained_target else POLICY,
+                candidate_uid=candidate_uid,planning_frame=planning_frame,
                 stand_center=list(stand_center),snapshot_path=str(Path(snapshot_path).resolve()),
                 snapshot_sha256=candidate_snapshot_sha256(snapshot),target_key=target_key,epoch=epoch,
                 entries=self.entries.copy(),candidate_geometry_updated=False,motion_authorized=False)
             if retained_orientation is not None:
                 proof["retained_orientation"] = retained_orientation
-            if len(self.entries) < 3:
+            if len(self.entries) < (1 if use_retained_target else 3):
                 self.metadata = dict(ready=False,reason='collecting_stopped_target',sample_count=len(self.entries))
                 return None
             validate_reconciliation(proof)
-            self.metadata = dict(ready=True,reason='current_target_reconciled',sample_count=3)
+            self.metadata = dict(ready=True,reason='current_target_reconciled',sample_count=len(self.entries))
             return proof
         except (ValueError,TypeError,KeyError,AttributeError,OSError) as exc:
             self.entries = []

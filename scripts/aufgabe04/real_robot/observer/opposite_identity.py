@@ -16,7 +16,7 @@ from scripts.aufgabe04.real_robot.configuration.geometry import pose2d_from_tran
 def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose,
         camera_signature, image_stamp_sec, scan, scan_from_map, camera_from_map,
         map_bearing_rad, accepted_range_m, scan_from_camera, base_from_camera, image_stamp,
-        target_reconciliation=None, fragmentation=None):
+        target_reconciliation=None, fragmentation=None, require_target_reconciliation=False):
     """The caller supplies the ordinary stopped, exact-TF sensor tuple.
 
     A newly decoded payload may finish this branch immediately. No historical
@@ -38,6 +38,10 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         max_camera_map_bearing_delta_rad=math.radians(adapter.args.backside_registration_max_bearing_delta_deg),
         accepted_range_m=accepted_range_m, now_sec=now, max_scan_age_sec=adapter.args.max_sensor_age_sec)
     search = current_scan_qr_search(**options)
+    if require_target_reconciliation and target_reconciliation is None:
+        search = (None, {**search[1], 'accepted': False,
+            'reason': 'retained_target_reconciliation_pending'})
+    support_diagnostics = {}
     support = detect_opposite_target_support(frame, adapter.cv2, attempt=search[0],
         intrinsics=intrinsics, model_profile=adapter.stand_model_profile,
         scan_from_camera=scan_from_camera, scan=scan, image_stamp_sec=image_stamp_sec,
@@ -45,13 +49,16 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         cone_half_angle_rad=options['cone_half_angle_rad'], accepted_range_m=accepted_range_m,
         max_scan_age_sec=adapter.args.max_sensor_age_sec,
         max_camera_map_bearing_delta_rad=options['max_camera_map_bearing_delta_rad'],
+        diagnostics=support_diagnostics,
         resources=getattr(adapter, '_qr_decoder_options', {}).get('resources'),
         target_reconciliation=target_reconciliation, fragmentation=fragmentation,
         max_elapsed_sec=min(.06, adapter.args.max_sensor_age_sec-max(0., now-min(image_stamp_sec, scan.scan_stamp_sec))-.08))
     attempt, crop = exclusive_identity_crop(candidate_uid=adapter.args.stand_id,
         snapshot=context.snapshot, support=support, search_result=search, **options)
     metadata = dict(policy='opposite_identity_only', retained_backside_orientation=orientation,
-                    identity_crop=crop, current_angle_refit=False)
+                    identity_crop=crop, current_angle_refit=False,
+                    target_support_diagnostics=support_diagnostics,
+                    target_reconciliation_status=getattr(getattr(adapter, '_target_reconciliation', None), 'metadata', {}))
     observations = ()
     if attempt is not None:
         roi = attempt.roi
@@ -101,5 +108,15 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
     state = 'opposite_identity_collecting' if crop.get('accepted') else 'opposite_identity_crop_conflict'
     if (metadata.get('candidate_centering') or {}).get('reason') == 'centering_budget_exceeded':
         state = 'candidate_centering_budget_exceeded'
+    from scripts.aufgabe04.real_robot.observer.opposite_identity_opportunity import OppositeIdentityOpportunity
+    if not hasattr(adapter, '_opposite_identity_opportunity'):
+        adapter._opposite_identity_opportunity = OppositeIdentityOpportunity()
+    adapter._opposite_identity_failure = adapter._opposite_identity_opportunity.observe(
+        target_key=adapter._target_evidence_key(), epoch=getattr(update.snapshot, 'motion_epoch', 0),
+        pose=(robot_pose.x_m, robot_pose.y_m, robot_pose.yaw_rad),
+        image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan.scan_stamp_sec, now_sec=now,
+        poisoned=getattr(update.snapshot, 'poisoned', True),
+        motion_epoch_reset=getattr(update, 'motion_epoch_reset', False),
+        conflict=not crop.get('accepted') and not binding.accepted)
     adapter._write_status(state, qr_texts=list(texts),
         stand_axis_debug=metadata, observation_evidence=update.snapshot.as_dict())

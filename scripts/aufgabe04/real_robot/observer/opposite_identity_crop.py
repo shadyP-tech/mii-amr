@@ -55,6 +55,8 @@ def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrins
         if target is None:
             return None, {**info, 'reason': 'target_missing_from_snapshot'}
         uncertainty = target.geometry.radius_m + target.geometry.uncertainty_m
+        if proof is not None and proof['policy'] == 'certified_center_current_scan_confirmation':
+            uncertainty += proof['retained_orientation']['validated_target_center']['uncertainty_m']
         target_depth_interval = [max(0., support.depth_m-uncertainty), support.depth_m+uncertainty]
         sampling = 'isolated_current_qr_quad'
     competitors = []

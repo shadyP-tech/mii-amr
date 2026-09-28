@@ -9,7 +9,9 @@ from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import re
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.station_segment.cli import build_parser
 from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import CandidateRouteUncertaintyReadinessRequest
-from scripts.aufgabe04.real_robot.mission.start_return_readiness import load_start_return_readiness
+from scripts.aufgabe04.real_robot.mission.start_return_readiness import (
+    load_start_return_readiness, load_stored_pose_tour_readiness,
+)
 from tests.aufgabe04.test_candidate_route_uncertainty_readiness import _preflight_payload
 
 
@@ -47,3 +49,17 @@ class StartReturnReadinessTest(unittest.TestCase):
                 load_start_return_readiness(CandidateRouteUncertaintyReadinessRequest(
                     path, Pose2D(.5, .2, .3), "map", "odom", .105, 2.,
                 ))
+
+    def test_tour_uses_same_budget_with_its_own_policy_identity(self):
+        start = Pose2D(1., .2, .3)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "stopped.json"
+            path.write_text(json.dumps(_preflight_payload(start)))
+            request = CandidateRouteUncertaintyReadinessRequest(path, start, "map", "odom", .105, 2.)
+            original = load_start_return_readiness(request)
+            tour = load_stored_pose_tour_readiness(request)
+        self.assertEqual(tour.admission_config, original.admission_config)
+        self.assertEqual(tour.covariance, original.covariance)
+        self.assertEqual(tour.source_evidence, {
+            **original.source_evidence, "motion_speed_policy": "unloaded_stored_pose_tour",
+        })

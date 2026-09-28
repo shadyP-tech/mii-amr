@@ -7,7 +7,7 @@ from pathlib import Path
 from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
     RETURN_TO_START_ANGULAR_RADPS,
     RETURN_TO_START_LINEAR_MPS,
-    RETURN_TO_START_SPEED_POLICY,
+    STORED_POSE_SPEED_POLICY_KINDS,
     return_to_start_speed_policy_failures,
 )
 from scripts.aufgabe04.navigation.control.driving_behavior import (
@@ -21,7 +21,8 @@ from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
 )
 from scripts.aufgabe04.navigation.approach.admitted_pose_route import (
     ADMITTED_POSE_ROUTE_KIND,
-    ADMITTED_POSE_ROUTE_PURPOSE,
+    ADMITTED_POSE_ROUTE_PURPOSES,
+    STORED_POSE_TOUR_ROUTE_PURPOSE,
     validate_admitted_pose_route_binding,
 )
 from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
@@ -484,8 +485,14 @@ def admit_execution_route(
                         "detected stand pre-approach requires --candidate-snapshot"
                     )
             elif leg.route_kind == ADMITTED_POSE_ROUTE_KIND:
-                if route_purpose != ADMITTED_POSE_ROUTE_PURPOSE:
-                    raise ValueError("admitted pose route requires route_purpose=return_to_start")
+                if route_purpose not in ADMITTED_POSE_ROUTE_PURPOSES:
+                    raise ValueError("admitted pose route requires a known stored-pose purpose")
+                mission_kind = args.mission_leg_evidence_kind if args.dry_run else args.mission_leg_kind
+                if (
+                    STORED_POSE_TOUR_ROUTE_PURPOSE in (mission_kind, route_purpose)
+                    and mission_kind != route_purpose
+                ):
+                    raise ValueError("admitted pose route purpose must match its exact mission kind")
                 if args.candidate_snapshot is None:
                     raise ValueError("admitted pose route requires --candidate-snapshot")
             elif leg.route_kind == STAND_DISCOVERY_ROUTE_KIND:
@@ -566,7 +573,7 @@ def admit_execution_route(
         args, route_kind=leg.route_kind, simulation_only=leg.simulation_only,
     )
     fast_start_travel = (
-        getattr(args, "motion_speed_policy", "exploration") == RETURN_TO_START_SPEED_POLICY
+        getattr(args, "motion_speed_policy", "exploration") in STORED_POSE_SPEED_POLICY_KINDS
         and not speed_policy_failures
     )
     speed_status = validate_speed_limits(

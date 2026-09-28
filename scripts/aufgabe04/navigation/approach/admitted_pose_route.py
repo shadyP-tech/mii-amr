@@ -44,7 +44,9 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     write_execution_route_certificate,
 )
 from scripts.aufgabe04.navigation.execution.route_context import build_route_metadata
-from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MAX_RETURN_TO_START_LEGS
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    MAX_RETURN_TO_START_LEGS, validate_stored_pose_tour_target_evidence,
+)
 from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import RouteUncertaintyAdmissionConfig
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
 from scripts.aufgabe04.navigation.foundation.artifacts import (
@@ -74,7 +76,10 @@ from scripts.aufgabe04.stations.models import Station, StationPose
 
 ADMITTED_POSE_ROUTE_KIND = "admitted_candidate_pose"
 ADMITTED_POSE_ROUTE_PURPOSE = "return_to_start"
+STORED_POSE_TOUR_ROUTE_PURPOSE = "stored_pose_tour"
+ADMITTED_POSE_ROUTE_PURPOSES = (ADMITTED_POSE_ROUTE_PURPOSE, STORED_POSE_TOUR_ROUTE_PURPOSE)
 _SOURCE = "stored_admitted_start_pose"
+_TOUR_SOURCE = "stored_admitted_pose_tour"
 
 
 def _pose(value: object, name: str) -> Pose2D:
@@ -103,15 +108,21 @@ def _finite_number(value: object) -> bool:
 
 def _validate_target_evidence(
     evidence: object, *, snapshot: CandidateSnapshot, candidate_uid: str,
-    target: Pose2D, start: Pose2D,
+    target: Pose2D, start: Pose2D, purpose: str = ADMITTED_POSE_ROUTE_PURPOSE,
 ) -> None:
     if not isinstance(evidence, Mapping):
         raise ValueError("stored target evidence must be an object")
     expected = {
-        "qr_id": "Start", "candidate_uid": candidate_uid,
+        "candidate_uid": candidate_uid,
         "planning_frame": snapshot.planning_frame,
         "candidate_snapshot_sha256": candidate_snapshot_sha256(snapshot),
     }
+    if purpose == ADMITTED_POSE_ROUTE_PURPOSE:
+        expected["qr_id"] = "Start"
+    elif purpose == STORED_POSE_TOUR_ROUTE_PURPOSE:
+        validate_stored_pose_tour_target_evidence(evidence)
+    else:
+        raise ValueError("unknown admitted pose route purpose")
     for key, value in expected.items():
         if evidence.get(key) != value:
             raise ValueError(f"stored target evidence {key} mismatch")
@@ -218,10 +229,18 @@ def plan_admitted_pose_route(
     candidate_transit_radius_m: float | None = None,
     route_uncertainty_context: CandidateRouteUncertaintyContext | None = None,
     return_stage_index: int = 0,
+    purpose: str = ADMITTED_POSE_ROUTE_PURPOSE,
 ) -> dict[str, object]:
     """Create one independently sealed route; grant no live motion permission."""
     _pose(asdict(start), "start")
     _pose(asdict(target), "target")
+    if purpose not in ADMITTED_POSE_ROUTE_PURPOSES:
+        raise ValueError("unknown admitted pose route purpose")
+    source = _TOUR_SOURCE if purpose == STORED_POSE_TOUR_ROUTE_PURPOSE else _SOURCE
+    tour_identity = (
+        {key: target_evidence.get(key) for key in ("tour_id", "visit_index", "qr_id")}
+        if purpose == STORED_POSE_TOUR_ROUTE_PURPOSE else {}
+    )
     if (
         isinstance(return_stage_index, bool) or not isinstance(return_stage_index, int)
         or not 0 <= return_stage_index < MAX_RETURN_TO_START_LEGS
@@ -256,7 +275,7 @@ def plan_admitted_pose_route(
         raise ValueError("stored target snapshot differs from coverage plan")
     _validate_target_evidence(
         target_evidence, snapshot=snapshot, candidate_uid=candidate_uid,
-        target=target, start=start,
+        target=target, start=start, purpose=purpose,
     )
     stationary_turn = (target.x_m, target.y_m) == (start.x_m, start.y_m)
     if stationary_turn and _same_pose(start, target):
@@ -400,6 +419,7 @@ def plan_admitted_pose_route(
             "stored_start_target_pose": asdict(target), "start_pose": asdict(start),
             "exact_start_connector": connector.to_metadata(),
             **return_route_geometry(full_poses),
+            **({"route_purpose": purpose, **tour_identity} if tour_identity else {}),
         }
         paths["full_return_route_json"].write_text(json.dumps(full_evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
         paths["uncertainty_selection_json"].write_text(json.dumps(stage.evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
@@ -437,9 +457,10 @@ def plan_admitted_pose_route(
     ))
     metadata = build_route_metadata(map_yaml, grid, (candidate_uid,), arena_bounds=plan.arena_bounds, map_bundle=bundle)
     metadata.update({
-        "source": _SOURCE, "route_kind": ADMITTED_POSE_ROUTE_KIND,
+        "source": source, "route_kind": ADMITTED_POSE_ROUTE_KIND,
         "stationary_turn": stationary_turn,
-        "route_purpose": ADMITTED_POSE_ROUTE_PURPOSE, "motion_authorized": True,
+        "route_purpose": purpose, "motion_authorized": True,
+        **tour_identity,
         "planning_frame": snapshot.planning_frame, "physical_clearance_enforced": True,
         "physical_clearance": dict(physical_clearance), "inflation_radius_m": inflation_radius_m,
         "candidate_transit_radius_m": radius, "candidate_snapshot_json": str(paths["candidate_snapshot"]),
@@ -448,7 +469,7 @@ def plan_admitted_pose_route(
         "target_evidence_sha256": file_sha256(paths["target_evidence_json"]),
         "selected_approach_pose": asdict(stage_target), "stored_start_target_pose": asdict(target),
         "exact_start_connector": connector.to_metadata(),
-        "route_start_pose_provenance": {"source": _SOURCE, "planning_frame": snapshot.planning_frame, "pose": asdict(start)},
+        "route_start_pose_provenance": {"source": source, "planning_frame": snapshot.planning_frame, "pose": asdict(start)},
         "line_of_sight_route_optimization": {"enabled": smoothing.enabled, "legs": [smoothing.to_metadata()]},
         "route_csv_sha256": route_hash, "route_certificate_path": str(paths["route_certificate_json"]),
         "route_certificate_sha256": certificate_hash,
@@ -499,6 +520,10 @@ def _validate_return_stage(
         if not isinstance(artifacts[name], Mapping):
             raise ValueError(f"return {name} must be an object")
     full, selection = artifacts["full_return_route"], artifacts["uncertainty_selection"]
+    if metadata.get("route_purpose") == STORED_POSE_TOUR_ROUTE_PURPOSE:
+        for key in ("route_purpose", "tour_id", "visit_index", "qr_id"):
+            if full.get(key) != metadata.get(key):
+                raise ValueError(f"full stored-pose tour {key} mismatch")
     for key, expected in (
         ("schema_version", 1), ("stage_index", index),
         ("start_candidate_uid", stage["start_candidate_uid"]),
@@ -581,9 +606,12 @@ def validate_admitted_pose_route_binding(
         metadata = payload["metadata"]
         if not isinstance(metadata, Mapping):
             raise ValueError("missing admitted pose route metadata")
+        purpose = metadata.get("route_purpose")
+        if purpose not in ADMITTED_POSE_ROUTE_PURPOSES:
+            raise ValueError("admitted pose route route_purpose mismatch")
         for key, expected in (
             ("route_kind", ADMITTED_POSE_ROUTE_KIND),
-            ("route_purpose", ADMITTED_POSE_ROUTE_PURPOSE), ("source", _SOURCE),
+            ("source", _TOUR_SOURCE if purpose == STORED_POSE_TOUR_ROUTE_PURPOSE else _SOURCE),
             ("motion_authorized", True), ("physical_clearance_enforced", True),
             ("route_csv_sha256", leg.source_sha256),
         ):
@@ -614,8 +642,15 @@ def validate_admitted_pose_route_binding(
         evidence = json.loads(evidence_path.read_text())
         start = _pose(metadata["exact_start_connector"]["exact_start"], "exact_start")
         _validate_target_evidence(
-            evidence, snapshot=snapshot, candidate_uid=uid, target=stored_target, start=start,
+            evidence, snapshot=snapshot, candidate_uid=uid, target=stored_target, start=start, purpose=purpose,
         )
+        if purpose == STORED_POSE_TOUR_ROUTE_PURPOSE:
+            for key in ("tour_id", "visit_index", "qr_id"):
+                if (
+                    metadata.get(key) != evidence.get(key)
+                    or (key == "visit_index" and type(metadata.get(key)) is not int)
+                ):
+                    raise ValueError(f"stored-pose tour {key} differs from target evidence")
         final = leg.raw_waypoints[-1]
         if not final.protected or not final.corridor or not _same_pose(final.pose, target):
             raise ValueError("route endpoint differs from exact stored admitted pose")

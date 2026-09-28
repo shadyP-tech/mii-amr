@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.navigation.approach.admitted_pose_route import (
-    ADMITTED_POSE_ROUTE_KIND, plan_admitted_pose_route,
+    ADMITTED_POSE_ROUTE_KIND, STORED_POSE_TOUR_ROUTE_PURPOSE, plan_admitted_pose_route,
     validate_admitted_pose_route_binding,
 )
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import CandidatePlanningFrame
@@ -31,9 +31,36 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
 )
 from tests.aufgabe04 import test_candidate_preapproach_planning as fixtures
 from tests.aufgabe04.test_detected_station_exploration import write_free_map
+from tests.aufgabe04.test_stored_pose_tour_authorization import catalog_evidence
 
 
 class AdmittedPoseRouteTest(unittest.TestCase):
+    def test_tour_uses_arbitrary_original_qr_and_exact_saved_pose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self._fixture(root)
+            args["target_evidence"].update({
+                **catalog_evidence(root, uid=args["candidate_uid"], pose=asdict(args["target"])),
+                "tour_id": "fresh-tour", "visit_index": 2,
+            })
+            with self.assertRaisesRegex(ValueError, "qr_id mismatch"):
+                plan_admitted_pose_route(**args)
+            result = plan_admitted_pose_route(**args, purpose=STORED_POSE_TOUR_ROUTE_PURPOSE)
+            leg = load_route_leg(Path(result["route_csv"]), 0, thinning_min_spacing_m=0.)
+            self.assertEqual(leg.raw_waypoints[-1].pose, args["target"])
+            diagnostics = json.loads(Path(result["diagnostics_json"]).read_text())
+            self.assertEqual(diagnostics["metadata"]["route_purpose"], "stored_pose_tour")
+            self.assertEqual(diagnostics["metadata"]["qr_id"], "Werkbank")
+            self.assertEqual(diagnostics["metadata"]["visit_index"], 2)
+            self.assertTrue(validate_admitted_pose_route_binding(
+                Path(result["diagnostics_json"]), leg, candidate_snapshot_path=Path(result["candidate_snapshot"]),
+            ).ok)
+            diagnostics["metadata"]["visit_index"] = 3
+            self.assertFalse(validate_admitted_pose_route_binding(
+                Path(result["diagnostics_json"]), leg, candidate_snapshot_path=Path(result["candidate_snapshot"]),
+                diagnostics_payload=diagnostics,
+            ).ok)
+
     def _fixture(self, root, *, extra_candidates=(), target=None, fine_grid=False):
         map_yaml = write_free_map(root, width=150, height=150, resolution=.02) if fine_grid else write_free_map(root)
         _, bundle = load_occupancy_grid_with_bundle(map_yaml, semantic_map_id="arena", planning_frame="map")

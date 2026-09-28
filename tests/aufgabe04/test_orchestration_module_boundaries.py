@@ -205,6 +205,9 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "reporting.py",
                 "start_return.py",
                 "stored_start_pose.py",
+                "stored_pose_navigation.py",
+                "stored_pose_session.py",
+                "station_tour_runtime.py",
                 "start_return_readiness.py",
                 "session_manifest.py",
             },
@@ -222,6 +225,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "passive_viewpoint_node.py",
                 "prepare_passive_survey.py",
                 "run_autonomous_stand_exploration.py",
+                "run_server_station_tour.py",
                 "run_unloaded_segment.py",
             },
         }

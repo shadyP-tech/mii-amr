@@ -973,6 +973,7 @@ def main(argv: list[str] | None = None) -> int:
             MissionLegKind.CANDIDATE_PREAPPROACH.value,
             MissionLegKind.OPPOSITE_FACE.value,
             MissionLegKind.RETURN_TO_START.value,
+            MissionLegKind.STORED_POSE_TOUR.value,
         }
     )
     startup_rejection = None if candidate_odom_admission else _static_start_preflight_rejection(

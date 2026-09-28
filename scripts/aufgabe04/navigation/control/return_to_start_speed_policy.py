@@ -23,6 +23,11 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
 
 
 RETURN_TO_START_SPEED_POLICY = "unloaded_return_to_start"
+STORED_POSE_TOUR_SPEED_POLICY = "unloaded_stored_pose_tour"
+STORED_POSE_SPEED_POLICY_KINDS = {
+    RETURN_TO_START_SPEED_POLICY: MissionLegKind.RETURN_TO_START,
+    STORED_POSE_TOUR_SPEED_POLICY: MissionLegKind.STORED_POSE_TOUR,
+}
 RETURN_TO_START_LINEAR_MPS = 0.15
 RETURN_TO_START_ANGULAR_RADPS = 0.60
 RETURN_TO_START_SENSOR_AGE_SEC = 0.25
@@ -36,9 +41,12 @@ RETURN_TO_START_PRECISE_LINEAR_MPS = 0.055
 RETURN_TO_START_PRECISE_ANGULAR_RADPS = 0.18
 
 
-def return_to_start_speed_policy_arguments() -> list[str]:
+def return_to_start_speed_policy_arguments(kind=MissionLegKind.RETURN_TO_START) -> list[str]:
+    policies = {value: key for key, value in STORED_POSE_SPEED_POLICY_KINDS.items()}
+    if kind not in policies:
+        raise ValueError("fast stored-pose travel requires a dedicated mission kind")
     return [
-        "--motion-speed-policy", RETURN_TO_START_SPEED_POLICY,
+        "--motion-speed-policy", policies[kind],
         "--max-scan-age-sec", str(RETURN_TO_START_SENSOR_AGE_SEC),
         "--max-odom-age-sec", str(RETURN_TO_START_SENSOR_AGE_SEC),
         "--max-tf-age-sec", str(RETURN_TO_START_SENSOR_AGE_SEC),
@@ -53,7 +61,8 @@ def return_to_start_speed_policy_failures(args, *, route_kind, simulation_only):
 The live permit itself is validated and consumed by the existing runner;
 merely declaring evidence or supplying a route can never replace that permit.
 """
-    if getattr(args, "motion_speed_policy", "exploration") != RETURN_TO_START_SPEED_POLICY:
+    policy = getattr(args, "motion_speed_policy", "exploration")
+    if policy not in STORED_POSE_SPEED_POLICY_KINDS:
         return []
     failures = []
     if route_kind != "admitted_candidate_pose":
@@ -61,8 +70,8 @@ merely declaring evidence or supplying a route can never replace that permit.
     if simulation_only or args.allow_sim_time or args.execution_pose_frame != "odom":
         failures.append("fast Start travel requires physical odom execution")
     kind = (args.mission_leg_evidence_kind if args.dry_run else args.mission_leg_kind)
-    if kind != MissionLegKind.RETURN_TO_START.value:
-        failures.append("fast Start travel requires return_to_start mission identity")
+    if kind != STORED_POSE_SPEED_POLICY_KINDS[policy].value:
+        failures.append(f"fast stored-pose travel requires {STORED_POSE_SPEED_POLICY_KINDS[policy].value} mission identity")
     if not str(args.operator_note).startswith("UNLOADED "):
         failures.append("fast Start travel requires an unloaded run declaration")
     if not args.dry_run and args.mission_leg_motion_permit_json is None:
@@ -89,7 +98,8 @@ merely declaring evidence or supplying a route can never replace that permit.
 
 def return_to_start_speed_policy_evidence(args) -> dict[str, object]:
     """Persist the dry/live command envelope under the permit's artifact hash."""
-    if getattr(args, "motion_speed_policy", "exploration") != RETURN_TO_START_SPEED_POLICY:
+    policy = getattr(args, "motion_speed_policy", "exploration")
+    if policy not in STORED_POSE_SPEED_POLICY_KINDS:
         return {}
     names = (
         "max_linear_mps", "max_angular_radps", "max_scan_age_sec",
@@ -99,7 +109,7 @@ def return_to_start_speed_policy_evidence(args) -> dict[str, object]:
         "disable_command_smoothing",
     )
     return {
-        "policy": RETURN_TO_START_SPEED_POLICY,
+        "policy": policy,
         **{name: getattr(args, name) for name in names},
         "precise_distance_m": RETURN_TO_START_PRECISE_DISTANCE_M,
         "precise_linear_mps": RETURN_TO_START_PRECISE_LINEAR_MPS,
@@ -109,9 +119,9 @@ def return_to_start_speed_policy_evidence(args) -> dict[str, object]:
 
 def validate_return_to_start_speed_evidence(args, permit) -> None:
     fast_requested = (
-        getattr(args, "motion_speed_policy", "exploration") == RETURN_TO_START_SPEED_POLICY
+        getattr(args, "motion_speed_policy", "exploration") in STORED_POSE_SPEED_POLICY_KINDS
     )
-    if not fast_requested and getattr(permit, "mission_leg_kind", None) != MissionLegKind.RETURN_TO_START:
+    if not fast_requested and getattr(permit, "mission_leg_kind", None) not in STORED_POSE_SPEED_POLICY_KINDS.values():
         return
     try:
         raw = Path(permit.dry_preflight_path).read_bytes()

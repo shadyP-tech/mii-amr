@@ -115,16 +115,20 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
         scan_from_camera, scan, image_stamp_sec, now_sec, map_bearing_rad,
         cone_half_angle_rad, accepted_range_m, max_scan_age_sec,
         max_camera_map_bearing_delta_rad, resources=None, max_elapsed_sec=.06,
-        target_reconciliation=None, fragmentation=None):
+        target_reconciliation=None, fragmentation=None, diagnostics=None):
     """Locate a complete foreground symbol before the payload decoder sees it.
 
     Two bounded scale attempts; background-sized symbols cannot become target
     support. Native detection works even on builds without a native QR decoder.
     """
+    def miss(reason, **fields):
+        if diagnostics is not None:
+            diagnostics.update(reason=reason, **fields)
+        return None
     if attempt is None or max_elapsed_sec <= 0:
-        return None
+        return miss('search_unavailable' if attempt is None else 'support_time_budget_exhausted')
     if not 0 <= now_sec-image_stamp_sec <= max_scan_age_sec:
-        return None
+        return miss("stale_support_image")
     started = time.monotonic()
     roi = attempt.roi
     pixels = frame[roi.y0:roi.y1, roi.x0:roi.x1]
@@ -143,13 +147,14 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
             check_current_scan(proof_scan, scan)
             if (tuple(original.accepted_range_m) != tuple(accepted_range_m)
                     or abs(original.map_bearing_rad-map_bearing_rad) > 1e-9):
-                return None
+                return miss('reconciliation_search_mismatch')
             envelope = original
             limit = min(cone_half_angle_rad, math.radians(3))
-        except (ValueError, TypeError, KeyError, OSError):
-            return None
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            return miss('invalid_target_reconciliation', detail=str(exc))
     if not envelope_is_unique(envelope):
-        return None
+        return miss('scan_cluster_not_unique', accepted_range_m=accepted_range_m)
+    miss("no_complete_target_outline")
     for scale in (4, 1):
         if time.monotonic()-started >= max_elapsed_sec:
             break
@@ -174,6 +179,8 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
             except ValueError:
                 continue
             if abs(math.remainder(bearing-reference,math.tau))+uncertainty > limit:
+                miss('outline_bearing_interval_exceeds_limit', bearing_rad=bearing,
+                    reference_rad=reference, uncertainty_rad=uncertainty, limit_rad=limit)
                 continue
             lidar = associate_camera_registered_candidate_lidar_target(scan,
                 map_bearing_rad=reference, observed_camera_bearing_rad=bearing,
@@ -187,11 +194,16 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
                 dict(intrinsics=asdict(intrinsics), scan_from_camera=asdict(scan_from_camera)))
             try:
                 validate_target_support(support.metadata())
-            except ValueError:
+            except ValueError as exc:
+                miss('outline_scan_support_rejected', detail=str(exc),
+                    lidar_reason=lidar.rejection_reason, accepted_range_m=accepted_range_m)
                 continue
             choices.append(support)
         if len(choices) == 1:
+            if diagnostics is not None:
+                diagnostics.clear()
+                diagnostics['reason'] = 'current_outline_associated'
             return choices[0]
         if len(choices) > 1:
-            return None
+            return miss('multiple_supported_outlines')
     return None

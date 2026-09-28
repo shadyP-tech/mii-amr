@@ -30,7 +30,7 @@ class StoppedScanWitnessBuffer:
         )
         context, scan = entry["context"], entry["scan"]
         stamp = scan["scan_stamp_sec"]
-        key = (context["target_key"], context["epoch_key"], scan["scan_frame_id"],
+        key = (context["target_key"], context["epoch_key"], scan["scan_frame_id"], context.get("retained_orientation"),
                *(context[field] for field in _CANDIDATE_GEOMETRY_FIELDS))
         robot, pose = _pose(context["robot_pose"]), _pose(context["scan_pose_map"])
         extrinsic = _pose(context["scan_pose_robot"])

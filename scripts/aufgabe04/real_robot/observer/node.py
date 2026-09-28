@@ -623,7 +623,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             calibration=self.calibration, target_key=self._target_evidence_key(),
             epoch_key=str(0 if self.observation_evidence is None else
                           self.observation_evidence.snapshot().motion_epoch),
-            transform_error=self.TransformException, count=self._camera_count)
+            transform_error=self.TransformException, count=self._camera_count,
+            retained_orientation=getattr(getattr(self, "_opposite_identity_context", None), "orientation", None))
         if not valid:
             self._reset_scan_witnesses()
 
@@ -1420,11 +1421,18 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._reject_invalid_camera_context(str(exc))
             return
         camera_translation, camera_rotation = _transform_values(camera_from_map)
+        opposite_context = getattr(self, '_opposite_identity_context', None)
+        retained_target = None
+        if opposite_context is not None:
+            from scripts.aufgabe04.real_robot.observer.opposite_target_geometry import retained_target_center, retained_scan_target
+            retained_target = retained_target_center(opposite_context.orientation,
+                stand_center=dict(x_m=self.args.stand_x, y_m=self.args.stand_y))
+        target_xy = ((self.args.stand_x, self.args.stand_y) if retained_target is None
+                     else (retained_target["x_m"], retained_target["y_m"]))
         try:
             camera_point = transform_point(
                 (
-                    self.args.stand_x,
-                    self.args.stand_y,
+                    *target_xy,
                     self.stand_head_center_height_m,
                 ),
                 translation_xyz=camera_translation,
@@ -1506,6 +1514,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             stand_uncertainty_m=self.args.stand_uncertainty_m,
             lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
         )
+        if retained_target is not None:
+            point = transform_point((*target_xy, 0.),
+                translation_xyz=scan_translation, rotation_xyzw=scan_rotation)
+            scan_target = retained_scan_target(point, center=retained_target,
+                stand_radius_m=self.args.stand_radius_m, stand_uncertainty_m=self.args.stand_uncertainty_m,
+                lidar_range_tolerance_m=self.args.lidar_range_tolerance_m)
         scan_bearing = scan_target.bearing_rad
         plain_scan = plain_scan_from_sample(
             scan, topology_profile=getattr(self.args, "scan_topology_profile", "linear"))
@@ -1534,7 +1548,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 stand_radius_m=self.args.stand_radius_m,
                 stand_uncertainty_m=self.args.stand_uncertainty_m,
                 lidar_range_tolerance_m=self.args.lidar_range_tolerance_m,
-                scan_pose_robot=static_scan_pose)
+                scan_pose_robot=static_scan_pose,
+                retained_orientation=None if retained_target is None else opposite_context.orientation)
         except (TypeError, ValueError, ArithmeticError):
             scan_persistence_context = None
 
@@ -1624,13 +1639,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             resolve_lidar_association=resolve_registration)
         registration_fragmentation = getattr(registration_envelope, 'witnessed_fragmentation', None)
 
-        opposite_context = getattr(self, '_opposite_identity_context', None)
         target_reconciliation = None
         if getattr(self.args, 'candidate_crop_snapshot', None) is not None:
             if not hasattr(self, '_target_reconciliation'):
                 self._target_reconciliation = StoppedTargetReconciliation()
             target_reconciliation = self._target_reconciliation.observe(
                 position_epoch_path=getattr(self.args,"candidate_position_epoch",None),
+                use_retained_target=retained_target is not None,
                 retained_orientation=None if opposite_context is None else opposite_context.orientation,
                 fragmentation=registration_fragmentation,
                 snapshot_path=self.args.candidate_crop_snapshot,candidate_uid=self.args.stand_id,
@@ -1649,6 +1664,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if opposite_context is not None:
             process_opposite_identity(self, context=opposite_context, frame=frame,
                 fragmentation=registration_fragmentation,
+                require_target_reconciliation=retained_target is not None,
                 target_reconciliation=target_reconciliation,
                 intrinsics=intrinsics, robot_pose=robot_pose,
                 camera_signature=calibrated_camera_signature, image_stamp_sec=image.stamp_sec,
@@ -3236,6 +3252,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 and not qr_observation_grace_pending(self) and not backside_center_grace_pending(self)):
             from scripts.aufgabe04.real_robot.observer.position_epoch_opportunity import STATE
             state, details = STATE, {**details, **failure}
+            self.completed = True
+        opposite_failure = getattr(self, '_opposite_identity_failure', None)
+        self._opposite_identity_failure = None
+        if (opposite_failure is not None and not getattr(self, 'completed', False)
+                and not qr_observation_grace_pending(self) and not backside_center_grace_pending(self)):
+            from scripts.aufgabe04.real_robot.observer.opposite_identity_opportunity import STATE
+            state, details = STATE, {**details, **opposite_failure}
             self.completed = True
         self._capture_camera_outcome(state, details)
         observation_evidence = getattr(self, "observation_evidence", None)

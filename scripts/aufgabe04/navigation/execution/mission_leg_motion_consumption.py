@@ -23,7 +23,8 @@ from scripts.aufgabe04.artifacts.content_store import (
     payload_sha256,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
-    ROUTINE_MISSION_LEG_KINDS,
+    MAX_RETURN_TO_START_LEGS,
+    PERMITTABLE_MISSION_LEG_KINDS,
     MissionLegKind,
     MissionLegMotionPermit,
     load_mission_leg_motion_authorization,
@@ -187,7 +188,7 @@ def consume_mission_leg_motion_permit(
         run_id=run_id,
         permit_sha256=permit_sha256,
     )
-    if observed.mission_leg_kind is MissionLegKind.RETURN_TO_START:
+    if observed.mission_leg_kind in {MissionLegKind.RETURN_TO_START, MissionLegKind.STORED_POSE_TOUR}:
         # Retain the historical exact-permit receipt path. A second claim,
         # independent of run/permit hashes, bounds return motion to one permit
         # per master stage even when callers issue another run ID or route.
@@ -325,7 +326,10 @@ def _receipt_path_from_binding(
     )
 
 
-def _return_to_start_stage_path(master_path: Path, master_sha256: str, index: int) -> Path:
+def _return_to_start_stage_path(master_path: Path, master_sha256: str, index: int, *, tour=False) -> Path:
+    if tour:
+        visit, stage = divmod(index, MAX_RETURN_TO_START_LEGS)
+        return master_path.parent / f"stored_pose_tour_stage_consumption_{master_sha256}_{visit}_{stage}.json"
     return master_path.parent / (
         f"return_to_start_stage_consumption_{master_sha256}_{index}.json"
     )
@@ -336,9 +340,11 @@ def _claim_return_to_start_stage(
     receipt: MissionLegMotionConsumptionReceipt,
 ) -> None:
     index = permit.mission_leg_index
-    if index > 0:
+    tour = permit.mission_leg_kind is MissionLegKind.STORED_POSE_TOUR
+    stage_index = index % MAX_RETURN_TO_START_LEGS if tour else index
+    if stage_index > 0:
         previous_path = _return_to_start_stage_path(
-            master_path, permit.master_authorization_sha256, index - 1,
+            master_path, permit.master_authorization_sha256, index - 1, tour=tour,
         )
         try:
             previous_payload = load_content_hashed_json(
@@ -357,19 +363,30 @@ def _claim_return_to_start_stage(
             )
             if (
                 previous_permit.master_authorization_sha256 != permit.master_authorization_sha256
-                or previous_receipt.mission_leg_kind is not MissionLegKind.RETURN_TO_START
+                or previous_receipt.mission_leg_kind is not permit.mission_leg_kind
                 or previous_receipt.mission_leg_index != index - 1
                 or previous_receipt.target_id != permit.target_id
             ):
                 raise ValueError("return_to_start stages must keep the same master and Start target")
             if validate_return_to_start_stage_binding(previous_permit):
                 raise ValueError("return_to_start cannot continue after a final stage")
+            if tour and _tour_source_identity(previous_permit) != _tour_source_identity(permit):
+                raise ValueError("stored_pose_tour stages must keep the same stored source target")
         except (ContentStoreError, OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"return_to_start requires the previous same-target stage: {exc}") from exc
     slot_path = _return_to_start_stage_path(
-        master_path, permit.master_authorization_sha256, index,
+        master_path, permit.master_authorization_sha256, index, tour=tour,
     )
     _claim_receipt_exclusively(slot_path, receipt)
+
+
+def _tour_source_identity(permit: MissionLegMotionPermit) -> str:
+    metadata = json.loads(Path(permit.diagnostics_path).read_text())["metadata"]
+    evidence = json.loads(Path(metadata["target_evidence_json"]).read_text())
+    return payload_sha256({key: evidence.get(key) for key in (
+        "tour_id", "visit_index", "candidate_uid", "qr_id", "catalog_sha256",
+        "stored_pose", "source_planning_frame", "source_artifacts",
+    )})
 
 
 def _claim_receipt_exclusively(
@@ -439,7 +456,7 @@ def _validate_receipt(receipt: MissionLegMotionConsumptionReceipt) -> None:
     )
     for name in ("session_id", "run_id", "target_id"):
         _require_nonempty(getattr(receipt, name), name)
-    if receipt.mission_leg_kind not in ROUTINE_MISSION_LEG_KINDS:
+    if receipt.mission_leg_kind not in PERMITTABLE_MISSION_LEG_KINDS:
         raise ValueError("mission_leg_kind must be a routine leg kind")
     if (
         isinstance(receipt.mission_leg_index, bool)

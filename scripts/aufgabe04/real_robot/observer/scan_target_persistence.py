@@ -48,6 +48,7 @@ class ScanPersistenceContext:
     stand_uncertainty_m: float
     lidar_range_tolerance_m: float
     scan_pose_robot: Pose2D
+    retained_orientation: dict | None = None
 
 
 def scan_pose_relative_to_robot(robot_pose, scan_pose_map) -> Pose2D:
@@ -160,7 +161,8 @@ def _read_scan_context(entry):
         _number(raw["angle_max"])
     if not isinstance(scan.scan_frame_id, str) or not scan.scan_frame_id:
         raise ValueError("scan persistence requires a named scan frame")
-    if not isinstance(context, dict) or set(context) != set(ScanPersistenceContext.__dataclass_fields__):
+    if not isinstance(context, dict) or set(context) not in (set(ScanPersistenceContext.__dataclass_fields__),
+            set(ScanPersistenceContext.__dataclass_fields__) - {"retained_orientation"}):
         raise ValueError("scan persistence context is malformed")
     if any(not isinstance(context[k], str) or not context[k] for k in ("target_key", "epoch_key")):
         raise ValueError("scan persistence requires target and stationary epoch")
@@ -189,9 +191,16 @@ def _read_scan_context(entry):
 
 def _target_for_context(context):
     pose = _pose(context["scan_pose_map"])
-    dx, dy = context["candidate_x_m"] - pose.x_m, context["candidate_y_m"] - pose.y_m
+    from scripts.aufgabe04.real_robot.observer.opposite_target_geometry import retained_target_center, retained_scan_target
+    center = retained_target_center(context.get('retained_orientation'),
+        stand_center=dict(x_m=context['candidate_x_m'], y_m=context['candidate_y_m']))
+    x, y = ((context['candidate_x_m'], context['candidate_y_m']) if center is None
+            else (center['x_m'], center['y_m']))
+    dx, dy = x - pose.x_m, y - pose.y_m
     c, s = math.cos(pose.yaw_rad), math.sin(pose.yaw_rad)
-    return scan_target_geometry((c * dx + s * dy, -s * dx + c * dy, 0.),
+    builder = scan_target_geometry if center is None else retained_scan_target
+    return builder((c * dx + s * dy, -s * dx + c * dy, 0.),
+        **({} if center is None else dict(center=center)),
         stand_radius_m=context["stand_radius_m"], stand_uncertainty_m=context["stand_uncertainty_m"],
         lidar_range_tolerance_m=context["lidar_range_tolerance_m"])
 
@@ -304,6 +313,7 @@ def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=F
         if not _stationary(anchor_robot, old_robot) or not _stationary(anchor_scan_pose, old_pose):
             raise ValueError("scan witnesses did not share one stopped pose")
         if (any(entry["context"][k] != current["context"][k] for k in ("target_key", "epoch_key"))
+                or entry["context"].get("retained_orientation") != current["context"].get("retained_orientation")
                 or any(entry["context"][k] != current["context"][k] for k in _CANDIDATE_GEOMETRY_FIELDS)
                 or not _same_extrinsic(_pose(entry["context"]["scan_pose_robot"]),
                                        _pose(current["context"]["scan_pose_robot"]))
@@ -522,7 +532,8 @@ class StoppedScanTargetPersistence:
     def _register_scan_witness(entry, current):
         """Apply the current cone to historical raw returns, never to an angle."""
         old, new = entry["context"], current["context"]
-        if (any(old[k] != new[k] for k in ("target_key", "epoch_key", *_CANDIDATE_GEOMETRY_FIELDS))
+        if (old.get("retained_orientation") != new.get("retained_orientation")
+                or any(old[k] != new[k] for k in ("target_key", "epoch_key", *_CANDIDATE_GEOMETRY_FIELDS))
                 or not _stationary(_pose(old["robot_pose"]), _pose(new["robot_pose"]))
                 or not _stationary(_pose(old["scan_pose_map"]), _pose(new["scan_pose_map"]))
                 or not _same_extrinsic(_pose(old["scan_pose_robot"]), _pose(new["scan_pose_robot"]))
@@ -580,7 +591,7 @@ class StoppedScanTargetPersistence:
             entry, current_scan, robot, pose, clusters = _validated_current_entry(
                 association, scan, context=context, now_sec=now_sec,
                 max_scan_age_sec=max_scan_age_sec, input_source=input_source)
-            key = (context.target_key, context.epoch_key, scan.scan_frame_id,
+            key = (context.target_key, context.epoch_key, scan.scan_frame_id, context.retained_orientation,
                    *(getattr(context, field) for field in _CANDIDATE_GEOMETRY_FIELDS))
             reset_reason = None
             if self._anchor is not None:

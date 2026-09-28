@@ -35,7 +35,7 @@ def plain_scan_from_sample(sample, *, topology_profile):
 
 def collect_pending_scan_witnesses(pending, persistence, *, now_sec, lookup,
                                    args, profile, calibration, target_key, epoch_key,
-                                   transform_error, count):
+                                   transform_error, count, retained_orientation=None):
     """Drain in source order; False asks the owner to clear invalid context."""
     # The camera owner drains callback receipts independently of successful
     # fitting. Each witness owns its exact scan-time pose; TF ingestion can
@@ -77,6 +77,7 @@ def collect_pending_scan_witnesses(pending, persistence, *, now_sec, lookup,
             return False
         try:
             context = ScanPersistenceContext(
+                retained_orientation=retained_orientation if (retained_orientation or {}).get("validated_target_center") else None,
                 target_key=target_key,
                 epoch_key=epoch_key,
                 robot_pose=pose2d_from_transform(map_from_base),

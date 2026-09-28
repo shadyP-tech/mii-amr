@@ -27,6 +27,13 @@ None of this structure changes motion ownership: the real-robot orchestration
 packages do not publish `/cmd_vel`; certified navigation remains behind the
 existing navigation runner and its physical-run gates.
 
+For a separate server-driven tour after exploration, use
+`entrypoints/run_server_station_tour.py`. It loads the saved QR pose evidence,
+drives to Start, requests a random plan from `http://10.42.0.1:8000`, and follows
+the server targets without starting camera exploration. The default is an
+offline artifact preview. See the [standalone tour instructions](../../../docs/setups/aufgabe04_server_station_tour.md)
+for execution flags, odometry continuity and output evidence.
+
 Exact-two camera exploration separates the inspection pool from the QR goal.
 `navigation/coverage/candidate_inspection_pool.py` admits every usable strict
 or boundary hypothesis when the pool contains between the expected stand

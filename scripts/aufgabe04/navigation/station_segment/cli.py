@@ -8,7 +8,7 @@ from pathlib import Path
 
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     RECOVERABLE_MISSION_LEG_KINDS,
-    ROUTINE_MISSION_LEG_KINDS,
+    PERMITTABLE_MISSION_LEG_KINDS,
 )
 from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
     DEFAULT_COLLISION_MARGIN_M,
@@ -141,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--startup-reseal-semantic-map-id", default="")
     parser.add_argument(
         "--mission-leg-evidence-kind",
-        choices=[kind.value for kind in ROUTINE_MISSION_LEG_KINDS],
+        choices=[kind.value for kind in PERMITTABLE_MISSION_LEG_KINDS],
         help=(
             "Non-authorizing routine-leg identity emitted into dry/live "
             "semantic evidence. It never bypasses operator confirmation."
@@ -164,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mission-leg-kind",
-        choices=[kind.value for kind in ROUTINE_MISSION_LEG_KINDS],
+        choices=[kind.value for kind in PERMITTABLE_MISSION_LEG_KINDS],
     )
     parser.add_argument("--mission-leg-index", type=int)
     parser.add_argument("--mission-leg-target-id", default="")
@@ -235,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-angular-radps", type=float, default=0.18)
     parser.add_argument(
         "--motion-speed-policy",
-        choices=("exploration", "unloaded_return_to_start"),
+        choices=("exploration", "unloaded_return_to_start", "unloaded_stored_pose_tour"),
         default="exploration",
         help="Higher travel ceiling only for the exact unloaded return-to-Start leg.",
     )

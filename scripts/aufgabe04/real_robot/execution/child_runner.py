@@ -19,7 +19,7 @@ from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     RECOVERABLE_MISSION_LEG_KINDS,
-    ROUTINE_MISSION_LEG_KINDS,
+    PERMITTABLE_MISSION_LEG_KINDS,
     MissionLegKind,
 )
 from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
@@ -158,7 +158,7 @@ def build_child_runner_command(
 
     run_phase = "dry" if dry_run else "execute"
     travel_kind = mission_leg_evidence_kind if dry_run else mission_leg_kind
-    fast_start_travel = travel_kind == MissionLegKind.RETURN_TO_START
+    fast_start_travel = travel_kind in {MissionLegKind.RETURN_TO_START, MissionLegKind.STORED_POSE_TOUR}
     if fast_start_travel and getattr(profile, "use_sim_time", False):
         raise ValueError("fast return-to-Start travel requires a physical profile")
     odom_fields = (
@@ -228,7 +228,7 @@ def build_child_runner_command(
         "UNLOADED return to admitted Start pose" if fast_start_travel else "UNLOADED autonomous stand exploration",
     ]
     if fast_start_travel:
-        command.extend(return_to_start_speed_policy_arguments())
+        command.extend(return_to_start_speed_policy_arguments(travel_kind))
     if odom_execution_requested:
         if any(value is None or value == "" for value in odom_fields):
             raise ValueError(
@@ -309,7 +309,7 @@ def build_child_runner_command(
                 "supplied together"
             )
         evidence_kind = MissionLegKind(mission_leg_evidence_kind)
-        if evidence_kind not in ROUTINE_MISSION_LEG_KINDS:
+        if evidence_kind not in PERMITTABLE_MISSION_LEG_KINDS:
             raise ValueError(
                 "mission-leg evidence requires a routine leg kind"
             )
@@ -522,7 +522,7 @@ def build_child_runner_command(
                 "mission-leg motion permit requires mission_session_id"
             )
         kind = MissionLegKind(mission_leg_kind)
-        if kind not in ROUTINE_MISSION_LEG_KINDS:
+        if kind not in PERMITTABLE_MISSION_LEG_KINDS:
             raise ValueError("mission-leg permit requires a routine leg kind")
         assert mission_leg_index is not None
         routine_identity = (

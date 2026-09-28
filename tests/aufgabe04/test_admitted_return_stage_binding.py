@@ -18,10 +18,17 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     file_sha256,
     load_execution_route_certificate,
 )
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    MissionLegKind, TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    write_mission_leg_motion_authorization, write_mission_leg_motion_permit,
+)
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import consume_mission_leg_motion_permit
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
 from tests.aufgabe04 import test_admitted_pose_route as route_fixtures
 from tests.aufgabe04.test_admitted_return_uncertainty import _context
+from tests.aufgabe04 import test_mission_leg_motion_permit as permit_fixtures
+from tests.aufgabe04.test_stored_pose_tour_authorization import catalog_evidence
 
 
 def _write_json(path: Path, payload) -> None:
@@ -29,6 +36,41 @@ def _write_json(path: Path, payload) -> None:
 
 
 class AdmittedReturnStageBindingTest(unittest.TestCase):
+    def test_actual_tour_prefix_is_bound_to_its_visit_and_consumed_once(self):
+        helper = permit_fixtures.MissionLegMotionPermitTest()
+        helper.setUp()
+        self.addCleanup(helper.tearDown)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = route_fixtures.AdmittedPoseRouteTest()._fixture(root)
+            args["target_evidence"].update({
+                **catalog_evidence(root, uid=args["candidate_uid"], pose=asdict(args["target"])),
+                "tour_id": "fresh-tour", "visit_index": 2,
+            })
+            result = plan_admitted_pose_route(
+                **args, purpose="stored_pose_tour",
+                route_uncertainty_context=_context(args["start"], heading_sigma_rad=.4),
+            )
+            self.assertFalse(result["is_final_stage"])
+            master = replace(helper.authorization, session_id="fresh-tour", semantic_map_id="arena",
+                allowed_leg_kinds=(MissionLegKind.STORED_POSE_TOUR,), scope_text=TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE)
+            master_path = root / "tour-master.json"
+            digest = write_mission_leg_motion_authorization(master_path, master)
+            permit = replace(helper.permit, session_id=master.session_id, semantic_map_id="arena",
+                master_authorization_path=str(master_path), master_authorization_sha256=digest,
+                mission_leg_kind=MissionLegKind.STORED_POSE_TOUR, mission_leg_index=8, target_id=args["candidate_uid"],
+                route_csv_path=result["route_csv"], route_csv_sha256=file_sha256(Path(result["route_csv"])),
+                diagnostics_path=result["diagnostics_json"], diagnostics_sha256=file_sha256(Path(result["diagnostics_json"])),
+                map_route_certificate_path=result["route_certificate_json"],
+                map_route_certificate_sha256=file_sha256(Path(result["route_certificate_json"])))
+            path = root / "tour-permit.json"
+            write_mission_leg_motion_permit(path, permit)
+            consume = dict(permit_path=path, permit=permit, session_id=permit.session_id, run_id=permit.run_id,
+                mission_leg_kind=permit.mission_leg_kind, mission_leg_index=8, target_id=permit.target_id)
+            self.assertEqual(consume_mission_leg_motion_permit(**consume).mission_leg_index, 8)
+            with self.assertRaisesRegex(ValueError, "already consumed"):
+                consume_mission_leg_motion_permit(**consume)
+
     def _intermediate(self, root):
         args = route_fixtures.AdmittedPoseRouteTest()._fixture(root)
         args["route_uncertainty_context"] = _context(args["start"], heading_sigma_rad=0.4)

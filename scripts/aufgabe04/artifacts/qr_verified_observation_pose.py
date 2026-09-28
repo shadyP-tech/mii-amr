@@ -274,6 +274,9 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
                 or any(proof['stand_center'][i] != data['stand_center'][k] for i,k in enumerate(('x_m','y_m')))
                 or tuple(proof['entries'][-1]['robot_pose']) != tuple(data['robot_pose'][k] for k in ('x_m','y_m','yaw_rad'))):
             raise ValueError('opposite target proof differs from candidate epoch')
+        if (proof is not None and proof['policy'] == 'certified_center_current_scan_confirmation'
+                and proof.get('retained_orientation') != data.get('retained_backside_orientation')):
+            raise ValueError('opposite target geometry differs from retained orientation')
         cluster = support['lidar_association']['search_association']
         if (support['image_stamp_sec'] != image or tuple(support['image_shape']) != tuple(shape)
                 or tuple(support['center_px']) != tuple(center)

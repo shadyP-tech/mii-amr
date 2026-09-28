@@ -5,6 +5,7 @@ from dataclasses import replace
 from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import CandidateRouteUncertaintyContext
 from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
     RETURN_TO_START_BRAKING_LATENCY_DISTANCE_M, RETURN_TO_START_SPEED_POLICY,
+    STORED_POSE_TOUR_SPEED_POLICY,
 )
 from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import (
     CandidateRouteUncertaintyReadinessRequest, load_candidate_route_uncertainty_readiness,
@@ -25,3 +26,13 @@ def load_start_return_readiness(
             "braking_latency_distance_m": RETURN_TO_START_BRAKING_LATENCY_DISTANCE_M,
         },
     )
+
+
+def load_stored_pose_tour_readiness(
+    request: CandidateRouteUncertaintyReadinessRequest,
+) -> CandidateRouteUncertaintyContext:
+    """Use the same physical budget with the independent tour policy identity."""
+    context = load_start_return_readiness(request)
+    return replace(context, source_evidence={
+        **context.source_evidence, "motion_speed_policy": STORED_POSE_TOUR_SPEED_POLICY,
+    })

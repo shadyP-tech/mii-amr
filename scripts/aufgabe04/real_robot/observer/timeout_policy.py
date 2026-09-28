@@ -22,6 +22,7 @@ CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES = frozenset(
     {
         "collecting_consensus",
         "candidate_position_epoch_inconsistent",
+        "opposite_identity_association_exhausted",
         "backside_center_collecting",
         "opposite_identity_collecting",
         "opposite_identity_crop_conflict",
@@ -107,7 +108,7 @@ def is_candidate_local_observer_timeout(
 ) -> bool:
     """Allow only reaped quality deadlines into the existing bounded retry."""
 
-    if status.state == "candidate_position_epoch_inconsistent":
+    if status.state in {"candidate_position_epoch_inconsistent", "opposite_identity_association_exhausted"}:
         return (process.completion_kind == "child_exit" and process.returncode == 0
                 and process.artifact_kind is None and not process.signals_sent
                 and not process.deadline_expired

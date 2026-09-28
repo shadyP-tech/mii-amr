@@ -25,6 +25,7 @@ from scripts.aufgabe04.navigation.planning.costmap import Costmap
 from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.planning.waypoint_csv import load_route_leg
 from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import CandidateRouteUncertaintyReadinessRequest
+from scripts.aufgabe04.real_robot.execution.artifact_paths import resolve_child_artifact_paths
 from scripts.aufgabe04.real_robot.mission.start_return import StartReturnEffects, execute_start_return
 from scripts.aufgabe04.real_robot.mission.start_return_readiness import load_start_return_readiness
 from scripts.aufgabe04.real_robot.mission.stored_start_pose import StoredStartPose
@@ -97,9 +98,11 @@ class StartReturnPipelineTest(unittest.TestCase):
 
         def motion(request):
             sealed = request.sealed
+            resolve_child_artifact_paths(session_root=request.session_root, sealed=sealed)
+            self.assertEqual(set(sealed), {"route_csv", "diagnostics_json", "route_certificate_json"})
             leg = load_route_leg(Path(sealed["route_csv"]), 0, thinning_min_spacing_m=0.)
             binding = validate_admitted_pose_route_binding(Path(sealed["diagnostics_json"]), leg,
-                candidate_snapshot_path=Path(sealed["candidate_snapshot"]))
+                candidate_snapshot_path=request.candidate_snapshot_path)
             self.assertTrue(binding.ok, binding.failures)
             context = load_start_return_readiness(CandidateRouteUncertaintyReadinessRequest(
                 state["preflight"], state["frame"].current_pose, "map", "odom", .105, 2.,
@@ -133,7 +136,8 @@ class StartReturnPipelineTest(unittest.TestCase):
         self.assertLess(result["start_arrival_heading_error_rad"], 1e-9)
         self.assertEqual(state["stages"][-1]["leg"].raw_waypoints[-1].pose, target)
         first = state["stages"][0]["request"].sealed
-        full = json.loads(Path(first["full_return_route_json"]).read_text())
+        stage = json.loads(Path(first["diagnostics_json"]).read_text())["metadata"]["return_to_start_stage"]
+        full = json.loads(Path(stage["full_return_route_json"]).read_text())
         original = evaluate_route_uncertainty_admission(costmap,
             tuple(Pose2D(**p) for p in full["poses"]), context_covariance(fixture),
             state["stages"][0]["config"])

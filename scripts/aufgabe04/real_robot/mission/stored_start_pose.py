@@ -27,6 +27,7 @@ from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import validate_can
 from scripts.aufgabe04.real_robot.observer.qr_observation_binding import load_bound_qr_observation_pose
 from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256, load_candidate_snapshot
 from scripts.aufgabe04.stations.server_identity_binding import load_observed_identities
+from scripts.aufgabe04.stations.station_ids import canonical_qr_id
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,10 @@ class StoredStartPose:
     evidence: dict[str, object]
 
 
+# Keep the existing Start API while sharing the same authenticated value.
+StoredAdmittedPose = StoredStartPose
+
+
 def _require_hash(actual, expected, label):
     if expected is None or actual != expected:
         raise ValueError(f"Start handoff {label} hash mismatch")
@@ -46,7 +51,15 @@ def _require_hash(actual, expected, label):
 def load_stored_start_pose(
     completed: CandidateApproachComplete, config: CandidateApproachConfig,
 ) -> StoredStartPose:
+    return load_stored_admitted_pose(completed, config, qr_id="Start")
+
+
+def load_stored_admitted_pose(
+    completed: CandidateApproachComplete, config: CandidateApproachConfig, *, qr_id: str,
+) -> StoredAdmittedPose:
     """Read stored artifacts, rejecting missing, ambiguous or substituted Start."""
+    if canonical_qr_id(qr_id) != qr_id:
+        raise ValueError("stored pose requires an exact canonical QR identity")
     if not isinstance(completed, CandidateApproachComplete) or completed.motion_authorized:
         raise ValueError("Start handoff requires completed, stored camera exploration")
     required_paths = (
@@ -71,9 +84,9 @@ def load_stored_start_pose(
         expected_stand_count=completed.expected_stand_count,
     )
     _require_hash(payload_sha256(goal), completed.candidate_goal_progress_sha256, "completed QR goal")
-    matches = [uid for uid, qr in identities.items() if qr == "Start"]
+    matches = [uid for uid, qr in identities.items() if qr == qr_id]
     if len(matches) != 1:
-        raise ValueError("Start handoff requires exactly one admitted candidate with QR 'Start'")
+        raise ValueError(f"stored pose requires exactly one admitted candidate with QR {qr_id!r}")
     uid = matches[0]
     catalogs = []
     for path, digest, hash_field, kind in (
@@ -99,8 +112,8 @@ def load_stored_start_pose(
             raise ValueError("Start handoff pose catalog ancestry mismatch")
         catalogs.append((catalog, path, digest))
     records = [(record, catalog, path, digest) for catalog, path, digest in catalogs
-               for record in catalog["records"] if record.get("candidate_uid") == uid or record.get("qr_id") == "Start"]
-    if len(records) != 1 or records[0][0].get("candidate_uid") != uid or records[0][0].get("qr_id") != "Start":
+               for record in catalog["records"] if record.get("candidate_uid") == uid or record.get("qr_id") == qr_id]
+    if len(records) != 1 or records[0][0].get("candidate_uid") != uid or records[0][0].get("qr_id") != qr_id:
         raise ValueError("Start handoff has missing or ambiguous stored poses")
     record, catalog, catalog_path, catalog_sha = records[0]
     registry_path = Path(catalog["source_registry_path"])
@@ -152,17 +165,39 @@ def load_stored_start_pose(
             calibration_profile_sha256=config.calibration_profile_sha256,
         )
         _require_hash(observation["qr_verified_observation_pose_sha256"], record["qr_verified_observation_pose_sha256"], "QR observation")
-        if observation["qr_id"] != "Start" or observation["robot_pose"] != record["robot_observation_pose"]:
+        if observation["qr_id"] != qr_id or observation["robot_pose"] != record["robot_observation_pose"]:
             raise ValueError("Start viewing pose differs from admitted QR observation")
         pose = Pose2D(**record["robot_observation_pose"])
         pose_kind = "qr_verified_observation_pose"
     sources.append(observation_path)
     return StoredStartPose(uid, pose, source_frame, registry, {
-        "qr_id": "Start", "candidate_uid": uid, "pose_kind": pose_kind,
-        "catalog_path": str(catalog_path), "catalog_sha256": catalog_sha,
+        "qr_id": qr_id, "candidate_uid": uid, "pose_kind": pose_kind,
+        "catalog_path": str(catalog_path.resolve()), "catalog_sha256": catalog_sha,
         "stored_pose": {"x_m": pose.x_m, "y_m": pose.y_m, "yaw_rad": pose.yaw_rad},
         "source_planning_frame": source_frame.to_evidence(),
         **({} if measured_center is None else {"stored_measured_target_center": measured_center}),
         "source_artifacts": [{"path": str(Path(path).resolve()), "sha256": file_sha256(path)} for path in sources],
         "motion_authorized": False,
     })
+
+
+def load_stored_admitted_poses(
+    completed: CandidateApproachComplete, config: CandidateApproachConfig,
+) -> dict[str, StoredAdmittedPose]:
+    """Authenticate the complete union of geometry-backed and QR-only poses."""
+    confirmed = load_candidate_snapshot(completed.confirmed_candidate_snapshot_path)
+    observed = load_observed_identities(completed.observed_identities_path, candidate_snapshot=confirmed)
+    records = []
+    for path, field in (
+        (completed.stand_facing_catalog_path, "stand_facing_catalog_sha256"),
+        (completed.qr_observation_catalog_path, "qr_observation_pose_catalog_sha256"),
+    ):
+        records.extend(load_content_hashed_json(path, hash_field=field)["records"])
+    identities = observed["observed_qr_by_candidate"]
+    if len(records) != len(identities) or any(
+        not isinstance(record, dict) or identities.get(record.get("candidate_uid")) != record.get("qr_id")
+        for record in records
+    ):
+        raise ValueError("stored pose catalogs must resolve exactly the admitted QR identities")
+    return {qr: load_stored_admitted_pose(completed, config, qr_id=qr)
+            for qr in sorted(identities.values())}
