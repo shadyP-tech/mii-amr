@@ -31,6 +31,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     mission_leg_motion_authorization_sha256,
     mission_leg_motion_permit_sha256,
     validate_mission_leg_motion_permit_for_execution,
+    validate_return_to_start_stage_binding,
 )
 
 
@@ -186,6 +187,13 @@ def consume_mission_leg_motion_permit(
         run_id=run_id,
         permit_sha256=permit_sha256,
     )
+    if observed.mission_leg_kind is MissionLegKind.RETURN_TO_START:
+        # Retain the historical exact-permit receipt path. A second claim,
+        # independent of run/permit hashes, bounds return motion to one permit
+        # per master stage even when callers issue another run ID or route.
+        if receipt_path.exists() or receipt_path.is_symlink():
+            raise ValueError(f"mission leg motion permit already consumed or retired: {receipt_path}")
+        _claim_return_to_start_stage(master_path, observed, receipt)
     _claim_receipt_exclusively(receipt_path, receipt)
     return load_mission_leg_motion_consumption_receipt(receipt_path)
 
@@ -315,6 +323,53 @@ def _receipt_path_from_binding(
         "mission_leg_motion_consumption_"
         f"{run_digest}_{permit_sha256}.json"
     )
+
+
+def _return_to_start_stage_path(master_path: Path, master_sha256: str, index: int) -> Path:
+    return master_path.parent / (
+        f"return_to_start_stage_consumption_{master_sha256}_{index}.json"
+    )
+
+
+def _claim_return_to_start_stage(
+    master_path: Path, permit: MissionLegMotionPermit,
+    receipt: MissionLegMotionConsumptionReceipt,
+) -> None:
+    index = permit.mission_leg_index
+    if index > 0:
+        previous_path = _return_to_start_stage_path(
+            master_path, permit.master_authorization_sha256, index - 1,
+        )
+        try:
+            previous_payload = load_content_hashed_json(
+                previous_path, hash_field=MISSION_LEG_MOTION_CONSUMPTION_RECEIPT_HASH_FIELD,
+            )
+            previous_receipt = load_mission_leg_motion_consumption_receipt(
+                _receipt_path_from_binding(
+                    master_path=master_path, run_id=previous_payload["run_id"],
+                    permit_sha256=previous_payload["mission_leg_motion_permit_sha256"],
+                )
+            )
+            if previous_payload != previous_receipt.to_payload():
+                raise ValueError("previous return stage receipt mismatch")
+            previous_permit = load_mission_leg_motion_permit(
+                Path(previous_receipt.mission_leg_motion_permit_path)
+            )
+            if (
+                previous_permit.master_authorization_sha256 != permit.master_authorization_sha256
+                or previous_receipt.mission_leg_kind is not MissionLegKind.RETURN_TO_START
+                or previous_receipt.mission_leg_index != index - 1
+                or previous_receipt.target_id != permit.target_id
+            ):
+                raise ValueError("return_to_start stages must keep the same master and Start target")
+            if validate_return_to_start_stage_binding(previous_permit):
+                raise ValueError("return_to_start cannot continue after a final stage")
+        except (ContentStoreError, OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"return_to_start requires the previous same-target stage: {exc}") from exc
+    slot_path = _return_to_start_stage_path(
+        master_path, permit.master_authorization_sha256, index,
+    )
+    _claim_receipt_exclusively(slot_path, receipt)
 
 
 def _claim_receipt_exclusively(

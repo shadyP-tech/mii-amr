@@ -191,6 +191,8 @@ from scripts.aufgabe04.real_robot.observer.stopped_target_search import reconcil
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
 from scripts.aufgabe04.artifacts.retained_backside_orientation import load_opposite_identity_context
 from scripts.aufgabe04.real_robot.observer.target_reconciliation import StoppedTargetReconciliation, load_reconciliation_snapshot
+from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import ScanWitnessFanout
+from scripts.aufgabe04.real_robot.observer.backside_center_opportunity import backside_center_grace_pending
 from scripts.aufgabe04.real_robot.observer.opposite_identity import process_opposite_identity
 from scripts.aufgabe04.real_robot.observer.head_acquisition_schedule import (
     HeadProcessingDeadline, unavailable_head_evaluation,
@@ -588,6 +590,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         persistence = getattr(self, "_scan_target_persistence", None)
         if persistence is not None:
             persistence.reset()
+        registration = getattr(self, "_registration_persistence", None)
+        if registration is not None:
+            registration.reset()
 
     def _lookup_scan_witness(self, target, source, stamp=None):
         # Independent exact-time witness reads must not replace the selected
@@ -609,8 +614,10 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             return
         if getattr(self, "_scan_target_persistence", None) is None:
             self._scan_target_persistence = StoppedScanTargetPersistence()
+        if getattr(self, "_registration_persistence", None) is None:
+            self._registration_persistence = StoppedScanTargetPersistence()
         valid = collect_pending_scan_witnesses(
-            pending, self._scan_target_persistence,
+            pending, ScanWitnessFanout(self._scan_target_persistence, self._registration_persistence),
             now_sec=lambda: self.node.get_clock().now().nanoseconds / 1e9,
             lookup=self._lookup_scan_witness, args=self.args, profile=self.profile,
             calibration=self.calibration, target_key=self._target_evidence_key(),
@@ -1588,6 +1595,29 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._write_status("image_rectification_failed", reason=str(exc))
             return
 
+        # Broad QR/center evidence has its own history: narrow head witnesses
+        # cannot exclude competitors outside that head's camera cone.
+        from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
+        if getattr(self, '_registration_persistence', None) is None:
+            self._registration_persistence = StoppedScanTargetPersistence()
+        def resolve_registration(association, current_scan):
+            if scan_persistence_context is None:
+                self._registration_persistence.reset()
+                return association
+            return self._registration_persistence.resolve(association, current_scan,
+                context=scan_persistence_context,
+                now_sec=self.node.get_clock().now().nanoseconds/1e9,
+                max_scan_age_sec=self.args.max_sensor_age_sec)
+        registration_envelope = qr_registration_envelope(plain_scan,
+            map_bearing_rad=scan_bearing,
+            cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+            max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
+            accepted_range_m=(lower_surface_bound, upper_surface_bound),
+            now_sec=self.node.get_clock().now().nanoseconds/1e9,
+            max_scan_age_sec=self.args.max_sensor_age_sec,
+            resolve_lidar_association=resolve_registration)
+        registration_fragmentation = getattr(registration_envelope, 'witnessed_fragmentation', None)
+
         opposite_context = getattr(self, '_opposite_identity_context', None)
         target_reconciliation = None
         if getattr(self.args, 'candidate_crop_snapshot', None) is not None:
@@ -1595,6 +1625,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 self._target_reconciliation = StoppedTargetReconciliation()
             target_reconciliation = self._target_reconciliation.observe(
                 retained_orientation=None if opposite_context is None else opposite_context.orientation,
+                fragmentation=registration_fragmentation,
                 snapshot_path=self.args.candidate_crop_snapshot,candidate_uid=self.args.stand_id,
                 planning_frame=self.profile.map_frame,stand_center=(self.args.stand_x,self.args.stand_y),
                 target_key=self._target_evidence_key(),
@@ -1609,6 +1640,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
         if opposite_context is not None:
             process_opposite_identity(self, context=opposite_context, frame=frame,
+                fragmentation=registration_fragmentation,
                 target_reconciliation=target_reconciliation,
                 intrinsics=intrinsics, robot_pose=robot_pose,
                 camera_signature=calibrated_camera_signature, image_stamp_sec=image.stamp_sec,
@@ -1850,7 +1882,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 eligible_cluster_count=region_association.eligible_cluster_count,
                 association_rejection_reason=region_association.rejection_reason)
             identity_search, identity_search_metadata = current_scan_qr_search(
-                scan=plain_scan,
+                scan=plain_scan, fragmentation=registration_fragmentation,
                 scan_from_map=RigidTransform(self.profile.scan_frame, self.profile.map_frame,
                     scan_translation, scan_rotation),
                 camera_from_map=RigidTransform(self.profile.camera_optical_frame, self.profile.map_frame,
@@ -2189,6 +2221,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 self.args.backside_registration_max_bearing_delta_deg
             ),
             target_reconciliation=target_reconciliation,
+            fragmentation=registration_fragmentation,
+            resolve_lidar_association=lambda a,s: resolve_lidar_association(a,s,preview=True),
+            candidate_context=(None if getattr(self.args,"candidate_crop_snapshot",None) is None else
+                dict(snapshot_path=str(self.args.candidate_crop_snapshot),candidate_uid=self.args.stand_id,
+                    scan_from_map=dict(parent_frame=self.profile.scan_frame,child_frame=self.profile.map_frame,
+                        translation_xyz_m=scan_translation,rotation_xyzw=scan_rotation))),
             allow_independent_registration=(viewer_geometry and
                 getattr(self.args, "qr_observation_pose_json", None) is not None),
         )
@@ -2844,6 +2882,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             )
             return
         if resolved_qr_id is None:
+            from scripts.aufgabe04.real_robot.observer.backside_center_opportunity import backside_center_pending
+            if backside_center_pending(self, center_ready=target_reconciliation is not None,
+                                       metadata=axis_metadata):
+                self._write_status('backside_center_collecting', stand_axis_debug=axis_metadata)
+                return
             snapshot = update.snapshot
             try:
                 axis_observation = build_backside_axis_observation(
@@ -3047,6 +3090,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if state not in {
             "metric_model_measurement_unavailable", "evidence_not_committable",
             "axis_observation_not_committable", "collecting_consensus",
+            "backside_center_collecting",
             "opposite_identity_collecting", "opposite_identity_crop_conflict",
             "candidate_centering_budget_exceeded",
         }:
@@ -3135,7 +3179,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             details['qr_binding_diagnostic'] = self._qr_binding_diagnostic
         committed = (commit_immediate_front(self) or commit_bounded_head(self)
                      or commit_qr_observation_pose(self)
-                     or (None if qr_observation_grace_pending(self) else commit_candidate_centering(self)))
+                     or (None if qr_observation_grace_pending(self) or backside_center_grace_pending(self) else commit_candidate_centering(self)))
         if committed is not None:
             state, committed_details = committed
             details = {**details, **committed_details}
@@ -3147,7 +3191,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 # invitation to wait forever or publish a legacy point angle.
                 state = "evidence_not_committable"
                 details = {**details, "reason": rejection}
-        if qr_observation_grace_pending(self):
+        if qr_observation_grace_pending(self) or backside_center_grace_pending(self):
             # Consume this tuple even while deferring movement advice; a later
             # TF or sensor status must never reuse its progress evidence.
             self._inspection_frame = None

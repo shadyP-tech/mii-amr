@@ -4,11 +4,14 @@ import unittest
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
-from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.artifacts.content_store import payload_sha256, write_content_hashed_json
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    MAX_RETURN_TO_START_LEGS,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    MISSION_LEG_MOTION_PERMIT_HASH_FIELD,
     MISSION_LEG_RUN_CONFIRMATION,
     RECOVERABLE_MISSION_LEG_KINDS,
     ROUTINE_MISSION_LEG_KINDS,
@@ -106,6 +109,30 @@ class MissionLegMotionPermitTest(unittest.TestCase):
         return write_mission_leg_motion_permit(
             self.permit_path, self.permit
         )
+
+    def _bind_return_stage(self, permit, *, final_stage=True, staged=True, changes=None):
+        target = {"x_m": 1.0, "y_m": 2.0, "yaw_rad": 0.5}
+        evidence_path = self.root / "return-target.json"
+        evidence_path.write_text(json.dumps({
+            "qr_id": "Start", "candidate_uid": permit.target_id, "target_pose": target,
+        }))
+        metadata = {
+            "route_kind": "admitted_candidate_pose", "route_purpose": "return_to_start",
+            "selected_candidate_stand_id": permit.target_id,
+            "route_csv_sha256": permit.route_csv_sha256,
+            "selected_approach_pose": target if final_stage else {**target, "x_m": 0.5},
+            "stored_start_target_pose": target,
+            "target_evidence_json": str(evidence_path),
+            "target_evidence_sha256": file_sha256(evidence_path),
+        }
+        if staged:
+            metadata["return_to_start_stage"] = {
+                "stage_index": permit.mission_leg_index, "final_stage": final_stage,
+                "start_candidate_uid": permit.target_id,
+            }
+        metadata.update(changes or {})
+        self.artifacts["diagnostics"].write_text(json.dumps({"metadata": metadata}))
+        return replace(permit, diagnostics_sha256=self._sha("diagnostics"))
 
     def _execution_kwargs(self):
         return {
@@ -290,6 +317,8 @@ class MissionLegMotionPermitTest(unittest.TestCase):
                     mission_leg_index=index,
                     target_id=target_id,
                 )
+                if kind is MissionLegKind.RETURN_TO_START:
+                    permit = self._bind_return_stage(permit)
                 path = self.root / f"permit-{index}.json"
                 write_mission_leg_motion_permit(path, permit)
                 self.assertIs(
@@ -378,11 +407,12 @@ class MissionLegMotionPermitTest(unittest.TestCase):
         self.assertEqual(validated.to_payload(), self.permit.to_payload())
 
     def test_return_to_start_execution_binds_the_exact_admitted_target(self):
-        self.permit = replace(
+        self.permit = self._bind_return_stage(replace(
             self.permit,
             mission_leg_kind=MissionLegKind.RETURN_TO_START,
+            mission_leg_index=0,
             target_id="candidate-start",
-        )
+        ))
         self._write_permit()
         kwargs = self._execution_kwargs()
         self.assertEqual(
@@ -392,6 +422,71 @@ class MissionLegMotionPermitTest(unittest.TestCase):
         kwargs["target_id"] = "another-candidate"
         with self.assertRaisesRegex(ValueError, "target_id mismatch"):
             validate_mission_leg_motion_permit_for_execution(self.permit_path, **kwargs)
+
+    def test_return_stage_indices_are_bounded_and_the_last_stage_must_be_final(self):
+        base = replace(self.permit, mission_leg_kind=MissionLegKind.RETURN_TO_START)
+        with self.assertRaisesRegex(ValueError, "must be less than 4"):
+            replace(base, mission_leg_index=MAX_RETURN_TO_START_LEGS)
+        for index in range(MAX_RETURN_TO_START_LEGS):
+            permit = self._bind_return_stage(replace(base, mission_leg_index=index))
+            write_mission_leg_motion_permit(self.root / f"final-stage-{index}.json", permit)
+        intermediate = self._bind_return_stage(base, final_stage=False)
+        with self.assertRaisesRegex(ValueError, "last return_to_start stage must reach"):
+            write_mission_leg_motion_permit(self.root / "invalid-last-stage.json", intermediate)
+
+    def test_single_return_legacy_scope_allows_only_final_index_zero(self):
+        master = replace(self.authorization, scope_text=LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE)
+        path = self.root / "single-return-master.json"
+        digest = write_mission_leg_motion_authorization(path, master)
+        self.assertEqual(load_mission_leg_motion_authorization(path), master)
+        for index, final_stage, staged in ((0, True, False), (0, True, True), (0, False, True), (1, True, True)):
+            with self.subTest(index=index, final_stage=final_stage, staged=staged):
+                permit = self._bind_return_stage(replace(
+                    self.permit, mission_leg_kind=MissionLegKind.RETURN_TO_START,
+                    mission_leg_index=index, master_authorization_path=str(path),
+                    master_authorization_sha256=digest,
+                ), final_stage=final_stage, staged=staged)
+                output = self.root / f"legacy-{index}-{final_stage}-{staged}.json"
+                if index == 0 and final_stage:
+                    write_mission_leg_motion_permit(output, permit)
+                else:
+                    with self.assertRaisesRegex(ValueError, "legacy single-return scope"):
+                        write_mission_leg_motion_permit(output, permit)
+                    # A manually sealed artifact cannot bypass the live child
+                    # validator by avoiding the normal issue-time checks.
+                    write_content_hashed_json(
+                        output, permit.to_payload(), hash_field=MISSION_LEG_MOTION_PERMIT_HASH_FIELD,
+                    )
+                    kwargs = self._execution_kwargs()
+                    kwargs.update(
+                        master_authorization_path=path,
+                        mission_leg_kind=MissionLegKind.RETURN_TO_START,
+                        mission_leg_index=index,
+                    )
+                    with self.assertRaisesRegex(ValueError, "legacy single-return scope"):
+                        validate_mission_leg_motion_permit_for_execution(output, **kwargs)
+
+    def test_return_stage_target_and_index_must_match_route_metadata(self):
+        base = replace(self.permit, mission_leg_kind=MissionLegKind.RETURN_TO_START, mission_leg_index=0)
+        for changes, reason in (
+            ({"selected_candidate_stand_id": "other-start"}, "selected_candidate_stand_id mismatch"),
+            ({"return_to_start_stage": {"stage_index": 1, "final_stage": True, "start_candidate_uid": base.target_id}}, "stage identity mismatch"),
+            ({"return_to_start_stage": {"stage_index": 0, "final_stage": True, "start_candidate_uid": "other-start"}}, "stage identity mismatch"),
+            ({"selected_approach_pose": {"x_m": 0., "y_m": 0., "yaw_rad": 0.}}, "must target the admitted Start pose"),
+        ):
+            with self.subTest(changes=changes):
+                permit = self._bind_return_stage(base, changes=changes)
+                with self.assertRaisesRegex(ValueError, reason):
+                    write_mission_leg_motion_permit(self.root / "mismatch.json", permit)
+
+    def test_return_target_evidence_tamper_rejected_by_live_validation(self):
+        self.permit = self._bind_return_stage(replace(
+            self.permit, mission_leg_kind=MissionLegKind.RETURN_TO_START, mission_leg_index=0,
+        ))
+        self._write_permit()
+        (self.root / "return-target.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "target evidence hash mismatch"):
+            validate_mission_leg_motion_permit_for_execution(self.permit_path, **self._execution_kwargs())
 
     def test_execution_validator_rejects_every_live_identity_mismatch(self):
         self._write_permit()

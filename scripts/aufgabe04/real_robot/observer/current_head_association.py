@@ -174,6 +174,10 @@ def associate_current_measured_head(
         min_cluster_sample_count=min_cluster_sample_count,
         max_camera_map_bearing_delta_rad=association_limit,
     )
+    if target_reconciliation is not None:
+        from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import bind_ray_to_envelope
+        association = bind_ray_to_envelope(association, scan, envelope,
+            now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
     if resolve_lidar_association is not None and target_reconciliation is None:
         association = resolve_lidar_association(association, scan)
     rejection = association.rejection_reason

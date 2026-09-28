@@ -205,6 +205,7 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "reporting.py",
                 "start_return.py",
                 "stored_start_pose.py",
+                "start_return_readiness.py",
                 "session_manifest.py",
             },
             "execution": {

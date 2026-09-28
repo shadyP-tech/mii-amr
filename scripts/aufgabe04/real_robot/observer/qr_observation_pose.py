@@ -34,11 +34,12 @@ class QrObservationFrame:
     model_profile_sha256: str
     metadata: dict
     retained_backside_orientation: dict | None = None
+    arrival_target_reconciliation: dict | None = None
 
 
 def prepare_qr_observation_pose(*, qr_binding, qr_observations, observed_qr_texts,
         image_stamp_sec, scan_stamp_sec, robot_pose, target_key, camera_signature,
-        image_shape, roi, model_profile_sha256, metadata, retained_backside_orientation=None):
+        image_shape, roi, model_profile_sha256, metadata, retained_backside_orientation=None, arrival_target_reconciliation=None):
     observations = tuple(qr_observations or ())
     corners = None
     if (qr_binding.accepted and qr_binding.reason == "decoded_qr_target_associated"
@@ -50,7 +51,7 @@ def prepare_qr_observation_pose(*, qr_binding, qr_observations, observed_qr_text
             corners = tuple((x + roi.x0, y + roi.y0) for x, y in local)
     return QrObservationFrame(image_stamp_sec, scan_stamp_sec, robot_pose,
         target_key, tuple(camera_signature), tuple(image_shape[:2]), qr_binding,
-        corners, tuple(observed_qr_texts), model_profile_sha256, metadata, retained_backside_orientation)
+        corners, tuple(observed_qr_texts), model_profile_sha256, metadata, retained_backside_orientation, arrival_target_reconciliation)
 
 
 class QrObservationPoseFallback:
@@ -180,6 +181,8 @@ def commit_qr_observation_pose(adapter):
             image_shape=current.image_shape, qr_binding=current.qr_binding.metadata(),
             **({} if current.retained_backside_orientation is None else
                {"retained_backside_orientation": current.retained_backside_orientation}),
+            **({} if current.arrival_target_reconciliation is None else
+               {'arrival_target_reconciliation': current.arrival_target_reconciliation}),
             source_gates={key: True for key in SOURCE_GATES},
             localization_provenance={"map_frame": profile.map_frame, "base_frame": profile.base_frame,
                 "scan_frame": profile.scan_frame, "camera_frame": profile.camera_optical_frame,

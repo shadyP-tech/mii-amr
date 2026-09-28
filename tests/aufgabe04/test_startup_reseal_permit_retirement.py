@@ -18,7 +18,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption impor
     load_mission_leg_motion_consumption_receipt,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
-    MISSION_LEG_MOTION_AUTHORIZATION_SCOPE, ROUTINE_MISSION_LEG_KINDS,
+    MISSION_LEG_MOTION_AUTHORIZATION_SCOPE, RECOVERABLE_MISSION_LEG_KINDS, ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind, MissionLegMotionAuthorization, MissionLegMotionPermit,
     write_mission_leg_motion_authorization, write_mission_leg_motion_permit,
 )
@@ -301,7 +301,7 @@ class StartupResealPermitRetirementTests(unittest.TestCase):
         pose_dict = dict(x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad)
         self.assertNotEqual(pose_dict, {key: fresh["route_pose"][key] for key in pose_dict})
         fresh_path = self.root / "candidate_fresh.json"; fresh_path.write_text(json.dumps(fresh))
-        auth = replace(self.replacement.authorization, allowed_mission_leg_kinds=ROUTINE_MISSION_LEG_KINDS)
+        auth = replace(self.replacement.authorization, allowed_mission_leg_kinds=RECOVERABLE_MISSION_LEG_KINDS)
         master_path = self.root / "candidate_startup_master.json"
         master_sha = write_startup_reseal_motion_authorization(master_path, auth)
         self.replacement.permit = replace(

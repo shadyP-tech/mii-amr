@@ -3,7 +3,7 @@
 The broad envelope is only a uniqueness/search check. Ordinary admission needs
 the decoded symbol's own ray, the original range and the narrow camera cone.
 The certified opposite-side identity path adds exclusive crop validation.
-No endpoint stitching or temporal measurements are used here.
+Witnessed fragmentation may establish uniqueness without joining raw clusters.
 """
 
 from dataclasses import asdict
@@ -15,15 +15,30 @@ from scripts.aufgabe04.perception.candidate_lidar_association import (
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector, transform_point
 from scripts.aufgabe04.real_robot.configuration.geometry import roi_from_projection, project_optical_point
 from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
+from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique, envelope_from_proof
 
 
 def qr_registration_envelope(scan, *, map_bearing_rad, cone_half_angle_rad,
-        max_camera_map_bearing_delta_rad, accepted_range_m, now_sec, max_scan_age_sec):
+        max_camera_map_bearing_delta_rad, accepted_range_m, now_sec, max_scan_age_sec,
+        fragmentation=None, resolve_lidar_association=None):
     """Count even single-beam competitors over the entire correction envelope."""
     limit = normalize_certified_camera_map_bearing_limit(max_camera_map_bearing_delta_rad)
-    return associate_candidate_lidar_target(scan, map_bearing_rad=map_bearing_rad,
+    raw = associate_candidate_lidar_target(scan, map_bearing_rad=map_bearing_rad,
         cone_half_angle_rad=limit + cone_half_angle_rad, accepted_range_m=accepted_range_m,
         now_sec=now_sec, max_scan_age_sec=max_scan_age_sec, min_cluster_sample_count=1)
+    if resolve_lidar_association is not None:
+        from scripts.aufgabe04.perception.candidate_lidar_association import associate_camera_registered_candidate_lidar_target
+        registered = associate_camera_registered_candidate_lidar_target(scan,
+            map_bearing_rad=map_bearing_rad, observed_camera_bearing_rad=map_bearing_rad,
+            cone_half_angle_rad=limit+cone_half_angle_rad, accepted_range_m=accepted_range_m,
+            now_sec=now_sec, max_scan_age_sec=max_scan_age_sec, min_cluster_sample_count=1,
+            max_camera_map_bearing_delta_rad=limit)
+        fragmentation = resolve_lidar_association(registered, scan).witnessed_fragmentation
+    if fragmentation is not None:
+        return envelope_from_proof(fragmentation, scan=scan, map_bearing_rad=map_bearing_rad,
+            cone_half_angle_rad=limit+cone_half_angle_rad, accepted_range_m=accepted_range_m,
+            now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
+    return raw
 
 
 def current_scan_qr_search(*, scan, scan_from_map, camera_from_map, intrinsics,
@@ -48,7 +63,7 @@ def current_scan_qr_search(*, scan, scan_from_map, camera_from_map, intrinsics,
         return None, {**info, "reason": "stale_or_unsynchronized_search"}
     envelope = qr_registration_envelope(scan, **association_options)
     info["envelope"] = asdict(envelope)
-    if not envelope.associated or envelope.eligible_cluster_count != 1:
+    if not envelope_is_unique(envelope):
         return None, {**info, "reason": "qr_search_cluster_not_unique"}
     points = tuple((scan.ranges[i]*math.cos(scan.angle_min+i*scan.angle_increment),
                     scan.ranges[i]*math.sin(scan.angle_min+i*scan.angle_increment))

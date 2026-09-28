@@ -52,6 +52,7 @@ from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_RUN_CONFIRMATION,
+    MAX_RETURN_TO_START_LEGS,
     ROUTINE_MISSION_LEG_KINDS,
     MissionLegKind,
     MissionLegMotionAuthorization,
@@ -2444,9 +2445,11 @@ def _run_mission(parser, args) -> int:
                   "bounded stopped inspection recenter turns (at most two 6-degree turns per view)")
         )
         if MissionLegKind.RETURN_TO_START in authorized_leg_kinds:
-            authorized_leg_description += ", followed by one return to the admitted Start pose"
+            authorized_leg_description += (
+                f", followed by at most {MAX_RETURN_TO_START_LEGS} separately admitted legs to the stored Start pose"
+            )
             print(
-                "After stored camera completion, return to the admitted Start pose: "
+                "After stored camera completion, return to the admitted Start pose with fresh stopped localization between legs: "
                 f"unloaded travel up to {RETURN_TO_START_LINEAR_MPS:g} m/s and "
                 f"{RETURN_TO_START_ANGULAR_RADPS:g} rad/s, with slower corner and arrival control."
             )

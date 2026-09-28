@@ -6,6 +6,9 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.admitted_return_uncertainty import (
+    evaluate_admitted_return_stage_uncertainty,
+)
 from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import (
     payload_sha256,
     write_content_hashed_json,
@@ -528,6 +531,21 @@ def _build_odom_execution_admission(
             base_costmap, map_route, covariance, admission_config,
             start_pose=Pose2D(**diagnostics_snapshot.metadata["exact_start_connector"]["exact_start"]),
             target_evidence_sha256=diagnostics_snapshot.metadata["target_evidence_sha256"],
+        )
+    elif (
+        getattr(leg, "route_kind", "") == "admitted_candidate_pose"
+        and "return_to_start_stage" in diagnostics_snapshot.metadata
+    ):
+        stage = diagnostics_snapshot.metadata["return_to_start_stage"]
+        if not isinstance(stage, Mapping) or type(stage.get("final_stage")) is not bool:
+            raise ValueError("admitted return stage requires a boolean final_stage")
+        # Recompute the turn envelopes with this child's newer stopped
+        # covariance and actual settings. The stored selection is advisory.
+        admission = evaluate_admitted_return_stage_uncertainty(
+            base_costmap, map_route, covariance, admission_config,
+            start_pose=Pose2D(**diagnostics_snapshot.metadata["exact_start_connector"]["exact_start"]),
+            target_evidence_sha256=diagnostics_snapshot.metadata["target_evidence_sha256"],
+            is_final_stage=stage["final_stage"],
         )
     else:
         admission = evaluate_route_uncertainty_admission(

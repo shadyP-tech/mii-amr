@@ -2,6 +2,8 @@
 from dataclasses import replace
 
 from scripts.aufgabe04.artifacts.retained_facing import build_retained_facing
+from scripts.aufgabe04.artifacts.retained_facing_center import retained_facing_center
+from scripts.aufgabe04.artifacts.qr_verified_observation_pose import load_qr_verified_observation_pose
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import recommendation_to_dict
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 
@@ -18,6 +20,7 @@ def try_retained_facing(*, observation, discovery, frame, effects, output_dir):
         recommendation = build_retained_facing(observation.qr_observation_pose_path,
             stand_radius_m=frame.candidate.geometry.radius_m,
             target_distance_m=frame.config.final_facing_offset_m)
+        center = retained_facing_center(load_qr_verified_observation_pose(observation.qr_observation_pose_path))
         _write_json(path, recommendation_to_dict(recommendation))
         pose = _read_finite_pose2d(effects, context='retained_facing_validation',
                                  candidate_uid=frame.candidate.candidate_uid)
@@ -30,7 +33,7 @@ def try_retained_facing(*, observation, discovery, frame, effects, output_dir):
                                  hash_field='retained_facing_status_sha256')
         return None
     facing.update(qr_id=observation.qr_id, facing_ready=True,
-                  validated_target_center=discovery['retained_backside_orientation']['validated_target_center'],
+                  validated_target_center=center,
                   retained_qr_observation_pose_json=str(observation.qr_observation_pose_path))
     diagnostic.update(facing_ready=True, recommendation_json=str(path))
     write_content_hashed_json(output_dir/'retained_facing_status.json', diagnostic,

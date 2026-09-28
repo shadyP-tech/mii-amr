@@ -12,6 +12,8 @@ from scripts.aufgabe04.artifacts.qr_verified_observation_pose import load_qr_ver
 from scripts.aufgabe04.artifacts.retained_backside_orientation import opposite_view_matches
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
+from scripts.aufgabe04.artifacts.retained_facing_center import retained_facing_center
+
 POLICY = "retained_backside_current_qr_facing"
 SCHEMA_VERSION = 4
 
@@ -28,14 +30,14 @@ def retained_facing_source(recommendation):
         raise ValueError("retained facing QR source changed")
     qr = load_qr_verified_observation_pose(path)
     orientation = qr.get("retained_backside_orientation")
-    if not orientation or not orientation.get("validated_target_center") or not orientation.get("bounded_orientation"):
-        raise ValueError("retained facing requires validated center and bounded orientation")
+    if not orientation or not orientation.get("bounded_orientation"):
+        raise ValueError("retained facing requires retained bounded orientation")
     return qr, orientation
 
 
 def validate_retained_facing(recommendation):
     qr, orientation = retained_facing_source(recommendation)
-    center = orientation["validated_target_center"]
+    center = retained_facing_center(qr)
     target = next((f for f in recommendation.face_candidates
                    if f.face_id == recommendation.material_target.face_id), None)
     if target is None:
@@ -67,9 +69,9 @@ def build_retained_facing(qr_path, *, stand_radius_m, target_distance_m):
     path = Path(qr_path).resolve()
     qr = load_qr_verified_observation_pose(path)
     orientation = qr.get('retained_backside_orientation')
-    if not orientation or not orientation.get('validated_target_center') or not orientation.get('bounded_orientation'):
-        raise ValueError('retained facing requires validated center and bounded orientation')
-    center = orientation['validated_target_center']
+    if not orientation or not orientation.get('bounded_orientation'):
+        raise ValueError('retained facing requires retained bounded orientation')
+    center = retained_facing_center(qr)
     result = build_real_viewpoint_recommendation(
         stream_id=qr['stream_id'], stand_id=qr['candidate_uid'], planning_frame=qr['planning_frame'],
         stand_center=Pose2D(center['x_m'], center['y_m']), stand_radius_m=stand_radius_m,

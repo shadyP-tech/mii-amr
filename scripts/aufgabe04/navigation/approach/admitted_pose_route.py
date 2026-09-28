@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import csv
 from dataclasses import asdict, replace
+import hashlib
 import json
 import math
 from pathlib import Path
 import shutil
 from typing import Mapping
 
+from scripts.aufgabe04.artifacts.content_store import payload_sha256
+from scripts.aufgabe04.navigation.approach.admitted_return_uncertainty import (
+    MINIMUM_REMAINING_ROUTE_M, MINIMUM_STAGE_DISPLACEMENT_M,
+    build_return_prefix, evaluate_admitted_return_stage_uncertainty,
+    executable_return_poses, return_route_geometry, select_admitted_return_prefix,
+)
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
+    CandidateRouteUncertaintyContext,
+)
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_compute import (
     validate_physical_clearance,
 )
@@ -34,6 +44,9 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     write_execution_route_certificate,
 )
 from scripts.aufgabe04.navigation.execution.route_context import build_route_metadata
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MAX_RETURN_TO_START_LEGS
+from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import RouteUncertaintyAdmissionConfig
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
 from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json, write_route_csv,
 )
@@ -203,10 +216,18 @@ def plan_admitted_pose_route(
     start: Pose2D, target: Pose2D, output_dir: Path, inflation_radius_m: float,
     physical_clearance: Mapping[str, float], target_evidence: Mapping[str, object],
     candidate_transit_radius_m: float | None = None,
-) -> dict[str, str]:
+    route_uncertainty_context: CandidateRouteUncertaintyContext | None = None,
+    return_stage_index: int = 0,
+) -> dict[str, object]:
     """Create one independently sealed route; grant no live motion permission."""
     _pose(asdict(start), "start")
     _pose(asdict(target), "target")
+    if (
+        isinstance(return_stage_index, bool) or not isinstance(return_stage_index, int)
+        or not 0 <= return_stage_index < MAX_RETURN_TO_START_LEGS
+        or (route_uncertainty_context is None and return_stage_index != 0)
+    ):
+        raise ValueError("invalid return stage index or missing uncertainty context")
     radius = (
         float(physical_clearance["minimum_candidate_transit_radius_m"])
         if candidate_transit_radius_m is None else candidate_transit_radius_m
@@ -332,6 +353,32 @@ def plan_admitted_pose_route(
     evidence_json = json.dumps(
         dict(target_evidence), indent=2, sort_keys=True, allow_nan=False,
     ) + "\n"
+    full_poses = (start, *poses[1:-1], target)
+    stage = None
+    stage_target = target
+    if route_uncertainty_context is not None:
+        stage = select_admitted_return_prefix(
+            full_poses=full_poses, base_costmap=base,
+            uncertainty=route_uncertainty_context,
+            target_evidence_sha256=hashlib.sha256(evidence_json.encode()).hexdigest(),
+            minimum_prefix_vertex_index=1 if connector.required else 0,
+        )
+        if not stage.is_final_stage and return_stage_index == MAX_RETURN_TO_START_LEGS - 1:
+            raise ValueError("return stage limit exhausted before exact Start target")
+        poses, stage_target = stage.poses, stage.stage_target_pose
+        cumulative = 0.
+        stage_points = []
+        for index, pose in enumerate(poses):
+            distance = 0. if not index else math.hypot(pose.x_m - poses[index-1].x_m, pose.y_m - poses[index-1].y_m)
+            cumulative += distance
+            stage_points.append(RoutePoint(index, planning.world_to_grid(pose), pose, distance, cumulative))
+        result = replace(result, route=replace(
+            result.route, points=tuple(stage_points), requested_goal=stage_target,
+            snapped_goal=stage_target, length_m=cumulative,
+        ), diagnostics=replace(
+            result.diagnostics, route_length_m=cumulative, path_cell_count=len(stage_points),
+            goal_cell=stage_points[-1].cell, snapped_goal_cell=stage_points[-1].cell,
+        ))
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
     paths = {key: output_dir / name for key, name in (
@@ -341,7 +388,31 @@ def plan_admitted_pose_route(
     )}
     shutil.copyfile(snapshot_path, paths["candidate_snapshot"])
     paths["target_evidence_json"].write_text(evidence_json)
-    write_route_csv(paths["route_csv"], (result,), final_yaw_by_leg={0: target.yaw_rad})
+    stage_metadata = None
+    if stage is not None:
+        paths["full_return_route_json"] = output_dir / "full_return_route.json"
+        paths["uncertainty_selection_json"] = output_dir / "return_uncertainty_selection.json"
+        full_evidence = {
+            "schema_version": 1, "stage_index": return_stage_index,
+            "start_candidate_uid": candidate_uid, "planning_frame": snapshot.planning_frame,
+            "map_bundle_sha256": bundle.bundle_sha256, "candidate_snapshot_sha256": snapshot_hash,
+            "target_evidence_sha256": file_sha256(paths["target_evidence_json"]),
+            "stored_start_target_pose": asdict(target), "start_pose": asdict(start),
+            "exact_start_connector": connector.to_metadata(),
+            **return_route_geometry(full_poses),
+        }
+        paths["full_return_route_json"].write_text(json.dumps(full_evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        paths["uncertainty_selection_json"].write_text(json.dumps(stage.evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        stage_metadata = {
+            "stage_index": return_stage_index, "final_stage": stage.is_final_stage,
+            "start_candidate_uid": candidate_uid, "stage_target_pose": asdict(stage_target),
+            "end_segment_index": stage.end_segment_index, "end_fraction": stage.end_fraction,
+            "full_return_route_json": str(paths["full_return_route_json"]),
+            "full_return_route_sha256": file_sha256(paths["full_return_route_json"]),
+            "uncertainty_selection_json": str(paths["uncertainty_selection_json"]),
+            "uncertainty_selection_sha256": file_sha256(paths["uncertainty_selection_json"]),
+        }
+    write_route_csv(paths["route_csv"], (result,), final_yaw_by_leg={0: stage_target.yaw_rad})
     with paths["route_csv"].open(newline="") as handle:
         reader = csv.DictReader(handle)
         rows, fields = list(reader), list(reader.fieldnames or ())
@@ -375,12 +446,15 @@ def plan_admitted_pose_route(
         "candidate_snapshot_sha256": snapshot_hash, "selected_candidate_stand_id": candidate_uid,
         "target_evidence_json": str(paths["target_evidence_json"]),
         "target_evidence_sha256": file_sha256(paths["target_evidence_json"]),
-        "selected_approach_pose": asdict(target), "exact_start_connector": connector.to_metadata(),
+        "selected_approach_pose": asdict(stage_target), "stored_start_target_pose": asdict(target),
+        "exact_start_connector": connector.to_metadata(),
         "route_start_pose_provenance": {"source": _SOURCE, "planning_frame": snapshot.planning_frame, "pose": asdict(start)},
         "line_of_sight_route_optimization": {"enabled": smoothing.enabled, "legs": [smoothing.to_metadata()]},
         "route_csv_sha256": route_hash, "route_certificate_path": str(paths["route_certificate_json"]),
         "route_certificate_sha256": certificate_hash,
     })
+    if stage_metadata is not None:
+        metadata["return_to_start_stage"] = stage_metadata
     write_diagnostics_json(paths["diagnostics_json"], (result,), metadata)
     status = validate_admitted_pose_route_binding(
         paths["diagnostics_json"],
@@ -389,7 +463,109 @@ def plan_admitted_pose_route(
     )
     if not status.ok:
         raise ValueError("; ".join(status.failures))
-    return {key: str(path) for key, path in paths.items()}
+    return {
+        **{key: str(path) for key, path in paths.items()},
+        "is_final_stage": stage is None or stage.is_final_stage,
+        "stage_target_pose": asdict(stage_target),
+    }
+
+
+def _validate_return_stage(
+    metadata: Mapping[str, object], poses: tuple[Pose2D, ...], *,
+    start: Pose2D, stored_target: Pose2D, target: Pose2D,
+) -> tuple[Pose2D, ...]:
+    stage = metadata.get("return_to_start_stage")
+    if stage is None:
+        if not _same_pose(target, stored_target):
+            raise ValueError("unstaged return must end at exact stored Start")
+        return poses
+    if not isinstance(stage, Mapping):
+        raise ValueError("invalid return stage metadata")
+    index, final = stage.get("stage_index"), stage.get("final_stage")
+    if (
+        isinstance(index, bool) or not isinstance(index, int)
+        or not 0 <= index < MAX_RETURN_TO_START_LEGS or not isinstance(final, bool)
+        or (index == MAX_RETURN_TO_START_LEGS - 1 and not final)
+        or stage.get("start_candidate_uid") != metadata.get("selected_candidate_stand_id")
+        or not _same_pose(_pose(stage.get("stage_target_pose"), "stage_target_pose"), target)
+    ):
+        raise ValueError("return stage index, identity or endpoint mismatch")
+    artifacts = {}
+    for name in ("full_return_route", "uncertainty_selection"):
+        path = Path(stage[f"{name}_json"])
+        if file_sha256(path) != stage.get(f"{name}_sha256"):
+            raise ValueError(f"return {name} hash mismatch")
+        artifacts[name] = json.loads(path.read_text())
+        if not isinstance(artifacts[name], Mapping):
+            raise ValueError(f"return {name} must be an object")
+    full, selection = artifacts["full_return_route"], artifacts["uncertainty_selection"]
+    for key, expected in (
+        ("schema_version", 1), ("stage_index", index),
+        ("start_candidate_uid", stage["start_candidate_uid"]),
+        ("planning_frame", metadata["planning_frame"]),
+        ("candidate_snapshot_sha256", metadata["candidate_snapshot_sha256"]),
+        ("map_bundle_sha256", metadata["map_bundle_sha256"]),
+        ("target_evidence_sha256", metadata["target_evidence_sha256"]),
+        ("exact_start_connector", metadata["exact_start_connector"]),
+    ):
+        if full.get(key) != expected:
+            raise ValueError(f"full return {key} mismatch")
+    full_poses = tuple(_pose(p, "full return pose") for p in full["poses"])
+    if (
+        len(full_poses) < 2 or not _same_pose(full_poses[0], start)
+        or not _same_pose(full_poses[-1], stored_target)
+        or not _same_pose(_pose(full.get("start_pose"), "full start"), start)
+        or not _same_pose(_pose(full.get("stored_start_target_pose"), "full target"), stored_target)
+    ):
+        raise ValueError("full return differs from admitted start or stored Start target")
+    end_index, fraction = stage.get("end_segment_index"), stage.get("end_fraction")
+    prefix = build_return_prefix(full_poses, end_index, fraction)
+    if final != (end_index == len(full_poses) - 2 and fraction == 1.):
+        raise ValueError("return final-stage flag differs from full-route endpoint")
+    if len(prefix) != len(poses) or any(
+        math.hypot(a.x_m - b.x_m, a.y_m - b.y_m) > 1e-9 for a, b in zip(prefix, poses)
+    ) or not _same_pose(prefix[-1], target):
+        raise ValueError("return route is not the bound full-route prefix")
+    if not final:
+        remaining = sum(math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) for a, b in zip(full_poses[end_index+1:], full_poses[end_index+2:]))
+        remaining += math.hypot(full_poses[end_index+1].x_m - target.x_m, full_poses[end_index+1].y_m - target.y_m)
+        if (
+            math.hypot(target.x_m - start.x_m, target.y_m - start.y_m) < MINIMUM_STAGE_DISPLACEMENT_M
+            or remaining < MINIMUM_REMAINING_ROUTE_M
+        ):
+            raise ValueError("return prefix does not make meaningful progress")
+    expected_selection = {
+        "schema_version": 1, "motion_authorized": False, "is_final_stage": final,
+        "full_route_geometry_sha256": payload_sha256(return_route_geometry(full_poses)),
+        "selected_route_geometry_sha256": payload_sha256(return_route_geometry(prefix)),
+        "target_evidence_sha256": metadata["target_evidence_sha256"],
+        "end_segment_index": end_index, "end_fraction": fraction,
+        "minimum_prefix_vertex_index": 1 if metadata["exact_start_connector"]["required"] else 0,
+    }
+    for key, expected in expected_selection.items():
+        if selection.get(key) != expected:
+            raise ValueError(f"return uncertainty selection {key} mismatch")
+    config = RouteUncertaintyAdmissionConfig(**selection["config"])
+    if (
+        config.heading_reference_x_m != start.x_m or config.heading_reference_y_m != start.y_m
+        or config.braking_latency_distance_m < .075 - 1e-12
+    ):
+        raise ValueError("return selection anchor or braking reserve mismatch")
+    grid, bundle = load_occupancy_grid_with_bundle(
+        Path(metadata["map_yaml"]), semantic_map_id=metadata["semantic_map_id"],
+        planning_frame=metadata["planning_frame"],
+    )
+    if bundle.bundle_sha256 != metadata["map_bundle_sha256"]:
+        raise ValueError("return selection map bundle mismatch")
+    base = Costmap.from_occupancy_grid(grid).with_arena_bounds(validate_arena_boundary_evidence(metadata))
+    admission = evaluate_admitted_return_stage_uncertainty(
+        base, executable_return_poses(prefix), PlanarCovariance(**selection["covariance"]), config,
+        start_pose=start, target_evidence_sha256=metadata["target_evidence_sha256"], is_final_stage=final,
+    )
+    if not admission.decision.accepted or payload_sha256(admission.evidence) != payload_sha256(selection["selected_admission"]):
+        raise ValueError("return selected uncertainty evidence mismatch or rejected")
+    validate_exact_start_route_binding(metadata, tuple((p.x_m, p.y_m) for p in full_poses))
+    return full_poses
 
 
 def validate_admitted_pose_route_binding(
@@ -434,10 +610,11 @@ def validate_admitted_pose_route_binding(
         if file_sha256(evidence_path) != metadata.get("target_evidence_sha256"):
             raise ValueError("admitted target evidence hash mismatch")
         target = _pose(metadata.get("selected_approach_pose"), "selected_approach_pose")
+        stored_target = _pose(metadata.get("stored_start_target_pose", metadata.get("selected_approach_pose")), "stored_start_target_pose")
         evidence = json.loads(evidence_path.read_text())
         start = _pose(metadata["exact_start_connector"]["exact_start"], "exact_start")
         _validate_target_evidence(
-            evidence, snapshot=snapshot, candidate_uid=uid, target=target, start=start,
+            evidence, snapshot=snapshot, candidate_uid=uid, target=stored_target, start=start,
         )
         final = leg.raw_waypoints[-1]
         if not final.protected or not final.corridor or not _same_pose(final.pose, target):
@@ -446,6 +623,7 @@ def validate_admitted_pose_route_binding(
             raise ValueError("admitted pose transit yaw must remain unconstrained")
         validate_arena_boundary_evidence(metadata)
         poses = tuple(w.pose for w in leg.raw_waypoints)
+        full_poses = _validate_return_stage(metadata, poses, start=start, stored_target=stored_target, target=target)
         stationary = metadata.get("stationary_turn")
         if not isinstance(stationary, bool):
             raise ValueError("admitted pose stationary-turn flag must be boolean")
@@ -466,7 +644,7 @@ def validate_admitted_pose_route_binding(
             candidate_transit_radius_m=metadata["candidate_transit_radius_m"],
         )
         _validate_candidate_clearance(
-            poses, snapshot=snapshot, candidate_uid=uid,
+            full_poses, snapshot=snapshot, candidate_uid=uid,
             transit_radius=metadata["candidate_transit_radius_m"],
             active_standoff=active, target_evidence=evidence,
             collision_standoff=metadata["physical_clearance"].get(

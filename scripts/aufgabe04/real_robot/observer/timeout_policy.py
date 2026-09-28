@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES = frozenset(
     {
         "collecting_consensus",
+        "backside_center_collecting",
         "opposite_identity_collecting",
         "opposite_identity_crop_conflict",
         "opposite_identity_unavailable",

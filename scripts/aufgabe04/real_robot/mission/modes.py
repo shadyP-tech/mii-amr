@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from enum import Enum
 import re
 
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    MAX_RETURN_TO_START_LEGS,
+)
+
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
@@ -81,8 +85,10 @@ class ResolvedAutonomousRunMode:
                 "exactly two center-corridor coverage legs followed by the "
                 "bounded camera inspection pool, then, after the configured "
                 "number of distinct QR identities and stand poses is validated "
-                "and admitted candidates are stored, one return to the admitted "
-                "pose of the candidate carrying the Start QR identity"
+                "and admitted candidates are stored, a return to the admitted "
+                "pose of the candidate carrying the Start QR identity in at most "
+                f"{MAX_RETURN_TO_START_LEGS} separately sealed legs, each with fresh "
+                "stopped localization and its own exact motion permit"
             )
         if (
             self.authorization_scope
@@ -95,8 +101,10 @@ class ResolvedAutonomousRunMode:
         return (
             "the complete multi-leg stand exploration mission followed, after "
             "completed camera exploration and storage of admitted candidates, "
-            "by one return to the admitted pose of the candidate carrying the "
-            "Start QR identity"
+            "by a return to the admitted pose of the candidate carrying the "
+            f"Start QR identity in at most {MAX_RETURN_TO_START_LEGS} separately "
+            "sealed legs, each with fresh stopped localization and its own "
+            "exact motion permit"
         )
 
     @property

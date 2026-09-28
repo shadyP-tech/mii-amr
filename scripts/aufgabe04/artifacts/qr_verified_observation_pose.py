@@ -103,13 +103,22 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
             raise ValueError('QR observation is outside the certified opposite side')
         crop = binding.get('current_head_binding')
         _validate_opposite_crop(crop, data, image, scan, shape)
+    arrival_center = data.get('arrival_target_reconciliation')
+    if arrival_center is not None:
+        from scripts.aufgabe04.artifacts.retained_facing_center import validate_arrival_center
+        validate_arrival_center(data)
     association = binding.get("association")
     if not isinstance(association, Mapping) or association.get("associated") is not True:
         raise ValueError("QR observation needs an accepted LiDAR association")
+    from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_metadata_is_unique, validate_cluster_receipt_context, bind_ray_to_envelope
+    from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_metadata_is_unique
+    unique = (registered_target_metadata_is_unique(association) if "search_association" in association
+              else envelope_metadata_is_unique(association))
+    validate_cluster_receipt_context(association, data)
     cluster = association.get("search_association", association)
     if (not isinstance(cluster, Mapping) or cluster.get("associated") is not True
             or type(cluster.get("eligible_cluster_count")) is not int
-            or cluster["eligible_cluster_count"] != 1
+            or not unique
             or cluster.get("scan_stamp_sec") != scan
             or not isinstance(cluster.get("scan_frame_id"), str)
             or not cluster["scan_frame_id"]):
@@ -126,18 +135,37 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
                 or registration.get("policy") != "decoded_quad_unique_registration_envelope"
                 or envelope.get("associated") is not True
                 or type(envelope.get("eligible_cluster_count")) is not int
-                or envelope["eligible_cluster_count"] != 1
+                or not envelope_metadata_is_unique(envelope)
                 or envelope.get("min_cluster_sample_count") != 1
                 or envelope.get("scan_stamp_sec") != scan
                 or envelope.get("scan_frame_id") != cluster["scan_frame_id"]
                 or envelope.get("accepted_range_m") != cluster.get("accepted_range_m")):
             raise ValueError("independent QR registration needs its unique current search envelope")
+        validate_cluster_receipt_context(envelope, data)
         envelope_indices = envelope.get("selected_cluster_source_indices")
         if (not isinstance(envelope_indices, (list, tuple)) or not envelope_indices
                 or any(type(i) is not int or i < 0 for i in envelope_indices)
                 or len(envelope_indices) != len(set(envelope_indices))
                 or not set(indices).issubset(envelope_indices)):
             raise ValueError("independent QR registration must retain the same cluster")
+    range_proof = binding.get('range_resolution')
+    if range_proof is not None:
+        from scripts.aufgabe04.real_robot.observer.qr_finite_range import validate_qr_range
+        from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import _equal
+        from dataclasses import asdict
+        result, resolved_finite = validate_qr_range(range_proof)
+        from scripts.aufgabe04.real_robot.observer.qr_ray_candidate import validate_ray_candidate
+        candidate = validate_ray_candidate(range_proof,range_proof.get('candidate_association') or {})
+        if (candidate.candidate_uid != data['candidate_uid']
+                or dict(x_m=candidate.geometry.x_m,y_m=candidate.geometry.y_m) != data['stand_center']
+                or range_proof['candidate_association']['scan_from_map']['child_frame'] != data['planning_frame']):
+            raise ValueError('QR range target differs from selected candidate')
+        if (crop_identity or result.search_association.scan_stamp_sec != scan
+                or tuple(range_proof['center_px']) != tuple(sum(p[k] for p in data['qr_corners_px'])/4 for k in (0,1))
+                or not _equal(asdict(result),association) or not _equal(resolved_finite,binding.get('finite_bearing'))):
+            raise ValueError('QR range proof differs from current decoded symbol')
+        support = range_proof['support']
+        validate_cluster_receipt_context(support, data)
     reconciliation = binding.get('target_reconciliation')
     finite = binding.get('finite_bearing')
     if reconciliation is not None:
@@ -161,6 +189,7 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
             cone_half_angle_rad=math.radians(3),accepted_range_m=envelope.accepted_range_m,
             now_sec=checked,max_scan_age_sec=.5,min_cluster_sample_count=1,
             max_camera_map_bearing_delta_rad=math.radians(3))
+        recomputed = bind_ray_to_envelope(recomputed, proof_scan, envelope, now_sec=checked, max_scan_age_sec=.5)
         if (not recomputed.associated or tuple(indices) != recomputed.search_association.selected_cluster_source_indices
                 or association['distance_m'] != recomputed.distance_m):
             raise ValueError('QR reconciliation current scan no longer admits its ray')

@@ -269,11 +269,16 @@ def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=F
             raise ValueError("current fragments do not meet the bounded endpoint witness contract")
         gap_left, gap_right = right.samples[-1], left.samples[0]
         samples = tuple(s for cluster in (right, left) for s in cluster.samples)
-    elif (left.start_index > left.end_index or right.start_index > right.end_index
-            or right.start_index != left.end_index + 2
-            or math.isfinite(scan.ranges[left.end_index + 1])):
-        raise ValueError("current fragments are not separated by one missing internal beam")
     else:
+        # A valid circular cluster can straddle index zero while its missing
+        # beam is internal (e.g. [214], missing 215, [216,0,1]). The topology
+        # engine already certified that cluster's real endpoint adjacency.
+        pairs = [(a,b) for a,b in ((left,right),(right,left))
+                 if b.start_index == a.end_index+2
+                 and not math.isfinite(scan.ranges[a.end_index+1])]
+        if len(pairs) != 1:
+            raise ValueError('current fragments are not separated by one missing internal beam')
+        left, right = pairs[0]
         gap_left, gap_right = left.samples[-1], right.samples[0]
         samples = tuple(s for cluster in (left, right) for s in cluster.samples)
     parameters = current["parameters"]
@@ -309,12 +314,10 @@ def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=F
             raise ValueError("scan witness candidate, epoch or beam geometry changed")
         if entry is current:
             continue
-        if (entry.get("input_source") == "independent_stopped_scan"
-                and abs(_angle(entry["parameters"]["observed_camera_bearing_rad"]
+        if (abs(_angle(entry["parameters"]["observed_camera_bearing_rad"]
                     - _historical_search_bearing(current, entry))) > 1e-9):
             raise ValueError("independent witness is not bound to the current head ray")
-        if (not old_association.associated or len(old_clusters) != 1
-                or (old_clusters[0].start_index > old_clusters[0].end_index and not seam)):
+        if not old_association.associated or len(old_clusters) != 1:
             raise ValueError("a witness contains competing targets or crosses the scan boundary")
         old_points = tuple(_xy(s, old_pose) for s in old_clusters[0].samples)
         if any(min(math.dist(_xy(s, pose), p) for p in old_points) > max_gap for s in samples):
@@ -337,7 +340,8 @@ def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=F
         distance_m=aggregate.distance_m, selected_cluster_sample_count=len(samples),
         selected_cluster_start_index=samples[0].index, selected_cluster_end_index=samples[-1].index,
         selected_cluster_source_indices=tuple(s.index for s in samples),
-        selected_cluster_wraps_scan_seam=seam, selected_cluster_bearing_rad=aggregate.bearing_rad,
+        selected_cluster_wraps_scan_seam=any(b.index<a.index for a,b in zip(samples,samples[1:])),
+        selected_cluster_bearing_rad=aggregate.bearing_rad,
         selected_cluster_bearing_delta_from_map_rad=abs(_angle(
             aggregate.bearing_rad - association.registered_search_bearing_rad)),
         selection_source="witnessed_current_fragments")
@@ -348,6 +352,12 @@ def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=F
 
 def validated_witnessed_fragmentation(proof, *, association=None):
     """Recompute persisted evidence; arbitrary flags/counts are never sufficient."""
+    from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND, validate_envelope_subset
+    if isinstance(proof, dict) and proof.get('kind') == SUBSET_KIND:
+        result = validate_envelope_subset(proof)
+        if association is not None and result != association:
+            raise ValueError('witnessed envelope subset differs from current association')
+        return result
     if (not isinstance(proof, dict)
             or set(proof) != {"schema_version", "kind", "current", "witnesses", "persistent_target_count"}
             or type(proof["schema_version"]) is not int or proof["schema_version"] != 1
@@ -528,20 +538,19 @@ class StoppedScanTargetPersistence:
         try:
             current = _entry(association, scan, context, now_sec, max_scan_age_sec)
             _read_scan_context(current)
-            # Rebind previously retained scan-only witnesses too: an earlier
-            # image's head bearing cannot become this image's search authority.
+            # Rebind every historical raw scan to this ray/cone. An earlier
+            # narrower head cone cannot exclude current QR-ray competitors.
             refreshed = []
             for old in self._history:
-                if old.get("input_source") == "independent_stopped_scan":
-                    try:
-                        old = self._register_scan_witness(old, current)
-                        if not _read_entry(old)[3].associated:
-                            raise ValueError("independent scan witness is no longer unique in the current cone")
-                    except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
-                        self.diagnostics.record("history_reset", stamp=scan.scan_stamp_sec,
-                            reason=str(exc), witness_count=len(self._history))
-                        refreshed = []
-                        break
+                try:
+                    old = self._register_scan_witness(old, current)
+                    if not _read_entry(old)[3].associated:
+                        raise ValueError("independent scan witness is no longer unique in the current cone")
+                except (TypeError, ValueError, ArithmeticError, KeyError) as exc:
+                    self.diagnostics.record("history_reset", stamp=scan.scan_stamp_sec,
+                        reason=str(exc), witness_count=len(self._history))
+                    refreshed = []
+                    break
                 refreshed.append(old)
             self._history = refreshed
             for pending in self._pending_scans.take_before(scan.scan_stamp_sec, after_stamp=self._last_stamp):

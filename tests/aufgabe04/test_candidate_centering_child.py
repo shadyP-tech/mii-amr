@@ -14,6 +14,7 @@ from scripts.aufgabe04.navigation.execution.candidate_centering_permit import (
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     RECOVERABLE_MISSION_LEG_KINDS, load_mission_leg_motion_authorization,
     MissionLegMotionAuthorization, ROUTINE_MISSION_LEG_KINDS,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE, write_mission_leg_motion_authorization,
@@ -71,13 +72,17 @@ def test_recorded_five_degree_request_completes_and_binds_exact_result(turn_requ
     assert motion.call_count == 1
 
 
-def test_prior_centering_scope_remains_valid_without_return_authority(turn_request, monkeypatch):
+@pytest.mark.parametrize("legacy_scope", (
+    LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+))
+def test_prior_centering_scope_remains_valid_without_return_authority(turn_request, monkeypatch, legacy_scope):
     master = load_mission_leg_motion_authorization(turn_request.master_authorization_path)
     legacy_path = turn_request.output_dir.parent / 'legacy-centering-master.json'
     write_mission_leg_motion_authorization(legacy_path, replace(
         master,
         allowed_leg_kinds=RECOVERABLE_MISSION_LEG_KINDS,
-        scope_text=LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        scope_text=legacy_scope,
     ))
     request = replace(turn_request, master_authorization_path=legacy_path)
     motion = Mock(side_effect=motion_result)

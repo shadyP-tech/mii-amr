@@ -8,7 +8,10 @@ from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import CandidatePlanningFrame
-from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind
+from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import MissionLegKind, MAX_RETURN_TO_START_LEGS
+from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import CandidateRouteUncertaintyContext
+from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import RouteUncertaintyAdmissionConfig
+from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.navigation.localization.odom_execution_certificate import PlanarTransform2D
 from scripts.aufgabe04.real_robot.candidate.approach import execute_candidate_approach_phase
@@ -33,7 +36,7 @@ class StartReturnTest(unittest.TestCase):
         config = helper._config(case.root, (
             helper._candidate("candidate_a", 2., 0.), helper._candidate("unvisited", 3., 1.),
         ))
-        config = replace(config, expected_stand_count=1,
+        config = replace(config, expected_stand_count=1, robot_radius_m=.105,
                          robot_profile_sha256="a" * 64, calibration_profile_sha256="b" * 64,
                          plan=replace(config.plan, config=replace(config.plan.config, expected_stand_count=1)))
         config = helper._write_frame_registry(config, frozen_map_from_odom=PlanarTransform2D(1., 0., 0.))
@@ -123,6 +126,19 @@ class StartReturnTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ambiguous stored poses"):
             load_stored_start_pose(replace(completed, qr_observation_catalog_sha256=digest), config)
 
+    @staticmethod
+    def uncertainty(request):
+        return CandidateRouteUncertaintyContext(
+            PlanarCovariance(.0001, 0., .0001),
+            RouteUncertaintyAdmissionConfig(robot_radius_m=.105, collision_margin_m=.02,
+                fixed_odom_tracking_bound_m=.03, empirical_odom_drift_bound_m=.02,
+                localization_sigma_multiplier=2., heading_lever_arm_m=.105, sampling_spacing_m=.005,
+                braking_latency_distance_m=.075, heading_sigma_rad=.01,
+                heading_reference_x_m=request.expected_start.x_m,
+                heading_reference_y_m=request.expected_start.y_m),
+            {"source_preplanning_localization_json": str(request.preflight_json)},
+        )
+
     def effects(self, config, *, arrival=Pose2D(.7, 0., .1), status="completed"):
         frames = iter((
             CandidatePlanningFrame(Pose2D(0., 0., 0.), PlanarTransform2D(.4, 0., 0.)),
@@ -135,7 +151,8 @@ class StartReturnTest(unittest.TestCase):
             self.assertAlmostEqual(kwargs["target"].x_m, .7)
             self.assertEqual(kwargs["target"].yaw_rad, .1)
             self.assertTrue(Path(kwargs["target_evidence"]["catalog_path"]).is_file())
-            return {"candidate_snapshot": str(kwargs["snapshot_path"])}
+            return {"candidate_snapshot": str(kwargs["snapshot_path"]),
+                    "is_final_stage": True, "stage_target_pose": asdict(kwargs["target"])}
         def motion(request):
             order.append("motion")
             self.assertEqual(request.mission_leg_kind, MissionLegKind.RETURN_TO_START)
@@ -145,7 +162,8 @@ class StartReturnTest(unittest.TestCase):
         def admit(_):
             order.append("stationary_frame")
             return next(frames)
-        return StartReturnEffects(admit, motion, plan_route=plan), order
+        return StartReturnEffects(admit, motion, plan_route=plan,
+                                 load_route_uncertainty_readiness=self.uncertainty), order
 
     def test_reprojects_pose_and_full_pool_before_return_and_checks_arrival(self):
         config, completed = self.completed()
@@ -188,6 +206,113 @@ class StartReturnTest(unittest.TestCase):
         self.assertTrue(result["fastapi_request_ready"])
         motion.assert_not_called()
         plan.assert_not_called()
+
+    def staged_effects(self, config, targets, frames, *, fail_index=None):
+        frame_values = iter(frames)
+        planned = []
+        requests = []
+        readiness = []
+        def admit(path):
+            value = next(frame_values)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value.to_evidence()))
+            return value
+        def load(request):
+            readiness.append(request)
+            self.assertTrue(request.preflight_json.is_file())
+            return self.uncertainty(request)
+        def plan(**kwargs):
+            index = kwargs["return_stage_index"]
+            planned.append(kwargs)
+            target, final = targets[index]
+            return {"candidate_snapshot": str(kwargs["snapshot_path"]),
+                    "is_final_stage": final, "stage_target_pose": asdict(target)}
+        def motion(request):
+            requests.append(request)
+            self.assertFalse((config.session_root / "return_to_start/arrival.json").exists())
+            if request.mission_leg_index:
+                prior = config.session_root / "return_to_start/legs" / f"{request.mission_leg_index-1:03d}" / "arrival.json"
+                self.assertFalse(json.loads(prior.read_text())["fastapi_request_ready"])
+            outcome = self.fixture.case.fixture._completed(request)
+            return replace(outcome, status="preflight_failed" if fail_index == request.mission_leg_index else "completed")
+        return StartReturnEffects(admit, motion, plan_route=plan,
+                                  load_route_uncertainty_readiness=load), planned, requests, readiness
+
+    def test_stages_reproject_arrival_and_full_pool_into_each_fresh_epoch(self):
+        config, completed = self.completed()
+        frames = [
+            CandidatePlanningFrame(Pose2D(0., 0., 0.), PlanarTransform2D(.4, 0., 0.)),
+            CandidatePlanningFrame(Pose2D(.5, 0., 0.), PlanarTransform2D(.5, 0., 0.)),
+            CandidatePlanningFrame(Pose2D(.9, 0., .1), PlanarTransform2D(.6, 0., 0.)),
+        ]
+        effects, plans, requests, readiness = self.staged_effects(config,
+            [(Pose2D(.4, 0., 0.), False), (Pose2D(.8, 0., .1), True)], frames)
+        result = execute_start_return(completed, config, effects)
+        self.assertTrue(result["fastapi_request_ready"])
+        self.assertEqual(result["start_return_leg_count"], 2)
+        self.assertEqual([r.mission_leg_index for r in requests], [0, 1])
+        self.assertEqual(len({r.run_id for r in requests}), 2)
+        self.assertEqual(len({r.permit_json_path for r in requests}), 2)
+        self.assertEqual([r.target_id for r in requests], ["candidate_a"] * 2)
+        self.assertEqual(plans[0]["snapshot"].candidate_uids, plans[1]["snapshot"].candidate_uids)
+        self.assertAlmostEqual(plans[1]["snapshot"].candidates[0].geometry.x_m -
+                               plans[0]["snapshot"].candidates[0].geometry.x_m, .1)
+        self.assertAlmostEqual(plans[1]["target"].x_m, .8)
+        self.assertEqual(readiness[1].expected_start, frames[1].current_pose)
+        self.assertEqual(readiness[1].preflight_json.name, "arrival_localization.json")
+        self.assertEqual(result["start_return_legs"][0]["arrival_target_pose"]["x_m"], .5)
+        self.assertAlmostEqual(result["start_arrival_target_pose"]["x_m"], .9)
+
+    def test_later_child_failure_retains_discovery_and_does_not_retry(self):
+        config, completed = self.completed()
+        frames = [CandidatePlanningFrame(Pose2D(x, 0., 0.), PlanarTransform2D(.4, 0., 0.)) for x in (0., .4)]
+        effects, plans, requests, _ = self.staged_effects(config,
+            [(Pose2D(.4, 0., 0.), False), (Pose2D(.7, 0., .1), True)], frames, fail_index=1)
+        with self.assertRaisesRegex(RuntimeError, "preflight_failed"):
+            execute_start_return(completed, config, effects)
+        self.assertEqual(len(requests), 2)
+        failure = json.loads((config.session_root / "return_to_start/failure.json").read_text())
+        self.assertFalse(failure["fastapi_request_ready"])
+        self.assertTrue(failure["start_return_legs"][0]["arrival_verified"])
+        self.assertFalse(failure["start_return_legs"][1]["arrival_verified"])
+        self.assertTrue(completed.qr_observation_catalog_path.is_file())
+
+    def test_false_intermediate_completion_cannot_start_next_leg(self):
+        config, completed = self.completed()
+        frame = CandidatePlanningFrame(Pose2D(0., 0., 0.), PlanarTransform2D(.4, 0., 0.))
+        effects, _, requests, _ = self.staged_effects(config, [(Pose2D(.4, 0., 0.), False)], [frame, frame])
+        with self.assertRaisesRegex(RuntimeError, "arrival tolerance"):
+            execute_start_return(completed, config, effects)
+        self.assertEqual(len(requests), 1)
+
+    def test_map_correction_cannot_fabricate_intermediate_progress(self):
+        config, completed = self.completed()
+        frames = [
+            CandidatePlanningFrame(Pose2D(0., 0., 0.), PlanarTransform2D(.4, 0., 0.)),
+            CandidatePlanningFrame(Pose2D(.4, 0., 0.), PlanarTransform2D(.8, 0., 0.)),
+        ]
+        effects, _, requests, _ = self.staged_effects(config, [(Pose2D(.4, 0., 0.), False)], frames)
+        with self.assertRaisesRegex(RuntimeError, "arrival tolerance"):
+            execute_start_return(completed, config, effects)
+        self.assertEqual(len(requests), 1)
+
+    def test_leg_budget_blocks_nonfinal_fourth_leg_before_motion(self):
+        config, completed = self.completed()
+        frames = [CandidatePlanningFrame(Pose2D(0., y, 0.), PlanarTransform2D(.4, 0., 0.))
+                  for y in (0., .3, .6, .9)]
+        effects, _, requests, _ = self.staged_effects(config,
+            [(Pose2D(0., .3 * (i + 1), 0.), False) for i in range(MAX_RETURN_TO_START_LEGS)], frames)
+        with self.assertRaisesRegex(RuntimeError, "leg budget exhausted"):
+            execute_start_return(completed, config, effects)
+        self.assertEqual(len(requests), MAX_RETURN_TO_START_LEGS - 1)
+
+    def test_missing_uncertainty_evidence_stops_before_motion(self):
+        config, completed = self.completed()
+        frame = CandidatePlanningFrame(Pose2D(0., 0., 0.), PlanarTransform2D(.4, 0., 0.))
+        motion = Mock()
+        with self.assertRaisesRegex(ValueError, "preflight evidence is unavailable"):
+            execute_start_return(completed, config, StartReturnEffects(lambda _: frame, motion))
+        motion.assert_not_called()
 
     def test_arrival_publication_failure_never_persists_ready_failure(self):
         config, completed = self.completed()

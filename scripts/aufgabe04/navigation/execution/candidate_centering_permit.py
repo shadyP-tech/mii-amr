@@ -11,6 +11,7 @@ from scripts.aufgabe04.artifacts.content_store import (
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MissionLegKind,
     load_mission_leg_motion_authorization,
@@ -44,6 +45,7 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
     if (master.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         }
             or MissionLegKind.CANDIDATE_PREAPPROACH not in master.allowed_leg_kinds):
         raise ValueError("mission RUN does not authorize candidate centering")

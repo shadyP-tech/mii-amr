@@ -75,9 +75,18 @@ candidate's admitted facing pose or verified QR observation pose, preserving
 its yaw. `mission/stored_start_pose.py` authenticates the completion records
 and source evidence. The return phase projects the stored pose and the full
 obstacle pool into a freshly admitted localization frame, plans and smooths
-a new exact-target route, and executes it with its own one-use
-`return_to_start` permit. Coverage-only and camera pilot checkpoints still
+a new exact-target route, and checks it against the faster travel uncertainty
+budget. If the complete route cannot pass, it selects an admitted prefix and
+stops before planning the remainder from fresh localization. At most four
+legs are allowed, each with its own one-use `return_to_start` permit. The exact
+Start pose remains the final target. Coverage-only and camera pilot checkpoints still
 stop at their requested checkpoint.
+The same uncertainty calculation runs in planning and the child's newer
+dry/live admission, including worst-axis clearance for initial and intermediate
+stop turns. Each intermediate endpoint is bound to a prefix of the saved full
+route. The robot must complete the child and verify its stopped arrival before
+another leg can start. Legacy single-return authorizations cannot authorize
+intermediate stages; failed children do not trigger a retry under a new index.
 If the robot is already at the exact target position but needs a different
 heading, a separately identified stationary route uses an isotropic clearance
 budget and permits angular commands only.
@@ -95,7 +104,9 @@ maximum safe speed.
 The parent saves camera completion before returning. Only a successful return
 and fresh stationary arrival check set `start_pose_reached` and
 `fastapi_request_ready` true. `return_to_start/arrival.json` records the target
-and arrival evidence. A missing/ambiguous `Start`, altered artifact, unsafe
+and arrival evidence. Per-leg plans, uncertainty selection, permits and stopped
+arrival records are stored under `return_to_start/legs/000`, `001`, etc.
+A missing/ambiguous `Start`, altered artifact, unsafe
 route or failed motion leaves the robot's request readiness false and saves
 `return_to_start/failure.json`. The FastAPI request remains a subsequent task
 client action; this return phase sends no request.

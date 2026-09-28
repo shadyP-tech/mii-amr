@@ -13,6 +13,8 @@ recognized leg kind only so callers fail with a precise fresh-``RUN`` error.
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -36,6 +38,7 @@ MISSION_LEG_MOTION_AUTHORIZATION_HASH_FIELD = (
 MISSION_LEG_MOTION_PERMIT_HASH_FIELD = "mission_leg_motion_permit_sha256"
 
 MISSION_LEG_RUN_CONFIRMATION = "RUN"
+MAX_RETURN_TO_START_LEGS = 4
 LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "Reuse this autonomous mission RUN only for separately sealed routine "
     "child legs whose exact run, leg, target, route, certificates, and passed "
@@ -51,11 +54,20 @@ LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "with current camera/LiDAR evidence, exclusive velocity ownership, fresh "
     "odometry, live clearance checks, and stopped-pose proof."
 )
-MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
     + " After completed camera exploration and storage of admitted candidates, "
     "one separately sealed return-to-Start leg may drive to the admitted pose "
     "of the candidate carrying the Start QR identity."
+)
+MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    + " After completed camera exploration and storage of admitted candidates, "
+    f"at most {MAX_RETURN_TO_START_LEGS} separately sealed return-to-Start legs "
+    "may drive toward the same stored Start candidate and finish at its "
+    "admitted pose. Each leg requires fresh stopped localization and its own "
+    "exact route, passed dry run, and single-use motion permit; intermediate "
+    "stops do not authorize recovery motion or a different target."
 )
 
 
@@ -74,7 +86,7 @@ RECOVERABLE_MISSION_LEG_KINDS = (
     MissionLegKind.CANDIDATE_PREAPPROACH,
     MissionLegKind.OPPOSITE_FACE,
 )
-# The final return is a fresh, single-use leg. Its authorization does not add
+# Every return stage is a fresh, single-use leg. Its authorization does not add
 # startup or runtime recovery to the already bounded exploration scopes.
 ROUTINE_MISSION_LEG_KINDS = (
     *RECOVERABLE_MISSION_LEG_KINDS,
@@ -607,6 +619,7 @@ def validate_mission_leg_motion_permit(
             live_path=live_path,
             supplied_sha256=supplied_hash,
         )
+    _validate_return_to_start_route_scope(permit, authorization)
     return permit
 
 
@@ -691,13 +704,17 @@ def _validate_authorization(
         _require_routine_leg_kind(kind, "allowed_leg_kinds")
     if authorization.scope_text not in (
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     ):
         raise ValueError("mission leg motion authorization scope_text mismatch")
     if (
         MissionLegKind.RETURN_TO_START in authorization.allowed_leg_kinds
-        and authorization.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+        and authorization.scope_text not in {
+            MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        }
     ):
         raise ValueError("return_to_start requires the explicit return-to-Start scope")
     if authorization.operator_confirmation != MISSION_LEG_RUN_CONFIRMATION:
@@ -728,6 +745,13 @@ def _validate_permit(permit: MissionLegMotionPermit) -> None:
     _require_namespace(permit.namespace)
     _require_routine_leg_kind(permit.mission_leg_kind, "mission_leg_kind")
     _nonnegative_integer(permit.mission_leg_index, "mission_leg_index")
+    if (
+        permit.mission_leg_kind is MissionLegKind.RETURN_TO_START
+        and permit.mission_leg_index >= MAX_RETURN_TO_START_LEGS
+    ):
+        raise ValueError(
+            f"return_to_start mission_leg_index must be less than {MAX_RETURN_TO_START_LEGS}"
+        )
     for name in (
         "master_authorization_path",
         "route_csv_path",
@@ -757,9 +781,94 @@ def _validate_permit(permit: MissionLegMotionPermit) -> None:
 
 
 def _validate_permit_references(permit: MissionLegMotionPermit) -> None:
-    _validate_master_reference(permit, Path(permit.master_authorization_path))
+    authorization = _validate_master_reference(permit, Path(permit.master_authorization_path))
     for name, path, digest in _permit_artifacts(permit):
         _validate_bound_artifact(name, path, digest)
+    _validate_return_to_start_route_scope(permit, authorization)
+
+
+def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bool:
+    """Bind a return stage to its Start identity and return its final-stage flag.
+
+    This is an artifact check, not motion authorization. The route admission
+    layer independently verifies endpoint geometry, projection and clearance.
+    """
+    if permit.mission_leg_kind is not MissionLegKind.RETURN_TO_START:
+        raise ValueError("return stage binding requires return_to_start")
+    _validate_bound_artifact("diagnostics", permit.diagnostics_path, permit.diagnostics_sha256)
+    try:
+        payload = json.loads(Path(permit.diagnostics_path).read_text(encoding="utf-8"))
+        metadata = payload["metadata"]
+        if not isinstance(metadata, Mapping):
+            raise ValueError("return_to_start requires route metadata")
+        expected = {
+            "route_kind": "admitted_candidate_pose",
+            "route_purpose": "return_to_start",
+            "selected_candidate_stand_id": permit.target_id,
+            "route_csv_sha256": permit.route_csv_sha256,
+        }
+        for name, value in expected.items():
+            if metadata.get(name) != value:
+                raise ValueError(f"return_to_start route {name} mismatch")
+        evidence_path = Path(metadata["target_evidence_json"])
+        if file_sha256(evidence_path) != metadata.get("target_evidence_sha256"):
+            raise ValueError("return_to_start target evidence hash mismatch")
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("candidate_uid") != permit.target_id
+            or evidence.get("qr_id") != "Start"
+        ):
+            raise ValueError("return_to_start target evidence identity mismatch")
+        stage = metadata.get("return_to_start_stage")
+        if stage is None:
+            if permit.mission_leg_index != 0:
+                raise ValueError("return_to_start stage metadata is required after index 0")
+            final_stage = True
+        else:
+            if not isinstance(stage, Mapping):
+                raise ValueError("return_to_start stage metadata must be an object")
+            if (
+                type(stage.get("stage_index")) is not int
+                or stage["stage_index"] != permit.mission_leg_index
+                or stage.get("start_candidate_uid") != permit.target_id
+                or type(stage.get("final_stage")) is not bool
+            ):
+                raise ValueError("return_to_start stage identity mismatch")
+            final_stage = stage["final_stage"]
+            if not final_stage and permit.mission_leg_index == MAX_RETURN_TO_START_LEGS - 1:
+                raise ValueError("last return_to_start stage must reach the admitted Start pose")
+        stored_target = evidence.get("target_pose")
+        if (
+            not isinstance(stored_target, Mapping)
+            or set(stored_target) != {"x_m", "y_m", "yaw_rad"}
+            or any(
+                isinstance(value, bool) or not isinstance(value, (float, int))
+                or not math.isfinite(value) for value in stored_target.values()
+            )
+        ):
+            raise ValueError("return_to_start requires a finite stored Start pose")
+        if final_stage:
+            if metadata.get("selected_approach_pose") != stored_target:
+                raise ValueError("final return_to_start stage must target the admitted Start pose")
+        elif metadata.get("stored_start_target_pose") != stored_target:
+            raise ValueError("intermediate return_to_start stage must retain the stored Start pose")
+        return final_stage
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid return_to_start stage binding: {exc}") from exc
+
+
+def _validate_return_to_start_route_scope(
+    permit: MissionLegMotionPermit, authorization: MissionLegMotionAuthorization,
+) -> None:
+    if permit.mission_leg_kind is not MissionLegKind.RETURN_TO_START:
+        return
+    final_stage = validate_return_to_start_stage_binding(permit)
+    if (
+        authorization.scope_text == LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+        and (permit.mission_leg_index != 0 or not final_stage)
+    ):
+        raise ValueError("legacy single-return scope authorizes only final return_to_start index 0")
 
 
 def _validate_master_reference(
@@ -968,6 +1077,8 @@ def _boolean(value: object, name: str) -> bool:
 __all__ = [
     "LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
+    "LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
+    "MAX_RETURN_TO_START_LEGS",
     "MISSION_LEG_MOTION_AUTHORIZATION_HASH_FIELD",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCHEMA_VERSION",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
@@ -987,6 +1098,7 @@ __all__ = [
     "validate_mission_leg_motion_authorization",
     "validate_mission_leg_motion_permit",
     "validate_mission_leg_motion_permit_for_execution",
+    "validate_return_to_start_stage_binding",
     "write_mission_leg_motion_authorization",
     "write_mission_leg_motion_permit",
 ]

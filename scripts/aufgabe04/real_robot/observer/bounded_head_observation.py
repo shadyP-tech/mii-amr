@@ -151,6 +151,10 @@ def commit_bounded_head(adapter):
             payload = recommendation_to_dict(recommendation)
             state, kind = "recommendation_committed", "recommendation"
         else:
+            from scripts.aufgabe04.real_robot.observer.backside_center_opportunity import backside_center_pending
+            if backside_center_pending(adapter, center_ready=current.target_reconciliation is not None,
+                                       metadata=current.metadata):
+                return None
             output = args.axis_observation_json
             if output is None:
                 return None

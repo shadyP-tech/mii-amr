@@ -16,7 +16,7 @@ from scripts.aufgabe04.real_robot.configuration.geometry import pose2d_from_tran
 def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose,
         camera_signature, image_stamp_sec, scan, scan_from_map, camera_from_map,
         map_bearing_rad, accepted_range_m, scan_from_camera, base_from_camera, image_stamp,
-        target_reconciliation=None):
+        target_reconciliation=None, fragmentation=None):
     """The caller supplies the ordinary stopped, exact-TF sensor tuple.
 
     A newly decoded payload may finish this branch immediately. No historical
@@ -31,7 +31,7 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
     options = dict(scan=scan, scan_from_map=scan_from_map,
         camera_from_map=camera_from_map, intrinsics=intrinsics,
         model_profile=adapter.stand_model_profile, image_stamp_sec=image_stamp_sec,
-        sync_tolerance_sec=adapter.args.sync_tolerance_sec,
+        sync_tolerance_sec=adapter.args.sync_tolerance_sec, fragmentation=fragmentation,
         map_bearing_rad=map_bearing_rad,
         cone_half_angle_rad=math.radians(adapter.args.lidar_cone_half_angle_deg),
         max_camera_map_bearing_delta_rad=math.radians(adapter.args.backside_registration_max_bearing_delta_deg),
@@ -45,7 +45,7 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         max_scan_age_sec=adapter.args.max_sensor_age_sec,
         max_camera_map_bearing_delta_rad=options['max_camera_map_bearing_delta_rad'],
         resources=getattr(adapter, '_qr_decoder_options', {}).get('resources'),
-        target_reconciliation=target_reconciliation,
+        target_reconciliation=target_reconciliation, fragmentation=fragmentation,
         max_elapsed_sec=min(.06, adapter.args.max_sensor_age_sec-max(0., now-min(image_stamp_sec, scan.scan_stamp_sec))-.08))
     attempt, crop = exclusive_identity_crop(candidate_uid=adapter.args.stand_id,
         snapshot=context.snapshot, support=support, search_result=search, **options)
@@ -78,7 +78,7 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
             robot_pose=robot_pose, target_key=adapter._target_evidence_key(),
             camera_signature=camera_signature, image_shape=frame.shape, roi=attempt.roi,
             model_profile_sha256=adapter.stand_model_profile.sha256, metadata=metadata,
-            retained_backside_orientation=orientation)
+            retained_backside_orientation=orientation, arrival_target_reconciliation=target_reconciliation)
     if (support is not None and not binding.accepted
             and getattr(adapter.args, 'candidate_centering_json', None) is not None):
         try:

@@ -12,6 +12,7 @@ from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
 from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
+from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique
 from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapshot, candidate_snapshot_sha256
 
 POLICY = 'three_stopped_scans_candidate_reconciliation'
@@ -63,9 +64,19 @@ def _entry_result(entry, snapshot, uid, retained_center=None):
     if (not 0 < lo < hi or not 0 <= tolerance <= .05+1e-9
             or abs(lo-(distance-2*g.radius_m-g.uncertainty_m-tolerance)) > 1e-6):
         raise ValueError('reconciliation range is outside candidate surface envelope')
-    envelope = qr_registration_envelope(scan, **options, now_sec=now, max_scan_age_sec=.5)
+    envelope = qr_registration_envelope(scan, **options, now_sec=now, max_scan_age_sec=.5,
+                                       fragmentation=entry.get('fragmentation'))
+    if entry.get('fragmentation') is not None:
+        from scripts.aufgabe04.real_robot.observer.scan_target_persistence import scan_pose_in_map
+        context = entry['fragmentation']['current']['context']
+        if (any(context[k] != v for k,v in (('candidate_x_m',g.x_m),('candidate_y_m',g.y_m),
+                ('stand_radius_m',g.radius_m),('stand_uncertainty_m',g.uncertainty_m)))
+                or tuple(context['robot_pose'][k] for k in ('x_m','y_m','yaw_rad')) != tuple(entry['robot_pose'])
+                or context['image_stamp_sec'] != image
+                or context['scan_pose_map'] != asdict(scan_pose_in_map(tf.translation_xyz_m,tf.rotation_xyzw))):
+            raise ValueError('witnessed envelope differs from reconciliation candidate or pose')
     ids = envelope.selected_cluster_source_indices
-    if not envelope.associated or envelope.eligible_cluster_count != 1 or len(ids) < 3:
+    if not envelope_is_unique(envelope) or len(ids) < 3:
         raise ValueError('reconciliation requires one compact three-beam cluster')
     points = [(scan.ranges[i]*math.cos(scan.angle_min+i*scan.angle_increment),
                scan.ranges[i]*math.sin(scan.angle_min+i*scan.angle_increment)) for i in ids]
@@ -108,6 +119,11 @@ def validate_reconciliation(proof, *, candidate_uid=None, stand_center=None, ima
     entries = proof['entries']
     if len(entries) != 3:
         raise ValueError('three independent stopped observations required')
+    for entry in entries:
+        if entry.get('fragmentation') is not None:
+            context = entry['fragmentation']['current']['context']
+            if context['target_key'] != proof['target_key'] or context['epoch_key'] != str(proof['epoch']):
+                raise ValueError('fragmentation differs from reconciliation target epoch')
     retained_center = _retained_center(proof.get("retained_orientation"),snapshot,uid)
     results = [_entry_result(e,snapshot,uid,retained_center) for e in entries]
     for old,new in zip(entries,entries[1:]):
@@ -134,7 +150,7 @@ class StoppedTargetReconciliation:
 
     def observe(self, *, snapshot_path, candidate_uid, planning_frame, stand_center,
                 target_key, epoch, scan, scan_from_map, robot_pose, image_stamp_sec, now_sec, options,
-                retained_orientation=None):
+                retained_orientation=None, fragmentation=None):
         context = (str(snapshot_path),candidate_uid,planning_frame,tuple(stand_center),target_key,epoch,
                    None if retained_orientation is None else retained_orientation.get("projection_sha256"))
         if context != self.context:
@@ -147,6 +163,8 @@ class StoppedTargetReconciliation:
             raw['ranges'] = [v if math.isfinite(v) else None for v in scan.ranges]
             entry = dict(scan=raw,scan_from_map=asdict(scan_from_map),robot_pose=list(robot_pose),
                 image_stamp_sec=image_stamp_sec,checked_at_sec=now_sec,options=options)
+            if fragmentation is not None:
+                entry['fragmentation'] = fragmentation
             _entry_result(entry,snapshot,candidate_uid,_retained_center(retained_orientation,snapshot,candidate_uid))
             if self.entries and (image_stamp_sec <= self.entries[-1]['image_stamp_sec'] or scan.scan_stamp_sec <= self.entries[-1]['scan']['scan_stamp_sec']):
                 self.entries = []

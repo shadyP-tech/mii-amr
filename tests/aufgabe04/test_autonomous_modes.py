@@ -17,6 +17,8 @@ class AutonomousRunModeTests(unittest.TestCase):
                 self.assertIn("admitted candidates", scope)
                 self.assertIn("return to the admitted pose", scope)
                 self.assertIn("Start QR identity", scope)
+                self.assertIn("at most 4 separately sealed legs", scope)
+                self.assertIn("fresh stopped localization", scope)
         checkpoint = resolve_autonomous_run_mode(
             run_mode="execute-coverage-checkpoint", coverage_leg_limit=2,
         )

@@ -8,6 +8,9 @@ from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_t
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
 from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 
+from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique, bind_ray_to_envelope
+from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_metadata_is_unique
+
 POLICY = 'current_opposite_qr_outline_unique_scan'
 
 
@@ -74,7 +77,7 @@ def validate_target_support(value):
             or lidar['distance_m'] <= 0):
         raise ValueError('opposite QR current scan samples invalid')
     if (lidar.get('associated') is not True or cluster.get('associated') is not True
-            or cluster.get('eligible_cluster_count') != 1
+            or not registered_target_metadata_is_unique(lidar)
             or not cluster.get('selected_cluster_source_indices')
             or abs(stamp-cluster.get('scan_stamp_sec', -1.)) > .1
             or value.get('supplies_angle') is not False or value.get('supplies_identity') is not False):
@@ -98,6 +101,8 @@ def validate_target_support(value):
             cone_half_angle_rad=math.radians(3), accepted_range_m=envelope.accepted_range_m,
             now_sec=proof['entries'][-1]['checked_at_sec'], max_scan_age_sec=.5,
             min_cluster_sample_count=1,max_camera_map_bearing_delta_rad=math.radians(3))
+        current = bind_ray_to_envelope(current, scan, envelope,
+            now_sec=proof['entries'][-1]['checked_at_sec'], max_scan_age_sec=.5)
         if (not current.associated or abs(optical_depth-depth)>1e-9
                 or current.distance_m != lidar['distance_m']
                 or tuple(current.search_association.selected_cluster_source_indices) != tuple(indices)
@@ -110,7 +115,7 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
         scan_from_camera, scan, image_stamp_sec, now_sec, map_bearing_rad,
         cone_half_angle_rad, accepted_range_m, max_scan_age_sec,
         max_camera_map_bearing_delta_rad, resources=None, max_elapsed_sec=.06,
-        target_reconciliation=None):
+        target_reconciliation=None, fragmentation=None):
     """Locate a complete foreground symbol before the payload decoder sees it.
 
     Two bounded scale attempts; background-sized symbols cannot become target
@@ -127,8 +132,8 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
     expected = attempt.expected_head_height_px*model_profile.qr_symbol_height_m/model_profile.head_height_m
     envelope = qr_registration_envelope(scan,map_bearing_rad=map_bearing_rad,
         cone_half_angle_rad=cone_half_angle_rad,max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
-        accepted_range_m=accepted_range_m,now_sec=now_sec,max_scan_age_sec=max_scan_age_sec)
-    if not envelope.associated or envelope.eligible_cluster_count != 1:
+        accepted_range_m=accepted_range_m,now_sec=now_sec,max_scan_age_sec=max_scan_age_sec, fragmentation=fragmentation)
+    if not envelope_is_unique(envelope):
         return None
     reference, limit = map_bearing_rad, max_camera_map_bearing_delta_rad
     if target_reconciliation is not None:
@@ -173,6 +178,8 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
                 cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
                 now_sec=now_sec+time.monotonic()-started, max_scan_age_sec=max_scan_age_sec,
                 min_cluster_sample_count=1, max_camera_map_bearing_delta_rad=limit)
+            lidar = bind_ray_to_envelope(lidar, scan, envelope,
+                now_sec=now_sec+time.monotonic()-started, max_scan_age_sec=max_scan_age_sec)
             support = OppositeTargetSupport(corners, center, lidar, image_stamp_sec, tuple(frame.shape[:2]),
                 expected, depth, target_reconciliation,
                 dict(intrinsics=asdict(intrinsics), scan_from_camera=asdict(scan_from_camera)))
