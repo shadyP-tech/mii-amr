@@ -60,7 +60,7 @@ def validate_candidate_centering_dependencies():
 
 def build_candidate_centering_permit(request):
     profile = request.profile
-    validate_camera_centering_advisory(request.advisory,
+    validated = validate_camera_centering_advisory(request.advisory,
         candidate_uid=request.candidate_id,
         stream_id=f"{request.session_id}_{request.candidate_id}",
         robot_profile_sha256=real_robot_profile_sha256(profile),
@@ -86,6 +86,7 @@ def build_candidate_centering_permit(request):
         result_path=str(root / "candidate_centering_result.json"),
         controller_trace_path=str(root / "controller_trace.jsonl"),
         advisory=request.advisory, signed_turn_rad=request.signed_turn_rad,
+        arrival_recovery=(validated.arrival_recovery or previous is not None and previous.get("arrival_recovery") is True),
         remaining_travel_rad=request.remaining_travel_rad,
         previous_angular_travel_rad=0. if previous is None else previous["total_angular_travel_rad"],
         previous_result_path=None if previous_path is None else str(previous_path),
@@ -155,6 +156,8 @@ def execute_candidate_centering_permit(permit_path, *, motion=None):
         result = {**measured, **{k: permit[k] for k in (
             "schema_version", "purpose", "run_id", "session_id", "candidate_id",
             "view_id", "turn_index", "signed_turn_rad")}, "permit_sha256": payload_sha256(permit)}
+        if permit.get('arrival_recovery') is True:
+            result.update(arrival_recovery=True,arrival_recovery_permit_path=str(Path(permit_path).resolve()))
         write_content_hashed_json(result_path, result, hash_field=RESULT_HASH)
         load_candidate_centering_result(result_path, permit_path=Path(permit_path))
         return 0 if result["status"] == "completed" else 1

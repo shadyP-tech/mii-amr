@@ -44,6 +44,9 @@ def capture_with_centering(
     not_before = None
     previous_result_path = None
     revision = 0
+    turn_limit = MAX_CENTERING_TURNS
+    travel_limit = MAX_CENTERING_TRAVEL_RAD
+    arrival_recovery = False
 
     def persist(phase):
         nonlocal revision
@@ -51,8 +54,8 @@ def capture_with_centering(
         payload = {
             "schema_version": 1, "candidate_uid": candidate_uid,
             "physical_view_index": view_index, "phase": phase,
-            "maximum_turn_count": MAX_CENTERING_TURNS,
-            "maximum_angular_travel_rad": MAX_CENTERING_TRAVEL_RAD,
+            "maximum_turn_count": turn_limit, "arrival_recovery": arrival_recovery,
+            "maximum_angular_travel_rad": travel_limit,
             "actual_angular_travel_rad": travel,
             "observation_not_before_sec": not_before,
             "turn_history": history, "motion_authorized": False,
@@ -76,7 +79,7 @@ def capture_with_centering(
                                   "centering_progress_path": str(state_path)},
                 status_evidence={"motion_authorized": False},
             )
-        enabled = len(history) < MAX_CENTERING_TURNS and travel < MAX_CENTERING_TRAVEL_RAD
+        enabled = len(history) < turn_limit and travel < travel_limit
         capture_dir = (output_dir if not history else
                        output_dir / f"recenter_{len(history):02d}" / "capture")
         observation = capture(frame, capture_dir, view_index, enabled, remaining_sec, not_before)
@@ -89,6 +92,13 @@ def capture_with_centering(
             if history:
                 persist("observation_returned")
             return observation, frame
+        if not history and Path(advisory_path).is_file():
+            from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
+            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import RECOVERY_TRAVEL_RAD, RECOVERY_TURNS
+            advice = validate_camera_centering_advisory(json.loads(Path(advisory_path).read_text()))
+            if advice.arrival_recovery:
+                arrival_recovery = True
+                travel_limit,turn_limit = RECOVERY_TRAVEL_RAD,RECOVERY_TURNS
         if not enabled:
             raise RuntimeError("observer emitted centering after its view budget was disabled")
         turn_index = len(history)
@@ -98,7 +108,7 @@ def capture_with_centering(
         try:
             frame, outcome = turn(
                 frame, advisory_path, output_dir / f"recenter_{turn_index + 1:02d}",
-                turn_index, MAX_CENTERING_TRAVEL_RAD - travel, previous_result_path,
+                turn_index, travel_limit - travel, previous_result_path,
             )
         except Exception as exc:
             history[-1].update(state="failed", reason=f"{type(exc).__name__}: {exc}")
@@ -108,7 +118,7 @@ def capture_with_centering(
         actual = result.get("actual_angular_travel_rad")
         stopped = result.get("stopped_at_sec")
         if (type(actual) not in (int, float) or not math.isfinite(actual) or actual < 0
-                or travel + actual > MAX_CENTERING_TRAVEL_RAD + 1e-9
+                or travel + actual > travel_limit + 1e-9
                 or type(stopped) not in (int, float) or not math.isfinite(stopped)
                 or stopped <= 0 or (not_before is not None and stopped <= not_before)):
             raise RuntimeError("invalid centering travel or stopped timestamp evidence")

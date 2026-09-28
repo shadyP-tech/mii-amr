@@ -155,6 +155,8 @@ def associate_current_measured_head(
         try:
             proof_scan, envelope, _, association_reference = validate_reconciliation(target_reconciliation,
                 scan_stamp_sec=scan.scan_stamp_sec)
+            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
+            check_current_scan(proof_scan, scan)
             if (proof_scan.scan_frame_id != scan.scan_frame_id
                     or tuple(envelope.accepted_range_m) != tuple(accepted_range_m)
                     or envelope.map_bearing_rad != map_bearing_rad):

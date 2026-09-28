@@ -1458,6 +1458,7 @@ def _capture_camera_recommendation(
     observation_not_before_sec: float | None = None,
     retained_backside_axis_path: Path | None = None,
     candidate_crop_snapshot_path: Path | None = None,
+    candidate_position_epoch_path: Path | None = None,
 ) -> (
     tuple[Path | None, str | None, Path | None]
     | tuple[None, str | None, None, Path]
@@ -1550,6 +1551,8 @@ def _capture_camera_recommendation(
         if candidate_crop_snapshot_path is None:
             raise ValueError("retained backside orientation needs its candidate crop snapshot")
         command.extend(["--retained-backside-axis-json", str(retained_backside_axis_path)])
+    if candidate_position_epoch_path is not None:
+        command.extend(["--candidate-position-epoch", str(candidate_position_epoch_path)])
     if candidate_crop_snapshot_path is not None:
         command.extend(["--candidate-crop-snapshot", str(candidate_crop_snapshot_path)])
     process = subprocess.Popen(command)
@@ -1969,6 +1972,7 @@ def _capture_candidate_observation(
         observation_not_before_sec=getattr(request, "observation_not_before_sec", None),
         retained_backside_axis_path=getattr(request, "retained_backside_axis_path", None),
         candidate_crop_snapshot_path=getattr(request, "candidate_crop_snapshot_path", None),
+        candidate_position_epoch_path=getattr(request, "candidate_position_epoch_path", None),
     )
     return CandidateObservation(*result)
 
@@ -1991,7 +1995,8 @@ def _run_camera_centering_turn(*, profile, args, master_authorization_path,
         session_id=args.session_id, output_dir=output_dir, profile=profile,
         master_authorization_path=master_authorization_path,
         candidate_id=candidate.candidate_uid, view_id=view_id, turn_index=turn_index,
-        advisory=payload, signed_turn_rad=advisory.requested_yaw_rad,
+        advisory=payload, signed_turn_rad=(advisory.requested_yaw_rad if turn_index == 0 else
+            math.copysign(min(abs(advisory.requested_yaw_rad), math.radians(6.)), advisory.requested_yaw_rad)),
         remaining_travel_rad=remaining_travel_rad,
         minimum_clearance_m=minimum_clearance_m,
         previous_result_path=previous_result_path,

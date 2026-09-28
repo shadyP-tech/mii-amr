@@ -42,7 +42,7 @@ def qr_registration_envelope(scan, *, map_bearing_rad, cone_half_angle_rad,
 
 
 def current_scan_qr_search(*, scan, scan_from_map, camera_from_map, intrinsics,
-        model_profile, image_stamp_sec, sync_tolerance_sec, **association_options):
+        model_profile, image_stamp_sec, sync_tolerance_sec, target_reconciliation=None, **association_options):
     """Project a unique current return at measured head height for a small crop.
 
     This crop supplies neither symbol corners nor a head angle. Exact-time TF,
@@ -62,6 +62,18 @@ def current_scan_qr_search(*, scan, scan_from_map, camera_from_map, intrinsics,
             or abs(image_stamp_sec-scan.scan_stamp_sec) > sync_tolerance_sec):
         return None, {**info, "reason": "stale_or_unsynchronized_search"}
     envelope = qr_registration_envelope(scan, **association_options)
+    if target_reconciliation is not None:
+        try:
+            from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
+            proof_scan, envelope, _, _ = validate_reconciliation(target_reconciliation,
+                image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan.scan_stamp_sec)
+            check_current_scan(proof_scan, scan)
+            if (tuple(envelope.accepted_range_m) != tuple(association_options['accepted_range_m'])
+                    or abs(envelope.map_bearing_rad-association_options['map_bearing_rad']) > 1e-9):
+                raise ValueError('reconciliation differs from QR search candidate')
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            return None, {**info, 'reason': str(exc)}
     info["envelope"] = asdict(envelope)
     if not envelope_is_unique(envelope):
         return None, {**info, "reason": "qr_search_cluster_not_unique"}

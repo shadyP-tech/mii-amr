@@ -227,3 +227,86 @@ def test_two_turn_budget_disables_further_centering_but_allows_fresh_capture(tmp
         view_index=0,timeout_sec=90.,capture=capture,turn=turn,monotonic=lambda:10.)
     assert calls==[(True,None),(True,12.),(False,13.)]
     assert len(list((tmp_path/'centering_history').glob('*.json')))==5
+
+
+def epoch_turn_request(turn_request, monkeypatch):
+    from tests.aufgabe04.test_candidate_position_epoch import recovery_advisory
+    advice,_=recovery_advisory()
+    original=turn_request.advisory
+    advice=replace(advice,stream_id=f'{turn_request.session_id}_{advice.candidate_uid}',
+        robot_profile_sha256=original['robot_profile_sha256'],
+        calibration_profile_sha256=original['calibration_profile_sha256'],
+        stand_model_profile_sha256=original['stand_model_profile_sha256'])
+    monkeypatch.setattr(child.time,'time',lambda:advice.created_at_sec+.1)
+    return replace(turn_request,candidate_id=advice.candidate_uid,advisory=advice.metadata(),
+        signed_turn_rad=advice.requested_yaw_rad,remaining_travel_rad=math.radians(42))
+
+
+def test_proven_epoch_arrival_crosses_real_child_boundary(turn_request,monkeypatch):
+    request=epoch_turn_request(turn_request,monkeypatch)
+    motion=Mock(side_effect=motion_result)
+    outcome=child.run_candidate_centering_child(request,run_process=runner(monkeypatch,motion))
+    assert math.degrees(outcome.result['signed_turn_rad']) > 6
+    assert outcome.result['arrival_recovery'] is True
+    assert outcome.result==load_candidate_centering_result(outcome.result_path)
+    assert motion.call_count==1
+    with pytest.raises(RuntimeError,match='refusing to reuse'):
+        child.run_candidate_centering_child(request,run_process=runner(monkeypatch,motion))
+
+
+def test_epoch_turn_requires_new_master_scope(turn_request,monkeypatch):
+    from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    request=epoch_turn_request(turn_request,monkeypatch)
+    master=load_mission_leg_motion_authorization(request.master_authorization_path)
+    legacy=request.master_authorization_path.with_name("legacy.json")
+    write_mission_leg_motion_authorization(legacy,
+        replace(master,scope_text=LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE))
+    request=replace(request,master_authorization_path=legacy)
+    motion=Mock(side_effect=motion_result)
+    with pytest.raises(ValueError,match='does not authorize extended'):
+        child.run_candidate_centering_child(request,run_process=runner(monkeypatch,motion))
+    motion.assert_not_called()
+
+
+def test_forged_epoch_allowance_cannot_cross_child_boundary(turn_request,monkeypatch):
+    request=epoch_turn_request(turn_request,monkeypatch)
+    request.advisory['target_reconciliation']['entries'][0]['position_epoch']['sha256']='0'*64
+    from scripts.aufgabe04.real_robot.observer.candidate_centering import _digest
+    request.advisory.pop('camera_centering_advisory_sha256')
+    request.advisory['camera_centering_advisory_sha256']=_digest(request.advisory)
+    motion=Mock(side_effect=motion_result)
+    with pytest.raises(ValueError,match='position epochs changed'):
+        child.run_candidate_centering_child(request,run_process=runner(monkeypatch,motion))
+    motion.assert_not_called()
+
+
+def test_coarse_arrival_allows_two_fresh_fine_turns_without_resetting_budget(turn_request,monkeypatch):
+    from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
+    request=epoch_turn_request(turn_request,monkeypatch)
+    motion=Mock(side_effect=motion_result)
+    outcome=child.run_candidate_centering_child(request,run_process=runner(monkeypatch,motion))
+    total=outcome.result['total_angular_travel_rad']
+    ordinary=validate_camera_centering_advisory(turn_request.advisory)
+    # Contract replay: each following receipt is a new ordinary small-angle
+    # observation. Live odometry/clearance remain tested in the runtime harness.
+    for index in (1,2):
+        delta=request.advisory['created_at_sec']+2*index-ordinary.created_at_sec
+        fresh=replace(ordinary,candidate_uid=request.candidate_id,stream_id=request.advisory['stream_id'],
+            target_key=request.advisory['target_key'],image_stamp_sec=ordinary.image_stamp_sec+delta,
+            scan_stamp_sec=ordinary.scan_stamp_sec+delta,odom_stamp_sec=ordinary.odom_stamp_sec+delta,
+            created_at_sec=ordinary.created_at_sec+delta)
+        monkeypatch.setattr(child.time,'time',lambda:fresh.created_at_sec+.1)
+        fine=replace(request,output_dir=request.output_dir.parent/f'fine_{index}',turn_index=index,
+            advisory=fresh.metadata(),signed_turn_rad=fresh.requested_yaw_rad,
+            remaining_travel_rad=math.radians(42)-total,previous_result_path=outcome.result_path)
+        outcome=child.run_candidate_centering_child(fine,run_process=runner(monkeypatch,motion))
+        assert outcome.result['arrival_recovery'] is True
+        assert load_candidate_centering_result(outcome.result_path)==outcome.result
+        assert outcome.result['total_angular_travel_rad']==pytest.approx(total+abs(fine.signed_turn_rad))
+        total=outcome.result['total_angular_travel_rad']
+    assert motion.call_count==3
+    assert total>math.radians(12)
+    with pytest.raises(ValueError,match='turn index'):
+        child.run_candidate_centering_child(replace(fine,output_dir=request.output_dir.parent/'extra',turn_index=3,
+            previous_result_path=outcome.result_path),run_process=runner(monkeypatch,motion))
+    assert motion.call_count==3

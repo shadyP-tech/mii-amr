@@ -87,7 +87,9 @@ def bind_qr_observations_to_target(
         now_sec=now_sec, max_scan_age_sec=max_scan_age_sec,
         min_cluster_sample_count=min_cluster_sample_count,
     )
-    independent = allow_independent_registration and not camera_registration_accepted
+    from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import is_epoch_recovery
+    independent = (allow_independent_registration and not camera_registration_accepted
+                   and not is_epoch_recovery(target_reconciliation))
     envelope = None
     if independent:
         envelope = qr_registration_envelope(scan, map_bearing_rad=map_bearing_rad,
@@ -104,6 +106,15 @@ def bind_qr_observations_to_target(
                 map_bearing_rad=map_bearing_rad, cone_half_angle_rad=cone_half_angle_rad,
                 max_camera_map_bearing_delta_rad=limit, accepted_range_m=accepted_range_m,
                 now_sec=now_sec, max_scan_age_sec=max_scan_age_sec, fragmentation=fragmentation)
+            if target_reconciliation is not None:
+                proof_scan, proof_envelope, _, reference = validate_reconciliation(
+                    target_reconciliation, scan_stamp_sec=scan.scan_stamp_sec)
+                from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
+                check_current_scan(proof_scan, scan)
+                if (tuple(proof_envelope.accepted_range_m) != tuple(accepted_range_m)
+                        or abs(proof_envelope.map_bearing_rad-map_bearing_rad) > 1e-9):
+                    raise ValueError('reconciliation_different_candidate_envelope')
+                depth_envelope = proof_envelope
             if not envelope_is_unique(depth_envelope):
                 if target_reconciliation is not None or not (camera_registration_accepted or independent):
                     raise ValueError('finite_qr_range_not_unique')
@@ -130,15 +141,6 @@ def bind_qr_observations_to_target(
                 range_m=depth_envelope.distance_m, range_interval_m=accepted_range_m,
                 scan_from_camera=asdict(scan_from_camera), intrinsics=asdict(intrinsics))
             if target_reconciliation is not None:
-                proof_scan, proof_envelope, _, reference = validate_reconciliation(
-                    target_reconciliation, scan_stamp_sec=scan.scan_stamp_sec)
-                # Processing advances the clock after the stopped proof. Age
-                # diagnostics may differ; target geometry and indices may not.
-                fields = ('scan_stamp_sec','scan_frame_id','selected_cluster_source_indices',
-                          'distance_m','accepted_range_m','map_bearing_rad','cone_half_angle_rad')
-                if (any(getattr(proof_envelope,k) != getattr(depth_envelope,k) for k in fields)
-                        or proof_scan.scan_frame_id != scan.scan_frame_id):
-                    raise ValueError('reconciliation_different_current_cluster')
                 limit = cone_half_angle_rad
             if abs(math.remainder(bearing-reference, math.tau))+uncertainty > limit:
                 raise ValueError('camera_map_bearing_interval_exceeds_limit')
@@ -166,7 +168,7 @@ def bind_qr_observations_to_target(
         reason = "independent_qr_registration_cluster_mismatch"
     if association.associated and cluster.eligible_cluster_count != 1 and not registered_target_is_unique(association):
         reason = "ambiguous_qr_target_clusters"
-    if (not reason and not (camera_registration_accepted or independent)
+    if (not reason and not (camera_registration_accepted or independent or target_reconciliation is not None)
             and cluster.selected_cluster_bearing_delta_from_camera_rad > cone_half_angle_rad):
         reason = "qr_bearing_outside_target_cluster_cone"
     accepted = association.associated and not reason

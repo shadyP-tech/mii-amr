@@ -60,7 +60,7 @@ LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "one separately sealed return-to-Start leg may drive to the admitted pose "
     "of the candidate carrying the Start QR identity."
 )
-MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
     + " After completed camera exploration and storage of admitted candidates, "
     f"at most {MAX_RETURN_TO_START_LEGS} separately sealed return-to-Start legs "
@@ -68,6 +68,17 @@ MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "admitted pose. Each leg requires fresh stopped localization and its own "
     "exact route, passed dry run, and single-use motion permit; intermediate "
     "stops do not authorize recovery motion or a different target."
+)
+
+
+MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    + " A validated candidate-position epoch recovery may instead use one "
+    "separately sealed arrival turn of at most thirty degrees followed by "
+    "at most two six-degree fine turns, with at most forty-two degrees of "
+    "measured travel per view. Three fresh stopped scans, unique candidate "
+    "association, calibrated camera bearing, and the same live motion checks "
+    "are required; no stand angle or survey landmark is rewritten."
 )
 
 
@@ -704,6 +715,7 @@ def _validate_authorization(
         _require_routine_leg_kind(kind, "allowed_leg_kinds")
     if authorization.scope_text not in (
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -713,6 +725,7 @@ def _validate_authorization(
         MissionLegKind.RETURN_TO_START in authorization.allowed_leg_kinds
         and authorization.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         }
     ):
@@ -1075,6 +1088,7 @@ def _boolean(value: object, name: str) -> bool:
 
 
 __all__ = [
+    "LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",

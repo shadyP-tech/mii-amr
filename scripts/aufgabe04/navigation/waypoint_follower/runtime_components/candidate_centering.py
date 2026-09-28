@@ -21,23 +21,31 @@ def fresh_centering_target(scan, advisory, now_sec):
     """Recheck the same narrow measured bearing before starting the turn."""
     from scripts.aufgabe04.perception.candidate_lidar_association import associate_candidate_lidar_target
     from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
-    from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vector
-    model = advisory["intrinsics"]
-    u, v = advisory["measured_center_px"]
-    ray = ((u-model["cx_px"])/model["fx_px"], (v-model["cy_px"])/model["fy_px"], 1.0)
-    direction = rotate_vector(ray, advisory["scan_from_camera"]["rotation_xyzw"])
+    from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
+    from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics
+    from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
     if scan.header.frame_id != advisory["scan_from_camera"]["parent_frame"]:
         return None
     distance = advisory["associated_range_m"]
+    interval = (max(0.001, distance-0.04), distance+0.04)
+    try:
+        bearing, uncertainty, _ = finite_target_bearing(
+            center_px=advisory['measured_center_px'], intrinsics=CameraIntrinsics(**advisory['intrinsics']),
+            scan_from_camera=RigidTransform(**advisory['scan_from_camera']),
+            distance_m=distance, range_interval_m=interval)
+        if uncertainty >= math.radians(3.):
+            return None
+    except (ValueError, TypeError, KeyError, ArithmeticError):
+        return None
     association = associate_candidate_lidar_target(
         PlainLaserScan(ranges=tuple(scan.ranges), angle_min=scan.angle_min,
             angle_increment=scan.angle_increment, range_min=scan.range_min,
             range_max=scan.range_max, scan_frame_id=scan.header.frame_id,
             scan_stamp_sec=scan.header.stamp.sec + scan.header.stamp.nanosec / 1e9,
             angle_max=scan.angle_max, scan_topology_profile="full_rotation"),
-        map_bearing_rad=math.atan2(direction[1], direction[0]),
+        map_bearing_rad=bearing,
         cone_half_angle_rad=math.radians(3.0),
-        accepted_range_m=(max(0.001, distance-0.04), distance+0.04),
+        accepted_range_m=interval,
         now_sec=now_sec, max_scan_age_sec=0.5,
     )
     return asdict(association) if association.associated and association.eligible_cluster_count == 1 else None

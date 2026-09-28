@@ -64,6 +64,11 @@ def _entry_result(entry, snapshot, uid, retained_center=None):
     if (not 0 < lo < hi or not 0 <= tolerance <= .05+1e-9
             or abs(lo-(distance-2*g.radius_m-g.uncertainty_m-tolerance)) > 1e-6):
         raise ValueError('reconciliation range is outside candidate surface envelope')
+    if entry.get('position_epoch') is not None:
+        if entry.get('fragmentation') is not None:
+            raise ValueError('epoch recovery requires a raw contiguous cluster')
+        from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import epoch_cluster
+        return epoch_cluster(entry,snapshot,uid,scan,tf)
     envelope = qr_registration_envelope(scan, **options, now_sec=now, max_scan_age_sec=.5,
                                        fragmentation=entry.get('fragmentation'))
     if entry.get('fragmentation') is not None:
@@ -124,6 +129,9 @@ def validate_reconciliation(proof, *, candidate_uid=None, stand_center=None, ima
             context = entry['fragmentation']['current']['context']
             if context['target_key'] != proof['target_key'] or context['epoch_key'] != str(proof['epoch']):
                 raise ValueError('fragmentation differs from reconciliation target epoch')
+    epoch_refs = [e.get('position_epoch') for e in entries]
+    if any(ref != epoch_refs[0] for ref in epoch_refs):
+        raise ValueError('reconciliation position epochs changed')
     retained_center = _retained_center(proof.get("retained_orientation"),snapshot,uid)
     results = [_entry_result(e,snapshot,uid,retained_center) for e in entries]
     for old,new in zip(entries,entries[1:]):
@@ -150,9 +158,10 @@ class StoppedTargetReconciliation:
 
     def observe(self, *, snapshot_path, candidate_uid, planning_frame, stand_center,
                 target_key, epoch, scan, scan_from_map, robot_pose, image_stamp_sec, now_sec, options,
-                retained_orientation=None, fragmentation=None):
+                retained_orientation=None, fragmentation=None, position_epoch_path=None):
         context = (str(snapshot_path),candidate_uid,planning_frame,tuple(stand_center),target_key,epoch,
-                   None if retained_orientation is None else retained_orientation.get("projection_sha256"))
+                   None if retained_orientation is None else retained_orientation.get("projection_sha256"),
+                   str(position_epoch_path))
         if context != self.context:
             self.entries = []
             self.context = context
@@ -165,7 +174,18 @@ class StoppedTargetReconciliation:
                 image_stamp_sec=image_stamp_sec,checked_at_sec=now_sec,options=options)
             if fragmentation is not None:
                 entry['fragmentation'] = fragmentation
-            _entry_result(entry,snapshot,candidate_uid,_retained_center(retained_orientation,snapshot,candidate_uid))
+            try:
+                _entry_result(entry,snapshot,candidate_uid,_retained_center(retained_orientation,snapshot,candidate_uid))
+            except ValueError:
+                if position_epoch_path is None:
+                    raise
+                from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import epoch_reference
+                entry.pop('fragmentation',None)
+                entry['position_epoch'] = epoch_reference(position_epoch_path)
+                _entry_result(entry,snapshot,candidate_uid)
+            if self.entries and self.entries[-1].get('position_epoch') != entry.get('position_epoch'):
+                self.entries = []
+
             if self.entries and (image_stamp_sec <= self.entries[-1]['image_stamp_sec'] or scan.scan_stamp_sec <= self.entries[-1]['scan']['scan_stamp_sec']):
                 self.entries = []
                 raise ValueError('duplicate or regressed reconciliation tuple')

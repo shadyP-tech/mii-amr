@@ -385,10 +385,12 @@ def execute_local_candidate_inspection(
                 timeout_sec=source_config.camera_timeout_sec,
                 retained_backside_axis_path=retained,
                 candidate_crop_snapshot_path=frame.decision_binding.camera_snapshot_path,
+                candidate_position_epoch_path=frame.decision_binding.projection_path,
             ))
         return capture_observation(observation_request_type(frame.candidate, output, index,
             candidate_crop_snapshot_path=(None if frame.decision_binding is None
-                else frame.decision_binding.camera_snapshot_path)))
+                else frame.decision_binding.camera_snapshot_path),
+            candidate_position_epoch_path=(None if frame.decision_binding is None else frame.decision_binding.projection_path)))
 
     def centered_capture(frame, output, index):
         def capture(current, destination, view, enabled, timeout, not_before):
@@ -398,6 +400,7 @@ def execute_local_candidate_inspection(
                 retained_backside_axis_path=current.retained_backside_axis_path,
                 candidate_crop_snapshot_path=(None if current.decision_binding is None
                     else current.decision_binding.camera_snapshot_path),
+                candidate_position_epoch_path=(None if current.decision_binding is None else current.decision_binding.projection_path),
             ))
 
         def turn(current, advisory_path, root, serial, remaining, previous_result):

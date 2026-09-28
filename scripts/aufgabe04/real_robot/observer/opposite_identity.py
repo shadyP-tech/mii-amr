@@ -29,6 +29,7 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         adapter._write_status('opposite_identity_unavailable', reason='retained_backside_wrong_side')
         return
     options = dict(scan=scan, scan_from_map=scan_from_map,
+        target_reconciliation=target_reconciliation,
         camera_from_map=camera_from_map, intrinsics=intrinsics,
         model_profile=adapter.stand_model_profile, image_stamp_sec=image_stamp_sec,
         sync_tolerance_sec=adapter.args.sync_tolerance_sec, fragmentation=fragmentation,

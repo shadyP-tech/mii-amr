@@ -608,3 +608,15 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_clean_position_epoch_exit_enters_bounded_recovery_but_crash_does_not():
+    case=PassiveObserverDiagnosticsTests()
+    status=case._load_payload(dict(state='candidate_position_epoch_inconsistent',
+        observation_evidence=dict(accepted_frame_count=0,lidar_rejection_count=30,poisoned=False)))
+    process=replace(case._process('child_exit'),returncode=0,signals_sent=(),cleanup_actions=('exit_observed',))
+    assert is_candidate_local_observer_timeout(process=process,status=status)
+    for changes in (dict(returncode=1),dict(signals_sent=('SIGINT',)),dict(completion_kind='deadline',deadline_expired=True)):
+        assert not is_candidate_local_observer_timeout(process=replace(process,**changes),status=status)
+    for changes in (dict(observation_evidence_poisoned=True),dict(observation_evidence_poisoned=None),dict(state='lidar_target_mismatch')):
+        assert not is_candidate_local_observer_timeout(process=process,status=replace(status,**changes))

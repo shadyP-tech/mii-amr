@@ -5,7 +5,7 @@ this solver neither estimates the stand angle nor authorizes robot motion.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
@@ -18,6 +18,10 @@ from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics
 from scripts.aufgabe04.real_robot.observer.evidence import EvidencePose
 from scripts.aufgabe04.real_robot.observer.opposite_target_support import (
     OppositeTargetSupport, validate_target_support, POLICY as QR_SUPPORT_SOURCE,
+)
+
+from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import (
+    is_epoch_recovery, RECOVERY_STEP_RAD, RECOVERY_TRAVEL_RAD, RECOVERY_TURNS,
 )
 
 MAX_CENTERING_STEP_RAD = math.radians(6.)
@@ -83,14 +87,15 @@ class CenteringBudgetExceeded(ValueError):
 
 def solve_camera_centering(*, center_px, intrinsics, distance_m,
                            scan_from_camera, base_from_camera,
-                           remaining_rotation_rad=MAX_CENTERING_TRAVEL_RAD):
+                           remaining_rotation_rad=MAX_CENTERING_TRAVEL_RAD,
+                           maximum_rotation_rad=MAX_CENTERING_TRAVEL_RAD):
     """Return signed left-positive yaw; zero means inside the pixel deadband.
 
     A correction that cannot fit entirely in the remaining view budget raises
-    ValueError. The caller must still limit each physical step to six degrees.
+    ValueError. The caller must enforce the separately authorized step limit.
     """
-    _finite((remaining_rotation_rad,))
-    if not 0 < remaining_rotation_rad <= MAX_CENTERING_TRAVEL_RAD+1e-12:
+    _finite((remaining_rotation_rad, maximum_rotation_rad))
+    if not 0 < remaining_rotation_rad <= maximum_rotation_rad <= RECOVERY_TRAVEL_RAD+1e-12:
         raise ValueError("invalid remaining centering budget")
     point = center_point_in_base(center_px=center_px, intrinsics=intrinsics,
         distance_m=distance_m, scan_from_camera=scan_from_camera, base_from_camera=base_from_camera)
@@ -152,6 +157,14 @@ class CameraCenteringAdvisory:
     target_reconciliation: dict | None = None
 
     @property
+    def arrival_recovery(self):
+        return is_epoch_recovery(self.target_reconciliation)
+
+    @property
+    def maximum_travel_rad(self):
+        return RECOVERY_TRAVEL_RAD if self.arrival_recovery else MAX_CENTERING_TRAVEL_RAD
+
+    @property
     def deadband_px(self):
         return self.intrinsics.fx_px*math.tan(CENTERING_DEADBAND_RAD)
 
@@ -159,7 +172,7 @@ class CameraCenteringAdvisory:
         payload = {**asdict(self), "schema_version": 1, "association_source": (_SOURCE if self.target_support is None else QR_SUPPORT_SOURCE),
             "eligible_cluster_count": 1, "image_width_px": self.intrinsics.width_px,
             "target_u_px": self.intrinsics.width_px/2., "deadband_px": self.deadband_px,
-            "remaining_rotation_budget_rad": MAX_CENTERING_TRAVEL_RAD-self.consumed_rotation_rad,
+            "remaining_rotation_budget_rad": self.maximum_travel_rad-self.consumed_rotation_rad,
             "motion_authorized": False, "completion_authorized": False}
         if self.target_reconciliation is None:
             payload.pop('target_reconciliation')
@@ -202,13 +215,17 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
                 or abs(image_stamp_sec-scan_stamp) > max_image_scan_skew_sec
                 or abs(image_stamp_sec-odom_stamp_sec) > max_image_scan_skew_sec):
             return None
-        if (type(completed_turn_count) is not int or not 0 <= completed_turn_count < MAX_CENTERING_TURNS
-                or not 0 <= consumed_rotation_rad < MAX_CENTERING_TRAVEL_RAD):
+        recovery = is_epoch_recovery(getattr(association,'target_reconciliation',None))
+        total = RECOVERY_TRAVEL_RAD if recovery else MAX_CENTERING_TRAVEL_RAD
+        step_limit = RECOVERY_STEP_RAD if recovery else MAX_CENTERING_STEP_RAD
+        turns = RECOVERY_TURNS if recovery else MAX_CENTERING_TURNS
+        if (type(completed_turn_count) is not int or not 0 <= completed_turn_count < turns
+                or not 0 <= consumed_rotation_rad < total):
             return None
         required = solve_camera_centering(center_px=association.full_image_center_px,
             intrinsics=intrinsics, distance_m=lidar.distance_m, scan_from_camera=scan_from_camera,
             base_from_camera=base_from_camera,
-            remaining_rotation_rad=MAX_CENTERING_TRAVEL_RAD-consumed_rotation_rad)
+            remaining_rotation_rad=total-consumed_rotation_rad, maximum_rotation_rad=total)
         if not required:
             return None
         advisory = CameraCenteringAdvisory(candidate_uid, target_key, stream_id, planning_frame,
@@ -217,10 +234,13 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
             stand_model_profile_sha256, intrinsics, scan_from_camera, base_from_camera,
             tuple(association.full_image_center_px), lidar.distance_m,
             search.selected_cluster_sample_count,
-            math.copysign(min(abs(required), MAX_CENTERING_STEP_RAD), required), required,
+            math.copysign(min(abs(required), step_limit), required), required,
             consumed_rotation_rad, completed_turn_count,
             target_support=association.metadata() if qr_support else None,
             target_reconciliation=getattr(association,'target_reconciliation',None))
+        if recovery:
+            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import epoch_requested_turn
+            advisory = replace(advisory, requested_yaw_rad=epoch_requested_turn(advisory,search))
         # Same structural and derived-value validation applies at the process boundary.
         return validate_camera_centering_advisory(advisory.metadata())
     except CenteringBudgetExceeded as exc:
@@ -280,14 +300,14 @@ def validate_camera_centering_advisory(payload: Mapping, *, candidate_uid=None,
                 raise ValueError("invalid profile hash")
         if (type(result.motion_epoch) is not int or result.motion_epoch < 0
                 or type(result.completed_turn_count) is not int
-                or not 0 <= result.completed_turn_count < MAX_CENTERING_TURNS
+                or not 0 <= result.completed_turn_count < (RECOVERY_TURNS if result.arrival_recovery else MAX_CENTERING_TURNS)
                 or type(result.selected_cluster_sample_count) is not int
                 or result.selected_cluster_sample_count < 1):
             raise ValueError("invalid observation epoch or centering count")
         _finite((*asdict(result.anchor_pose).values(), *asdict(result.anchor_odom_pose).values(),
             result.image_stamp_sec, result.scan_stamp_sec, result.odom_stamp_sec, result.created_at_sec,
             result.required_yaw_rad, result.requested_yaw_rad, result.consumed_rotation_rad))
-        if (not 0 <= result.consumed_rotation_rad < MAX_CENTERING_TRAVEL_RAD
+        if (not 0 <= result.consumed_rotation_rad < result.maximum_travel_rad
                 or any(not 0 <= result.created_at_sec-stamp <= .5 for stamp in
                     (result.image_stamp_sec, result.scan_stamp_sec, result.odom_stamp_sec))
                 or abs(result.image_stamp_sec-result.scan_stamp_sec) > .1
@@ -331,8 +351,12 @@ def validate_camera_centering_advisory(payload: Mapping, *, candidate_uid=None,
         required = solve_camera_centering(center_px=result.measured_center_px,
             intrinsics=result.intrinsics, distance_m=result.associated_range_m,
             scan_from_camera=result.scan_from_camera, base_from_camera=result.base_from_camera,
-            remaining_rotation_rad=MAX_CENTERING_TRAVEL_RAD-result.consumed_rotation_rad)
-        step = math.copysign(min(abs(required), MAX_CENTERING_STEP_RAD), required)
+            remaining_rotation_rad=result.maximum_travel_rad-result.consumed_rotation_rad,
+            maximum_rotation_rad=result.maximum_travel_rad)
+        step = math.copysign(min(abs(required), RECOVERY_STEP_RAD if result.arrival_recovery else MAX_CENTERING_STEP_RAD), required)
+        if result.arrival_recovery:
+            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import epoch_requested_turn
+            step = epoch_requested_turn(result,current.search_association)
         if (not required or abs(result.required_yaw_rad-required) > 1e-10
                 or abs(result.requested_yaw_rad-step) > 1e-10):
             raise ValueError("centering rotation differs from calibrated observation")

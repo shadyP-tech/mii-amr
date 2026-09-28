@@ -143,3 +143,11 @@ tests/aufgabe04/fixtures/qr_admission_20260922/*
 !tests/aufgabe04/fixtures/qr_admission_20260922/inputs.json
 !tests/aufgabe04/fixtures/qr_admission_20260922/frame_000003.compressed
 !tests/aufgabe04/fixtures/qr_admission_20260922/frame_000014.compressed
+
+!tests/aufgabe04/fixtures/candidate_position_epoch/
+tests/aufgabe04/fixtures/candidate_position_epoch/*
+!tests/aufgabe04/fixtures/candidate_position_epoch/candidate_snapshot.json
+!tests/aufgabe04/fixtures/candidate_position_epoch/candidate_frame_projection.json
+!tests/aufgabe04/fixtures/candidate_position_epoch/observations.json
+!tests/aufgabe04/fixtures/candidate_position_epoch/late_run_frame.png
+!tests/aufgabe04/fixtures/candidate_position_epoch/README.md

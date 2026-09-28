@@ -1033,6 +1033,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "axis_sample_accepted": update.axis_sample_accepted,
             "qr_sample_accepted": update.qr_sample_accepted,
         }
+        from scripts.aufgabe04.real_robot.observer.position_epoch_opportunity import PositionEpochOpportunity
+        if not hasattr(self, '_position_epoch_opportunity'):
+            self._position_epoch_opportunity = PositionEpochOpportunity()
+        self._position_epoch_failure = self._position_epoch_opportunity.observe(
+            getattr(self, '_current_position_epoch_proof', None), self._inspection_frame,
+            now_sec=observed_at_sec)
         return update
 
     def _lookup(self, target_frame: str, source_frame: str, stamp) -> object:
@@ -1624,6 +1630,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             if not hasattr(self, '_target_reconciliation'):
                 self._target_reconciliation = StoppedTargetReconciliation()
             target_reconciliation = self._target_reconciliation.observe(
+                position_epoch_path=getattr(self.args,"candidate_position_epoch",None),
                 retained_orientation=None if opposite_context is None else opposite_context.orientation,
                 fragmentation=registration_fragmentation,
                 snapshot_path=self.args.candidate_crop_snapshot,candidate_uid=self.args.stand_id,
@@ -1638,6 +1645,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
                     accepted_range_m=(lower_surface_bound,upper_surface_bound)))
 
+        self._current_position_epoch_proof = target_reconciliation
         if opposite_context is not None:
             process_opposite_identity(self, context=opposite_context, frame=frame,
                 fragmentation=registration_fragmentation,
@@ -1843,10 +1851,24 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 intrinsics=intrinsics, model_profile=self.stand_model_profile,
                 stand_radius_m=self.args.stand_radius_m,
                 stand_uncertainty_m=self.args.stand_uncertainty_m)
+            epoch_envelope = None
+            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import is_epoch_recovery, recovered_search
+            if is_epoch_recovery(target_reconciliation):
+                try:
+                    search_reconciliation, epoch_envelope = recovered_search(target_reconciliation,
+                        scan=plain_scan, original_projection=projection,
+                        camera_from_map=RigidTransform(self.profile.camera_optical_frame,self.profile.map_frame,
+                            camera_translation,camera_rotation), intrinsics=intrinsics,
+                        model_profile=self.stand_model_profile)
+                    reconciliation_metadata = search_reconciliation.metadata()
+                    reconciliation_metadata['position_epoch_recovered'] = True
+                except (ValueError,TypeError,KeyError) as exc:
+                    reconciliation_metadata = dict(accepted=False,reason=str(exc),motion_authorized=False)
             head_search_projection = (projection if search_reconciliation is None
                                       else search_reconciliation.projection)
-            region_association = preliminary_lidar_association
-            region_association_scope = "original_map_cone"
+            region_association = epoch_envelope or preliminary_lidar_association
+            region_association_scope = ("position_epoch_recovered_cluster" if epoch_envelope is not None
+                                        else "original_map_cone")
             if region_association.eligible_cluster_count == 0:
                 # The existing camera-registration path permits a bounded map
                 # bearing offset. Search that same envelope before pixels are
@@ -1882,6 +1904,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 eligible_cluster_count=region_association.eligible_cluster_count,
                 association_rejection_reason=region_association.rejection_reason)
             identity_search, identity_search_metadata = current_scan_qr_search(
+                target_reconciliation=target_reconciliation,
                 scan=plain_scan, fragmentation=registration_fragmentation,
                 scan_from_map=RigidTransform(self.profile.scan_frame, self.profile.map_frame,
                     scan_translation, scan_rotation),
@@ -3207,6 +3230,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "preceding_state": state,
             }
             state = "inspection_progress_committed"
+        failure = getattr(self, '_position_epoch_failure', None)
+        self._position_epoch_failure = None
+        if (failure is not None and not getattr(self, 'completed', False)
+                and not qr_observation_grace_pending(self) and not backside_center_grace_pending(self)):
+            from scripts.aufgabe04.real_robot.observer.position_epoch_opportunity import STATE
+            state, details = STATE, {**details, **failure}
+            self.completed = True
         self._capture_camera_outcome(state, details)
         observation_evidence = getattr(self, "observation_evidence", None)
         stand_model = getattr(self, "stand_model_profile", None)
@@ -3463,6 +3493,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discovery-only QR-confirmed robot observation pose when head angle remains unavailable.")
     parser.add_argument("--retained-backside-axis-json", type=Path, default=None,
         help="Parent-certified arrival-frame backside orientation for opposite-side identity acquisition.")
+    parser.add_argument("--candidate-position-epoch", type=Path, default=None,
+        help="Bounded recovery context for a localization-displaced survey candidate")
     parser.add_argument("--candidate-crop-snapshot", type=Path, default=None,
         help="Admitted candidate snapshot for bounded reconciliation and neighboring-target exclusion.")
     parser.add_argument("--qr-pose-fallback-delay-sec", type=float, default=0.0,

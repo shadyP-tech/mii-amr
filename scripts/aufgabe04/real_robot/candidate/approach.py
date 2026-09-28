@@ -316,6 +316,7 @@ class CandidateObservationRequest:
     observation_not_before_sec: float | None = None
     retained_backside_axis_path: Path | None = None
     candidate_crop_snapshot_path: Path | None = None
+    candidate_position_epoch_path: Path | None = None
 
 
 @dataclass(frozen=True)

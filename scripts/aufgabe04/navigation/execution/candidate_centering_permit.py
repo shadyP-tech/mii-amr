@@ -10,6 +10,7 @@ from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json, payload_sha256, write_content_hashed_json,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
+    LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -44,6 +45,7 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
     master = load_mission_leg_motion_authorization(Path(str(permit["master_authorization_path"])))
     if (master.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         }
@@ -62,7 +64,27 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
         raise ValueError("candidate centering advisory candidate mismatch")
     # The geometry layer checks calibration and the complete numerical derivation.
     from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
-    validate_camera_centering_advisory(advisory)
+    validated_advisory = validate_camera_centering_advisory(advisory)
+    recovery = validated_advisory.arrival_recovery
+    from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import RECOVERY_STEP_RAD, RECOVERY_TRAVEL_RAD, RECOVERY_TURNS
+    previous = None
+    index = permit.get('turn_index')
+    if type(index) is not int or not 0 <= index < RECOVERY_TURNS:
+        raise ValueError('invalid centering turn index')
+    if index > 0:
+        previous_path = Path(str(permit.get('previous_result_path', '')))
+        # Check the decreasing index before following receipt links.
+        header = load_content_hashed_json(previous_path, hash_field=RESULT_HASH)
+        if header.get('turn_index') != index-1:
+            raise ValueError('previous centering turn index does not decrease')
+        previous = load_candidate_centering_result(previous_path)
+        recovery = recovery or previous.get('arrival_recovery') is True
+    if recovery and master.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+        raise ValueError('mission RUN does not authorize extended arrival recovery')
+    if permit.get('arrival_recovery', False) != recovery:
+        raise ValueError('centering arrival recovery authority mismatch')
+    total_limit = RECOVERY_TRAVEL_RAD if recovery else MAX_TOTAL_TRAVEL_RAD
+    step_limit = RECOVERY_STEP_RAD if recovery and permit.get("turn_index") == 0 else MAX_TURN_RAD
     if advisory.get("motion_authorized") is not False:
         raise ValueError("observation must not itself authorize motion")
     from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
@@ -77,22 +99,21 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
         raise ValueError("centering angular speed must be positive")
     turn = finite_number(permit.get("signed_turn_rad"), "signed_turn_rad")
     requested = finite_number(advisory.get("requested_yaw_rad"), "requested_yaw_rad")
-    if not STOP_TOLERANCE_RAD < abs(turn) <= MAX_TURN_RAD + 1e-12:
-        raise ValueError("centering turn must be at most six degrees")
+    if not STOP_TOLERANCE_RAD < abs(turn) <= step_limit + 1e-12:
+        raise ValueError("centering turn exceeds its authorized step bound")
     if turn * requested <= 0.0 or abs(turn) > abs(requested) + 1e-12:
         raise ValueError("centering turn exceeds the measured advisory")
-    if type(permit.get("turn_index")) is not int or permit["turn_index"] not in (0, 1):
-        raise ValueError("centering allows at most two turns per view")
+    if type(permit.get("turn_index")) is not int or not 0 <= permit["turn_index"] < (RECOVERY_TURNS if recovery else 2):
+        raise ValueError("centering exceeds its authorized turn count")
     spent = 0.0
-    if permit["turn_index"] == 1:
+    if permit["turn_index"] > 0:
         previous_path = Path(str(permit.get("previous_result_path", "")))
-        previous = load_candidate_centering_result(previous_path)
         if payload_sha256(previous) != permit.get("previous_result_sha256"):
             raise ValueError("previous centering result changed")
         for field in ("session_id", "candidate_id", "view_id"):
             if previous.get(field) != permit[field]:
                 raise ValueError(f"previous centering {field} mismatch")
-        if previous.get("turn_index") != 0 or previous.get("status") != "completed":
+        if previous.get("turn_index") != permit["turn_index"]-1 or previous.get("status") != "completed":
             raise ValueError("previous centering turn did not complete")
         if advisory["image_stamp_sec"] <= previous["stopped_at_sec"] or advisory["scan_stamp_sec"] <= previous["stopped_at_sec"]:
             raise ValueError("centering advisory predates the previous turn stop")
@@ -100,7 +121,7 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
     elif permit.get("previous_result_path") or permit.get("previous_result_sha256"):
         raise ValueError("first centering turn must not have a predecessor")
     remaining = finite_number(permit.get("remaining_travel_rad"), "remaining_travel_rad")
-    if remaining <= 0 or remaining > MAX_TOTAL_TRAVEL_RAD - spent + 1e-12:
+    if remaining <= 0 or remaining > total_limit - spent + 1e-12:
         raise ValueError("centering cumulative travel budget is invalid")
     if abs(turn) + STOP_TOLERANCE_RAD > remaining + 1e-12:
         raise ValueError("centering turn leaves no stopping travel reserve")
@@ -131,16 +152,32 @@ def load_candidate_centering_result(path: Path, *, permit_path: Path | None = No
             raise ValueError(f"negative centering result {key}")
     if result.get("translation_commanded") is not False:
         raise ValueError("centering result commanded translation")
+    result_limit = MAX_TOTAL_TRAVEL_RAD
+    if result.get("arrival_recovery") is True:
+        from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import RECOVERY_TRAVEL_RAD
+        bound_path = Path(result['arrival_recovery_permit_path'])
+        raw_bound = load_content_hashed_json(bound_path, hash_field=PERMIT_HASH)
+        if raw_bound.get('turn_index') != result.get('turn_index'):
+            raise ValueError('arrival recovery result turn index mismatch')
+        bound = validate_centering_permit(raw_bound)
+        if (bound['result_path'] != str(Path(path).resolve())
+                or result.get('permit_sha256') != payload_sha256(bound)):
+            raise ValueError('arrival recovery result permit binding mismatch')
+        if bound.get('arrival_recovery') is not True:
+            raise ValueError('arrival recovery result lacks validated epoch proof')
+        result_limit = RECOVERY_TRAVEL_RAD
+        permit_path = bound_path if permit_path is None else permit_path
     if result.get("status") == "completed":
         if (result.get("stationary_odom", {}).get("accepted") is not True
                 or result["maximum_translation_m"] > 0.01
-                or result["total_angular_travel_rad"] > MAX_TOTAL_TRAVEL_RAD + 1e-12
+                or result["total_angular_travel_rad"] > result_limit + 1e-12
                 or abs(finite_number(result.get("final_yaw_error_rad"), "final_yaw_error_rad")) > STOP_TOLERANCE_RAD
                 or type(result.get("zero_command_count")) is not int
                 or result["zero_command_count"] < 10):
             raise ValueError("centering result lacks a bounded stopped pose")
     if permit_path is not None:
-        permit = load_candidate_centering_permit(permit_path)
+        permit = (bound if result.get("arrival_recovery") is True and Path(permit_path) == bound_path
+                  else load_candidate_centering_permit(permit_path))
         if result.get("permit_sha256") != payload_sha256(permit):
             raise ValueError("centering result permit hash mismatch")
         for field in ("session_id", "candidate_id", "view_id", "turn_index", "signed_turn_rad", "run_id"):
