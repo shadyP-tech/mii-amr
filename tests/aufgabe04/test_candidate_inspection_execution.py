@@ -132,6 +132,37 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
             self.assertEqual(moved, [1])
             self.assertEqual(result.qr_id, "QR_A")
 
+    def test_exhausted_opposite_route_continues_local_view_and_preserves_failure_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            failure = CandidateInspectionRouteUnavailableError(
+                "opposite routes exhausted", reason_code="opposite_route_uncertainty_exhausted",
+                evidence={"planning_epoch_failures": [{"epoch": 0}, {"epoch": 1}],
+                          "motion_published": False, "motion_permit_issued": False},
+            )
+            moves = []
+            def opposite(*args):
+                raise failure
+            def move(frame, normal, output, index, source):
+                moves.append(normal)
+                return normal
+            result, _ = execute_candidate_inspection(
+                candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=2,
+                effects=CandidateInspectionEffects(
+                    capture=lambda frame, output, index: (
+                        CandidateObservation(None, None, root / "axis.json") if index == 0
+                        else CandidateObservation(None, "QR_A", None, None, output / "qr_pose.json")),
+                    canonical_normal=lambda frame: frame, move_view=move,
+                    move_opposite=opposite, progress_evidence=lambda *args: {},
+                ),
+            )
+            self.assertEqual(result.qr_id, "QR_A")
+            self.assertEqual(len(moves), 1)
+            progress = json.loads((root / "inspection_progress.json").read_text())
+            self.assertEqual(progress["route_failures"][0]["reason_code"], failure.reason_code)
+            self.assertEqual(progress["route_failures"][0]["evidence"], failure.evidence)
+            self.assertEqual(progress["local_view_count"], 2)
+
     def test_unavailable_views_exhaust_locally_without_repeating_direction(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

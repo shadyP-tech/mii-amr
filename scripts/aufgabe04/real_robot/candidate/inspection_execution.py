@@ -150,7 +150,10 @@ def execute_candidate_inspection(
                 )
                 continue
             except CandidateInspectionRouteUnavailableError as exc:
-                state.route_failures.append({"view_kind": "certified_opposite", "reason": str(exc)})
+                state.route_failures.append({
+                    "view_kind": "certified_opposite", "reason": str(exc),
+                    "reason_code": exc.reason_code, "evidence": exc.evidence,
+                })
                 persist()
         if normal is None:
             raise RuntimeError("candidate inspection search lacks a finite observation pose")

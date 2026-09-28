@@ -1,0 +1,99 @@
+{
+  "source_run": "stand_explore_exact2_camera_all5_20260928T121706Z",
+  "source_revision": "4dc00c5d4121820499613968ef2ce571f4f7eda6",
+  "scope": "derived geometry and uncertainty inputs only; not an admission receipt",
+  "map_bundle_sha256": "a0dc0d4c73e96f113ec262640bcdece2bfc2e1f68e8394701ecafd5e569ae17a",
+  "candidate_snapshot_sha256": "32d032cd6ce9ef1c58a1b87846f4f019082fd160e4647eac1f130493d14e74d6",
+  "candidate_geometry": [
+    {
+      "candidate_uid": "survey_candidate_0001",
+      "keepout_radius_m": 0.33999999999999997,
+      "radius_m": 0.06,
+      "uncertainty_m": 0.02,
+      "x_m": -1.1433145142615673,
+      "y_m": -0.4650397111378359
+    },
+    {
+      "candidate_uid": "survey_candidate_0002",
+      "keepout_radius_m": 0.33999999999999997,
+      "radius_m": 0.06,
+      "uncertainty_m": 0.02,
+      "x_m": -0.2063935785488693,
+      "y_m": 0.5432357187879624
+    },
+    {
+      "candidate_uid": "survey_candidate_0003",
+      "keepout_radius_m": 0.33999999999999997,
+      "radius_m": 0.06,
+      "uncertainty_m": 0.02,
+      "x_m": 0.07227756069395208,
+      "y_m": -0.7948011901378955
+    },
+    {
+      "candidate_uid": "survey_candidate_0004",
+      "keepout_radius_m": 0.33999999999999997,
+      "radius_m": 0.06,
+      "uncertainty_m": 0.02,
+      "x_m": 1.156532489719224,
+      "y_m": 0.7433313828651553
+    },
+    {
+      "candidate_uid": "survey_candidate_0005",
+      "keepout_radius_m": 0.33999999999999997,
+      "radius_m": 0.06,
+      "uncertainty_m": 0.02,
+      "x_m": 1.4281323610161596,
+      "y_m": -0.28901018287671165
+    }
+  ],
+  "arena_bounds": {
+    "center_x_m": 0.0,
+    "center_y_m": 0.0,
+    "length_m": 3.9,
+    "margin_m": 0.0,
+    "width_m": 1.898,
+    "yaw_deg": 0.0
+  },
+  "start": {
+    "x_m": -0.6352138731581051,
+    "y_m": -0.4090767500418853,
+    "yaw_rad": -3.03387215868
+  },
+  "normal_rad": 3.058376013839977,
+  "validated_target_center": {
+    "policy": "reconciled_metric_head_position_engineering_bound",
+    "uncertainty_m": 0.02512049541285534,
+    "x_m": -1.1439117543623478,
+    "y_m": -0.48924586578622764
+  },
+  "physical_clearance": {
+    "minimum_active_standoff_m": 0.33000000000000007,
+    "minimum_candidate_transit_radius_m": 0.33999999999999997,
+    "minimum_collision_standoff_m": 0.2851873375215418,
+    "minimum_lidar_standoff_m": 0.33000000000000007,
+    "minimum_static_inflation_m": 0.25,
+    "stand_base_circumscribed_radius_m": 0.10818733752154176,
+    "stand_collision_radius_m": 0.11018733752154176,
+    "stand_lidar_radius_m": 0.06,
+    "stand_model_tolerance_m": 0.002
+  },
+  "uncertainty_config": {
+    "braking_latency_distance_m": 0.015,
+    "collision_margin_m": 0.02,
+    "empirical_odom_drift_bound_m": 0.02,
+    "fixed_odom_tracking_bound_m": 0.03,
+    "heading_lever_arm_m": 0.105,
+    "heading_reference_x_m": -0.6352138731581051,
+    "heading_reference_y_m": -0.4090767500418853,
+    "heading_sigma_rad": 0.03781112978622468,
+    "localization_sigma_multiplier": 2.0,
+    "robot_radius_m": 0.105,
+    "sampling_spacing_m": 0.005
+  },
+  "covariance": {
+    "xx_m2": 0.003817115839882812,
+    "xy_m2": 0.0,
+    "yy_m2": 0.003817115839882812
+  },
+  "recorded_margin_045_m": -0.021681787069464276
+}

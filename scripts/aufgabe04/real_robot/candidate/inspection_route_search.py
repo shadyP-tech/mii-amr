@@ -38,6 +38,7 @@ class CandidateInspectionRouteUnavailableError(RuntimeError):
 def bounded_inspection_standoffs(
     requested_m: float, *, minimum_active_standoff_m: float,
     candidate_transit_radius_m: float, map_resolution_m: float | None,
+    target_center_uncertainty_m: float = 0.0,
 ) -> tuple[float, ...]:
     """Use the opposite-face step, with finite work and a raster-safe floor.
 
@@ -49,6 +50,11 @@ def bounded_inspection_standoffs(
     for value in (requested_m, minimum_active_standoff_m, candidate_transit_radius_m):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError("inspection standoff inputs must be finite and positive")
+    if (isinstance(target_center_uncertainty_m, bool)
+            or not isinstance(target_center_uncertainty_m, (int, float))
+            or not math.isfinite(target_center_uncertainty_m)
+            or target_center_uncertainty_m < 0):
+        raise ValueError("target center uncertainty must be finite and nonnegative")
     if requested_m < minimum_active_standoff_m:
         raise ValueError("requested inspection standoff is below its physical minimum")
     if map_resolution_m is None:
@@ -56,12 +62,17 @@ def bounded_inspection_standoffs(
     if (isinstance(map_resolution_m, bool) or not isinstance(map_resolution_m, (int, float))
             or not math.isfinite(map_resolution_m) or map_resolution_m <= 0):
         raise ValueError("inspection map resolution must be finite and positive")
-    raster_floor = candidate_transit_radius_m + map_resolution_m / math.sqrt(2.0)
+    raster_floor = (candidate_transit_radius_m + target_center_uncertainty_m
+                    + map_resolution_m / math.sqrt(2.0))
     # The planner requires strict separation above the raster margin. Round up
     # before using bounded_approach_offsets, whose public contract rounds to 1um.
-    minimum = max(minimum_active_standoff_m,
+    minimum = max(minimum_active_standoff_m + target_center_uncertainty_m,
                   math.ceil((raster_floor + 1.0e-6) * 1.0e6) / 1.0e6)
     if requested_m < minimum:
+        if target_center_uncertainty_m > 0:
+            # A valid retained center can make this direction's whole radius
+            # interval unavailable. This is geometry, not malformed config.
+            return ()
         raise ValueError("requested inspection standoff violates raster keepout minimum")
     # Clip the interval before invoking the shared stepping helper, so even a
     # malformed very large requested radius cannot allocate unbounded options.

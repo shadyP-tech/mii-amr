@@ -22,6 +22,10 @@ from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionRouteUnavailableError,
 )
+from scripts.aufgabe04.real_robot.candidate.inspection_route_search import bounded_inspection_standoffs
+from scripts.aufgabe04.real_robot.candidate.opposite_localization_retry import (
+    OPPOSITE_UNCERTAINTY_EXHAUSTED, with_opposite_localization_retry,
+)
 from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import (
     CandidateQrGoalIncompleteError, CandidateQrGoalProgress, CandidateQrGoalProgressStore,
     resolve_candidate_qr_goal, validate_candidate_qr_goal_completion,
@@ -86,7 +90,7 @@ from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     validate_live_registry_binding,
 )
 from scripts.aufgabe04.navigation.planning.global_planner import plan_route
-from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle, read_map_metadata
 from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     point_to_segment_distance_m,
 )
@@ -1752,6 +1756,35 @@ def _execute_candidate_motion(
 
 
 def _move_certified_opposite_face(
+    *, observation_frame: _CandidateObservationFrame,
+    observation: CandidateObservation, source_config: CandidateApproachConfig,
+    effects: CandidateApproachEffects, source_registry: StandSurveyRegistry | None,
+    candidate_root: Path, candidate_run_id: str, candidate_index: int,
+    observed_view_normals: tuple[float, ...] = (),
+) -> _CandidateObservationFrame:
+    def attempt(epoch):
+        # Every refresh receives distinct artifacts/child IDs and reprojects
+        # the ORIGINAL angle/center receipt; no angle is refitted or compounded.
+        suffix = "" if epoch == 0 else f"_localization_{epoch:03d}"
+        root = candidate_root if epoch == 0 else candidate_root / f"localization_{epoch:03d}"
+        return _move_certified_opposite_face_epoch(
+            observation_frame=observation_frame, observation=observation,
+            source_config=source_config, effects=effects, source_registry=source_registry,
+            candidate_root=root, candidate_run_id=candidate_run_id + suffix,
+            candidate_index=candidate_index, observed_view_normals=observed_view_normals,
+        )
+
+    return with_opposite_localization_retry(
+        attempt=attempt, enabled=effects.admit_planning_frame is not None,
+        event_sink=lambda payload: effects.event_sink(
+            source_config.session_root / "candidate_selection.jsonl",
+            {"schema_version": 1, "timestamp_unix_sec": effects.clock(),
+             "candidate_uid": observation_frame.candidate.candidate_uid, **payload},
+        ),
+    )
+
+
+def _move_certified_opposite_face_epoch(
     *,
     observation_frame: _CandidateObservationFrame,
     observation: CandidateObservation,
@@ -1830,16 +1863,18 @@ def _move_certified_opposite_face(
     opposite_motion_outcome = None
     feasibility_failures = []
     uncertainty_failures = []
-    for standoff_attempt_index, inspection_offset_m in enumerate(
-        bounded_approach_offsets(
-            opposite_config.approach_offset_m,
-            float(
-                opposite_config.physical_clearance[
-                    "minimum_active_standoff_m"
-                ]
-            ),
-        )
-    ):
+    axis_geometry = load_backside_axis_planning_observation(axis_planning_evidence_path)
+    current_center = axis_geometry.validated_target_center
+    resolution = (read_map_metadata(opposite_config.map_yaml).resolution
+                  if Path(opposite_config.map_yaml).is_file() else None)
+    offsets = bounded_inspection_standoffs(
+        opposite_config.approach_offset_m,
+        minimum_active_standoff_m=float(opposite_config.physical_clearance["minimum_active_standoff_m"]),
+        candidate_transit_radius_m=opposite_config.candidate_transit_radius_m,
+        map_resolution_m=resolution,
+        target_center_uncertainty_m=0.0 if current_center is None else current_center["uncertainty_m"],
+    )
+    for standoff_attempt_index, inspection_offset_m in enumerate(offsets):
         route_attempt = opposite_face_route_attempt(
             base_run_id=f"{candidate_run_id}_opposite",
             base_source_root=opposite_source_root,
@@ -1967,13 +2002,16 @@ def _move_certified_opposite_face(
                 },
             )
             continue
-    if opposite_motion_outcome is None and not uncertainty_failures:
-        raise CandidateInspectionRouteUnavailableError(
-            "no physically allowed opposite-face approach was A*-reachable: "
-            + "; ".join(feasibility_failures)
-        )
     if opposite_motion_outcome is None:
         details = "; ".join(uncertainty_failures + feasibility_failures)
+        exhaustion = {
+            "uncertainty_rejections": list(uncertainty_failures),
+            "static_feasibility_rejections": list(feasibility_failures),
+            "proposed_standoffs_m": list(offsets),
+            "target_center_uncertainty_m": 0.0 if current_center is None else current_center["uncertainty_m"],
+            "motion_published": False, "motion_permit_issued": False,
+            "no_motion_uncertainty_rejections_verified": bool(uncertainty_failures),
+        }
         effects.event_sink(
             source_config.session_root / "candidate_selection.jsonl",
             {
@@ -1981,17 +2019,16 @@ def _move_certified_opposite_face(
                 "event": "opposite_face_standoff_fallback_exhausted",
                 "timestamp_unix_sec": effects.clock(),
                 "candidate_uid": candidate.candidate_uid,
-                "uncertainty_rejections": list(uncertainty_failures),
-                "static_feasibility_rejections": list(feasibility_failures),
-                "motion_published": False,
+                **exhaustion,
                 "motion_continues_authorized": False,
                 "route_limits_unchanged": True,
                 "fail_closed": True,
             },
         )
         raise CandidateInspectionRouteUnavailableError(
-            "no opposite-face approach passed no-motion route-uncertainty "
-            f"dry preflight: {details}"
+            f"no opposite-face approach passed static and no-motion route admission: {details}",
+            reason_code=OPPOSITE_UNCERTAINTY_EXHAUSTED if uncertainty_failures else "opposite_static_routes_exhausted",
+            evidence=exhaustion,
         )
     opposite_arrival_frame = _admit_camera_arrival_geometry(
         source_config=source_config,

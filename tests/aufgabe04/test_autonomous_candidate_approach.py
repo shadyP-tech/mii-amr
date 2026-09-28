@@ -73,7 +73,6 @@ from scripts.aufgabe04.real_robot.candidate.approach import (
     CameraCandidateInitialSelection,
     CameraCandidateSelectionRequest,
     FacingValidationRequest,
-    bounded_approach_offsets,
     execute_candidate_approach_phase,
     nearest_candidate,
     plan_candidate_preapproach,
@@ -89,6 +88,9 @@ from scripts.aufgabe04.real_robot.candidate.route_admission_deferral import (
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateApproachIncompleteError,
     CandidateObservationUnavailableError,
+)
+from scripts.aufgabe04.real_robot.candidate.inspection_route_search import (
+    bounded_inspection_standoffs,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -1675,6 +1677,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
             config = self._config(root, (candidate,))
+            write_free_map(root, resolution=0.05)
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -1763,6 +1766,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
             config = self._config(root, (candidate,))
+            write_free_map(root, resolution=0.05)
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -1964,6 +1968,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
             config = self._config(root, (candidate,))
+            write_free_map(root, resolution=0.05)
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -2021,14 +2026,17 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 )
 
             expected_offsets = list(
-                bounded_approach_offsets(
+                bounded_inspection_standoffs(
                     config.approach_offset_m,
-                    config.physical_clearance["minimum_active_standoff_m"],
+                    minimum_active_standoff_m=config.physical_clearance["minimum_active_standoff_m"],
+                    candidate_transit_radius_m=config.candidate_transit_radius_m,
+                    map_resolution_m=0.05,
                 )
             )
             self.assertEqual(
                 [
-                    float(request.sealed["test_approach_offset_m"])
+                    next(plan.approach_offset_m for plan in opposite_plan_requests
+                         if plan.output_dir == request.candidate_snapshot_path.parent)
                     for request in opposite_motion_requests
                 ],
                 expected_offsets,
@@ -2794,6 +2802,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
             config = self._config(root, (candidate,))
+            write_free_map(root, resolution=0.05)
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -2840,7 +2849,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 )
 
             self.assertEqual(attempted_offsets[0], 0.70)
-            self.assertEqual(attempted_offsets[-1], 0.32)
+            self.assertGreater(attempted_offsets[-1], 0.31 + 0.05 / math.sqrt(2))
+            self.assertLess(attempted_offsets[-1], 0.35)
             self.assertTrue(all(value >= 0.32 for value in attempted_offsets))
             commit.assert_not_called()
             self.assertFalse(
