@@ -46,6 +46,8 @@ class FollowerConfig:
     amcl_edge_future_tolerance_sec: float = 1.1
     allow_simulation_odom_after_stale_tf: bool = False
     initial_sensor_wait_sec: float = 2.0
+    # Shared extra budget for first sensor delivery and cold TF acquisition;
+    # transitioning between them never renews the absolute startup deadline.
     initial_tf_acquisition_wait_sec: float = DEFAULT_INITIAL_TF_ACQUISITION_WAIT_SEC
     waypoint_timeout_sec: float = 45.0
     terminal_heading_timeout_sec: float = DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC

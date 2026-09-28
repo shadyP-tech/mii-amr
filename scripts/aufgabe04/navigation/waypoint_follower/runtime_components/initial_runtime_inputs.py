@@ -7,6 +7,7 @@ import time
 from scripts.aufgabe04.navigation.control.waypoint_controller import VelocityCommand
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.bindings import RuntimeBindingProxy
 from scripts.aufgabe04.navigation.waypoint_follower.initial_tf_acquisition import InitialTfAcquisition
+from scripts.aufgabe04.navigation.waypoint_follower.initial_sensor_acquisition import publisher_diagnostics
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.tf_sampling import (
     refresh_tf_sample_age,
     refreshed_tf_sample_details,
@@ -50,7 +51,7 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             return motion_failure
         health = {} if executor_probe is None else executor_probe()
         state.executor_health = dict(health)
-        sensor_failure = _sensor_failure(node)
+        sensor_failure = _sensor_failure(node, state)
         state.sensor_inputs_fresh = not sensor_failure
         if state.acquisition_deadline_exhausted(time.monotonic()):
             age_failure = "" if sensor_failure else _recheck_ready_edge_ages(node, state)
@@ -62,7 +63,7 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             motion_failure = _motion_contract_failure(node, state)
             if motion_failure:
                 return motion_failure
-            sensor_failure = _sensor_failure(node)
+            sensor_failure = _sensor_failure(node, state)
             state.sensor_inputs_fresh = not sensor_failure
             health = {} if executor_probe is None else executor_probe()
             state.executor_health = dict(health)
@@ -78,7 +79,7 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             motion_failure = _motion_contract_failure(node, state)
             if motion_failure:
                 return motion_failure
-            failure = _sensor_failure(node)
+            failure = _sensor_failure(node, state)
             state.sensor_inputs_fresh = not failure
             health = {} if executor_probe is None else executor_probe()
             state.executor_health = dict(health)
@@ -93,6 +94,12 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
                 failure = "TF listener executor not ready"
                 node.latest_stop_details = {
                     "reason": failure, "source": "tf_executor_readiness", "fail_closed": True,
+                }
+            if (not failure and getattr(node, "initial_sensor_executor_health_probe", None) is not None
+                    and state.sensor_acquisition.executor_health.get("ready") is not True):
+                failure = "sensor executor not ready"
+                node.latest_stop_details = {
+                    "reason": failure, "source": "sensor_executor_readiness", "fail_closed": True,
                 }
             if not failure:
                 failure = _recheck_ready_edge_ages(node, state)
@@ -114,21 +121,38 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
         if not keep_waiting:
             return _finish_wait_failure(node, state, last_failure)
         if state.phase != prior_phase:
-            trace_failure = _trace(node, "initial_tf_acquisition_started", state)
+            state.sensor_acquisition.graph = publisher_diagnostics(node)
+            # Graph diagnostics may take time: the next iteration rechecks the
+            # absolute deadline and live inputs before any readiness decision.
+            event = ("initial_sensor_acquisition_started" if state.phase == "cold_sensor_acquisition"
+                     else "initial_tf_acquisition_started")
+            trace_failure = _trace(node, event, state)
             if trace_failure:
                 return trace_failure
         node.publish_zero()
     return "ROS shutdown"
 
 
-def _sensor_failure(node) -> str:
+def _sensor_failure(node, state: InitialTfAcquisition) -> str:
     config = node.follower_config
-    scan_failure = node._freshness_failure(
-        "scan", node.latest_scan, node.latest_scan_receipt, config.max_scan_age_sec,
-    )
-    return scan_failure or node._freshness_failure(
-        "odom", node.latest_odom, node.latest_odom_receipt, config.max_odom_age_sec,
-    )
+    first_failure, first_details = "", None
+    for name in ("scan", "odom"):
+        message, receipt = getattr(node, f"latest_{name}"), getattr(node, f"latest_{name}_receipt")
+        failure = node._freshness_failure(name, message, receipt, getattr(config, f"max_{name}_age_sec"))
+        details = dict(node.latest_stop_details or {}) if failure else {}
+        state.sensor_acquisition.record(name, has_message=message is not None,
+                                        failure=failure, details=details)
+        if failure and not first_failure:
+            first_failure, first_details = failure, details
+    if first_failure:
+        node.latest_stop_details = first_details
+    probe = getattr(node, "initial_sensor_executor_health_probe", None)
+    state.sensor_acquisition.executor_health = {} if probe is None else dict(probe())
+    receipts = getattr(node, "initial_sensor_receipts", None)
+    if receipts is not None:
+        for name, evidence in receipts.snapshot().items():
+            state.sensor_acquisition.sensors[name]["receipts"] = evidence
+    return first_failure
 
 
 def _sample_initial_edges(node, state: InitialTfAcquisition) -> str:
@@ -205,6 +229,7 @@ def _motion_contract_failure(node, state: InitialTfAcquisition) -> str:
 
 
 def _finish_wait_failure(node, state: InitialTfAcquisition, failure: str) -> str:
+    state.sensor_acquisition.graph = publisher_diagnostics(node)
     node.latest_initial_tf_acquisition = state.to_evidence()
     node.latest_stop_details = {
         "reason": failure, "source": "initial_runtime_input_wait",

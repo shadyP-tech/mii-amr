@@ -73,6 +73,7 @@ from scripts.aufgabe04.navigation.waypoint_follower.initial_tf_acquisition impor
     TF_EXECUTOR_HEARTBEAT_PERIOD_SEC,
     TfExecutorHeartbeat,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.initial_sensor_acquisition import SensorReceipts
 from scripts.aufgabe04.navigation.waypoint_follower.tf_receipts import (
     create_receipt_traced_buffer,
 )
@@ -302,6 +303,7 @@ class SimpleWaypointFollowerNode(
         self.latest_odom = None
         self.latest_odom_receipt = None
         self.latest_odom_callback_count = 0
+        self.initial_sensor_receipts = SensorReceipts()
         self.zero_command_publish_count = 0
         self.motion_published = False
         self.distance_estimate_m = 0.0
@@ -340,13 +342,14 @@ class SimpleWaypointFollowerNode(
             )
 
         self.cmd_vel_pub = self.create_publisher(Twist, runtime_config.cmd_vel_topic, 10)
-        self.create_subscription(
+        scan_subscription = self.create_subscription(
             LaserScan,
             runtime_config.scan_topic,
             self._scan_callback,
             qos_profile_sensor_data,
         )
-        self.create_subscription(Odometry, runtime_config.odom_topic, self._odom_callback, 10)
+        odom_subscription = self.create_subscription(Odometry, runtime_config.odom_topic, self._odom_callback, 10)
+        self.initial_sensor_subscriptions = {"scan": scan_subscription, "odom": odom_subscription}
         if tf_buffer is None:
             # Preserve direct-node construction for focused ROS use.  The
             # production runner always injects the buffer serviced by its
@@ -372,10 +375,16 @@ class SimpleWaypointFollowerNode(
         # recording that receipt with ROS time would store zero and then look
         # thousands of seconds stale as soon as simulated time activates.
         self.latest_scan_receipt = time.monotonic()
+        receipts = getattr(self, "initial_sensor_receipts", None)
+        if receipts is not None:
+            receipts.record("scan", self.latest_scan_receipt)
 
     def _odom_callback(self, msg) -> None:
         self.latest_odom = msg
         self.latest_odom_receipt = time.monotonic()
+        receipts = getattr(self, "initial_sensor_receipts", None)
+        if receipts is not None:
+            receipts.record("odom", self.latest_odom_receipt)
         self.latest_odom_callback_count = (
             getattr(self, "latest_odom_callback_count", 0) + 1
         )
@@ -835,6 +844,8 @@ def run_simple_waypoint_follower(
                 "failed to add TF listener to isolated background executor"
             )
         node.enable_background_callback_service()
+        sensor_heartbeat = TfExecutorHeartbeat()
+        node.create_timer(TF_EXECUTOR_HEARTBEAT_PERIOD_SEC, sensor_heartbeat.tick)
         tf_executor_thread = threading.Thread(
             target=tf_executor.spin,
             name="aufgabe04-follower-tf-listener",
@@ -854,6 +865,10 @@ def run_simple_waypoint_follower(
                 thread_alive=tf_executor_thread.is_alive()
             ),
             "tf_receipts": tf_buffer.tf_receipt_snapshot(),
+        }
+        node.initial_sensor_executor_health_probe = lambda: {
+            **sensor_heartbeat.snapshot(thread_alive=follower_executor_thread.is_alive()),
+            "sensor_delivery_proven": False,
         }
         try:
             return node.run()

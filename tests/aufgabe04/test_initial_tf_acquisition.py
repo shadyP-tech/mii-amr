@@ -190,6 +190,165 @@ class InitialTfAcquisitionTest(unittest.TestCase):
         ])
         return failure, evidence
 
+    def make_delayed_sensor_node(self, *, odom_at=3.25, tf_at=0.0, extra_wait=3.0):
+        from scripts.aufgabe04.navigation.waypoint_follower.initial_sensor_acquisition import SensorReceipts
+        node, clock = self.make_node(reconnect_at=tf_at, extra_wait=extra_wait)
+        del node._freshness_failure  # Exercise real header and receipt freshness.
+        node.latest_scan = node.latest_odom = None
+        node.latest_scan_receipt = node.latest_odom_receipt = None
+        node.initial_sensor_receipts = SensorReceipts()
+        node.initial_sensor_executor_health_probe = Mock(return_value={"ready": True})
+
+        def deliver(timeout):
+            clock.wait(timeout)
+            stamp = int((100.0 + clock.now) * 1e9)
+            msg = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(
+                sec=stamp // 1_000_000_000, nanosec=stamp % 1_000_000_000)))
+            node._scan_callback(msg)
+            if odom_at is not None and clock.now >= odom_at:
+                node._odom_callback(msg)
+
+        node._service_or_wait_for_callbacks.side_effect = deliver
+        return node, clock
+
+    def test_recorded_missing_first_odom_can_acquire_within_shared_budget(self):
+        # 20260928T124619Z stopped at 2.025 s with fresh scan, no odom and a
+        # healthy TF executor. A first odom at 3.25 s is hypothetical replay.
+        node, clock = self.make_delayed_sensor_node()
+        self.assertEqual(self.wait(node, clock), "")
+        self.assertEqual(clock.now, 3.25)
+        evidence = node.latest_initial_tf_acquisition
+        self.assertEqual(evidence["maximum_startup_wait_sec"], 5.0)
+        self.assertEqual(evidence["phase"], "cold_sensor_acquisition")
+        self.assertTrue(evidence["sensor_inputs_fresh"])
+        self.assertFalse(node.motion_published)
+        node._global_consistency_monitor_failure.assert_called()
+        events = [call.kwargs["event"] for call in node._append_controller_trace.call_args_list]
+        self.assertEqual(events, ["initial_sensor_acquisition_started", "initial_runtime_input_ready"])
+        odom = evidence["sensor_acquisition"]["sensors"]["odom"]
+        self.assertEqual(odom["receipts"]["count"], 1)
+        self.assertEqual(odom["receipts"]["first_receipt_sec"], 3.25)
+        transition = node._append_controller_trace.call_args_list[0].kwargs
+        self.assertEqual(transition["effective_command"].linear_x_mps, 0.0)
+        self.assertEqual(transition["effective_command"].angular_z_radps, 0.0)
+        missing = transition["diagnostics"]["initial_tf_acquisition"]["sensor_acquisition"]["sensors"]["odom"]
+        self.assertFalse(missing["ever_received"])
+        self.assertEqual(missing["receipts"]["count"], 0)
+
+    def test_missing_first_odom_and_late_delivery_exhaust_same_deadline(self):
+        from scripts.aufgabe04.navigation.localization.initial_map_tf_recovery import initial_map_tf_recovery_error
+        for odom_at in (None, 5.0, 5.25):
+            with self.subTest(odom_at=odom_at):
+                node, clock = self.make_delayed_sensor_node(odom_at=odom_at)
+                self.assert_stopped(node, clock, deadline=5.0,
+                                    denial="cold_sensor_acquisition_deadline_exhausted")
+                self.assertTrue(initial_map_tf_recovery_error(node.latest_stop_details))
+                node._current_pose_lookup.assert_not_called()
+
+    def test_first_odom_then_cold_tf_does_not_restart_budget(self):
+        for tf_at, success in ((4.75, True), (5.0, False)):
+            with self.subTest(tf_at=tf_at):
+                node, clock = self.make_delayed_sensor_node(odom_at=3.25, tf_at=tf_at)
+                if success:
+                    self.assertEqual(self.wait(node, clock), "")
+                    self.assertEqual(clock.now, 4.75)
+                else:
+                    self.assert_stopped(node, clock, deadline=5.0,
+                                        denial="cold_tf_acquisition_deadline_exhausted")
+                self.assertEqual(node.latest_initial_tf_acquisition["phase"], "cold_tf_acquisition")
+
+    def test_first_sensor_wait_requires_both_serviced_executors(self):
+        for executor in ("tf", "sensor"):
+            with self.subTest(executor=executor):
+                node, clock = self.make_delayed_sensor_node()
+                getattr(node, f"initial_{executor}_executor_health_probe").return_value = {"ready": False}
+                self.assert_stopped(node, clock, deadline=2.0, denial=f"{executor}_executor_not_ready")
+
+    def test_sensor_executor_loss_during_shared_wait_stops(self):
+        for tf_at in (0.0, 4.75):
+            with self.subTest(tf_at=tf_at):
+                node, clock = self.make_delayed_sensor_node(odom_at=3.0, tf_at=tf_at)
+                node.initial_sensor_executor_health_probe.side_effect = lambda: {"ready": clock.now < 3.0}
+                self.assert_stopped(node, clock, deadline=3.0, denial="sensor_executor_not_ready")
+
+    def test_first_sensor_wait_rejects_stale_future_and_previously_received_input(self):
+        for defect in ("stale", "future", "lost"):
+            with self.subTest(defect=defect):
+                node, clock = self.make_delayed_sensor_node()
+                deliver = node._service_or_wait_for_callbacks.side_effect
+
+                def defective_delivery(timeout):
+                    deliver(timeout)
+                    if clock.now >= 2.25:
+                        if defect == "lost":
+                            node.latest_scan = node.latest_scan_receipt = None
+                        else:
+                            node.latest_scan.header.stamp.sec += -10 if defect == "stale" else 10
+
+                node._service_or_wait_for_callbacks.side_effect = defective_delivery
+                self.assert_stopped(node, clock, deadline=2.25, denial="sensor_inputs_not_fresh")
+
+    def test_bad_sensor_history_cannot_enable_later_first_delivery_extension(self):
+        node, clock = self.make_delayed_sensor_node()
+        deliver = node._service_or_wait_for_callbacks.side_effect
+
+        def once_stale(timeout):
+            deliver(timeout)
+            if clock.now == 0.25:
+                node.latest_scan.header.stamp.sec -= 10
+
+        node._service_or_wait_for_callbacks.side_effect = once_stale
+        self.assert_stopped(node, clock, deadline=2.0, denial="sensor_inputs_not_fresh")
+
+    def test_disabling_extra_wait_still_bounds_missing_first_sensor_at_two_seconds(self):
+        node, clock = self.make_delayed_sensor_node(extra_wait=0.0)
+        self.assert_stopped(node, clock, deadline=2.0, denial="cold_tf_acquisition_deadline_exhausted")
+
+    def test_first_odom_must_be_fresh_and_frozen_map_must_still_pass(self):
+        for defect in ("stale", "future", "continuity"):
+            with self.subTest(defect=defect):
+                node, clock = self.make_delayed_sensor_node()
+                deliver = node._service_or_wait_for_callbacks.side_effect
+
+                def invalid_arrival(timeout):
+                    deliver(timeout)
+                    if node.latest_odom is not None and defect != "continuity":
+                        node.latest_odom.header.stamp.sec += -10 if defect == "stale" else 10
+
+                node._service_or_wait_for_callbacks.side_effect = invalid_arrival
+                if defect == "continuity":
+                    node._global_consistency_monitor_failure.return_value = "map continuity rejected"
+                self.assert_stopped(node, clock, deadline=3.25, denial=(
+                    "continuity_admission_failed" if defect == "continuity" else "sensor_inputs_not_fresh"))
+
+    def test_blocking_tf_lookup_after_first_sensor_cannot_admit_after_deadline(self):
+        node, clock = self.make_delayed_sensor_node()
+        lookup = node._current_pose_lookup.side_effect
+
+        def slow_lookup():
+            clock.now = 5.0
+            # Sensor executor continues receiving while the lookup blocks.
+            msg = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=105, nanosec=0)))
+            node._scan_callback(msg)
+            node._odom_callback(msg)
+            return lookup()
+
+        node._current_pose_lookup.side_effect = slow_lookup
+        self.assert_stopped(node, clock, deadline=5.0,
+                            denial="cold_sensor_acquisition_deadline_exhausted")
+
+    def test_graph_diagnostics_cannot_extend_deadline_or_admit_late_input(self):
+        node, clock = self.make_delayed_sensor_node()
+
+        def slow_graph(_):
+            clock.now = 5.0
+            return {}
+
+        with patch.object(initial_runtime_inputs, "publisher_diagnostics", side_effect=slow_graph):
+            self.assertTrue(self.wait(node, clock))
+        self.assertTrue(node.latest_initial_tf_acquisition["deadline_exhausted"])
+        node._current_pose_lookup.assert_not_called()
+
     def test_recorded_cold_listener_reconnects_then_runs_global_admission(self):
         node, clock = self.make_node(reconnect_at=2.25)
         original_buffer = node.tf_buffer

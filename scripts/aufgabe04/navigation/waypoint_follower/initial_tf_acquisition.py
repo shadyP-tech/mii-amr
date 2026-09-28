@@ -1,6 +1,7 @@
 """Bounded acquisition of an execution TF edge in a new, stopped listener.
 
-The ordinary sensor deadline stays unchanged. One additional acquisition phase
+The shared startup deadline also bounds first sensor delivery. Extra sensor
+acquisition requires never-received inputs and both executors serviced. TF wait
 is available only for never-acquired required TF edges, with fresh sensors and
 a demonstrably serviced TF executor. Within an already-entered cold phase, a
 structurally valid first stale global sample may wait for a fresh replacement
@@ -15,6 +16,8 @@ import math
 import threading
 import time
 from typing import Mapping
+
+from scripts.aufgabe04.navigation.waypoint_follower.initial_sensor_acquisition import InitialSensorAcquisition
 
 
 DEFAULT_INITIAL_TF_ACQUISITION_WAIT_SEC = 3.0
@@ -74,6 +77,7 @@ class InitialTfAcquisition:
     elapsed_sec: float = field(default=0.0, init=False)
     deadline_exhausted: bool = field(default=False, init=False)
     execution_context: dict[str, object] | None = field(default=None, init=False)
+    sensor_acquisition: InitialSensorAcquisition = field(default_factory=InitialSensorAcquisition, init=False)
 
     def __post_init__(self) -> None:
         if (not self.required_edges or len(set(self.required_edges)) != len(self.required_edges)
@@ -139,6 +143,25 @@ class InitialTfAcquisition:
         deadline = self.started_at + self.sensor_wait_sec
         if self.phase == "initial_sensor_wait" and now < deadline:
             return True
+        if (self.sensor_acquisition.executor_health
+                and self.sensor_acquisition.executor_health.get("ready") is not True):
+            self.denial_reason = "sensor_executor_not_ready"
+            return False
+        if (not sensors_fresh and self.acquisition_wait_sec > 0
+                and self.sensor_acquisition.waiting_only_for_first_delivery()):
+            if executor_health.get("ready") is not True:
+                self.denial_reason = "tf_executor_not_ready"
+            elif self.sensor_acquisition.executor_health.get("ready") is not True:
+                self.denial_reason = "sensor_executor_not_ready"
+            elif self.admission_failure_seen or self.edges:
+                self.denial_reason = "sensor_acquisition_after_tf_sampling"
+            elif self.acquisition_deadline_exhausted(now):
+                pass
+            else:
+                self.phase = "cold_sensor_acquisition"
+                self.extension_used = True
+                return True
+            return False
         failed_edges = [
             (role, edge) for role, edge in self.edges.items()
             if edge.get("current_ready") is not True
@@ -239,7 +262,11 @@ class InitialTfAcquisition:
         if now >= (
             self.started_at + self.sensor_wait_sec + self.acquisition_wait_sec
         ):
-            self.denial_reason = "cold_tf_acquisition_deadline_exhausted"
+            self.denial_reason = (
+                "cold_sensor_acquisition_deadline_exhausted"
+                if self.phase == "cold_sensor_acquisition"
+                else "cold_tf_acquisition_deadline_exhausted"
+            )
             self.deadline_exhausted = True
             return True
         return False
@@ -261,6 +288,7 @@ class InitialTfAcquisition:
             "deadline_exhausted": self.deadline_exhausted,
             "execution_context": self.execution_context,
             "executor_health": dict(self.executor_health),
+            "sensor_acquisition": self.sensor_acquisition.to_evidence(),
             "edges": {role: {**edge, "recent_failures": list(edge["recent_failures"]),
                              "last_sample": dict(edge["last_sample"])}
                       for role, edge in self.edges.items()},

@@ -37,6 +37,9 @@ class FollowerCallbackServiceTest(unittest.TestCase):
             def __init__(self, *args, tf_buffer):
                 events.append("node.init")
 
+            def create_timer(self, period, callback):
+                return object()
+
             def enable_background_callback_service(self):
                 events.append("node.enable_background")
 
@@ -284,6 +287,10 @@ class FollowerCallbackServiceTest(unittest.TestCase):
                 created["injected_tf_buffer"] = tf_buffer
                 events.append("node.init")
 
+            def create_timer(self, period, callback):
+                created["sensor_heartbeat_callback"] = callback
+                return object()
+
             def enable_background_callback_service(self):
                 events.append("node.enable_background")
 
@@ -293,6 +300,9 @@ class FollowerCallbackServiceTest(unittest.TestCase):
             def run(self):
                 events.append("node.run")
                 created["health_before_callback"] = self.initial_tf_executor_health_probe()
+                created["sensor_health_before"] = self.initial_sensor_executor_health_probe()
+                created["sensor_heartbeat_callback"]()
+                created["sensor_health_after"] = self.initial_sensor_executor_health_probe()
                 created["heartbeat_callback"]()
                 transform = SimpleNamespace(
                     header=SimpleNamespace(frame_id="map", stamp=SimpleNamespace(sec=100, nanosec=0)),
@@ -479,6 +489,9 @@ class FollowerCallbackServiceTest(unittest.TestCase):
         self.assertTrue(created["health_after_callback"]["ready"])
         self.assertEqual(created["health_after_callback"]["heartbeat_count"], 1)
         self.assertFalse(created["health_after_callback"]["tf_delivery_proven"])
+        self.assertFalse(created["sensor_health_before"]["ready"])
+        self.assertTrue(created["sensor_health_after"]["ready"])
+        self.assertFalse(created["sensor_health_after"]["sensor_delivery_proven"])
         before = created["health_before_callback"]["tf_receipts"]
         after = created["health_after_callback"]["tf_receipts"]
         self.assertEqual(before["edges"]["global_consistency"]["received_count"], 0)
