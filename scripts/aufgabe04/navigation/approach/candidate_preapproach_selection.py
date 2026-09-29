@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
 from typing import Mapping
@@ -16,6 +16,7 @@ from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
 from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
     CandidateRouteUncertaintyContext,
     NoUncertaintyAdmittedCameraCandidateError,
+    _executable_route_poses,
     select_uncertainty_admitted_camera_candidate,
 )
 from scripts.aufgabe04.navigation.approach.lidar_inspection_hint import LidarInspectionHint
@@ -28,6 +29,19 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyPlan,
 )
+from scripts.aufgabe04.navigation.control.driving_behavior import (
+    CommandSmoothingConfig,
+    controller_config_for_route_kind,
+)
+from scripts.aufgabe04.navigation.control.segment_time_budget import (
+    MAX_WAYPOINT_TIMEOUT_SEC,
+    MIN_WAYPOINT_TIMEOUT_SEC,
+    MOTION_TIME_MARGIN_FACTOR,
+    SETTLING_ALLOWANCE_SEC,
+    SegmentTimeBudgetError,
+    route_time_budgets,
+)
+from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.stations.candidate_snapshot import CandidateSnapshot
 
@@ -181,12 +195,19 @@ def plan_and_select_camera_candidate(
                 )
             )
             continue
-        route_by_uid[candidate.candidate_uid] = prepared
+        time_budget = _route_time_budget_evidence(prepared, selection_config)
+        failure_reason = (
+            str(time_budget["failure_reason"])
+            if time_budget is not None and not time_budget["accepted"]
+            else None
+        )
+        if failure_reason is None:
+            route_by_uid[candidate.candidate_uid] = prepared
         options.append(
             CameraCandidateRouteOption(
                 candidate_uid=candidate.candidate_uid,
-                feasible=True,
-                failure_reason=None,
+                feasible=failure_reason is None,
+                failure_reason=failure_reason,
                 route_length_m=prepared.route_length_m,
                 turn_burden_rad=prepared.turn_burden_rad,
                 initial_turn_rad=prepared.initial_turn_rad,
@@ -196,6 +217,7 @@ def plan_and_select_camera_candidate(
                 support_class=support_class,
                 confidence=candidate.confidence,
                 hit_count=candidate.hit_count,
+                route_time_budget=time_budget,
             )
         )
 
@@ -246,6 +268,12 @@ def _preview_lidar_views(*, hint, compute_kwargs, candidate, support_class,
         except CandidatePreapproachUnreachableError as exc:
             row["reason"] = exc.reason
             continue
+        time_budget = _route_time_budget_evidence(prepared, selection_config)
+        if time_budget is not None:
+            row["route_time_budget"] = time_budget
+            if not time_budget["accepted"]:
+                row["reason"] = time_budget["failure_reason"]
+                continue
         # Quantization must not silently turn a perpendicular request into an
         # oblique view. This is a viewing-quality gate, separate from safety.
         pose = prepared.selected_approach_pose
@@ -286,6 +314,50 @@ def _preview_lidar_views(*, hint, compute_kwargs, candidate, support_class,
     _, prepared, normal = min(plans, key=lambda p: p[0])
     evidence.update(selected_normal_rad=normal, fallback=False)
     return prepared, evidence
+
+
+def _route_time_budget_evidence(
+    prepared: CandidatePreapproachPlan,
+    config: CameraCandidateSelectionConfig,
+) -> dict[str, object] | None:
+    """Admit exact preview geometry with the execution deadline policy."""
+
+    if not config.route_time_budget_enabled:
+        return None
+    controller = controller_config_for_route_kind(
+        ControllerConfig(
+            max_linear_mps=config.linear_speed_mps,
+            max_angular_radps=config.angular_speed_radps,
+        ),
+        "detected_stand_preapproach",
+        physical_waypoint_tolerance_m=0.02,
+        physical_goal_tolerance_m=0.03,
+    )
+    smoothing = CommandSmoothingConfig()
+    evidence: dict[str, object] = {
+        "accepted": False,
+        "policy": {
+            "minimum_timeout_sec": MIN_WAYPOINT_TIMEOUT_SEC,
+            "maximum_timeout_sec": MAX_WAYPOINT_TIMEOUT_SEC,
+            "motion_time_margin_factor": MOTION_TIME_MARGIN_FACTOR,
+            "settling_allowance_sec": SETTLING_ALLOWANCE_SEC,
+        },
+        "controller": asdict(controller),
+        "smoothing": asdict(smoothing),
+        "motion_authorized": False,
+    }
+    try:
+        budgets = route_time_budgets(
+            _executable_route_poses(prepared),
+            start_pose=prepared.start,
+            controller=controller,
+            smoothing=smoothing,
+        )
+    except SegmentTimeBudgetError as exc:
+        evidence["failure_reason"] = f"route_time_budget_rejected: {exc}"
+        return evidence
+    evidence.update(accepted=True, budgets=[budget.to_dict() for budget in budgets])
+    return evidence
 
 
 def _inside_requested_standoff(

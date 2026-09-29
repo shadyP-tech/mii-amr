@@ -35,12 +35,14 @@ from scripts.aufgabe04.navigation.execution.dynamic_route_handoff import (
 )
 from scripts.aufgabe04.navigation.control.driving_behavior import (
     CATALOG_PHYSICAL_ROUTE_KINDS,
-    CommandSmoothingConfig,
     DYNAMIC_VIEWPOINT_ROUTE_KINDS,
-    HEADING_CORRIDOR_ROUTE_KINDS,
     PHYSICAL_ROUTE_KINDS,
     STATIC_PHYSICAL_ROUTE_KINDS,
     controller_config_for_route_kind,
+)
+from scripts.aufgabe04.navigation.station_segment.time_budget_admission import (
+    admit_route_time_budget,
+    station_motion_configs,
 )
 from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import (
     payload_sha256,
@@ -167,7 +169,6 @@ from scripts.aufgabe04.navigation.coverage.transient_overlay_resume_state import
     transient_overlay_resume_state_sha256,
     validate_transient_overlay_resume_state_diagnostics_binding,
 )
-from scripts.aufgabe04.navigation.control.waypoint_controller import ControllerConfig
 from scripts.aufgabe04.navigation.control.return_to_start_speed_policy import (
     return_to_start_speed_policy_evidence,
     validate_return_to_start_speed_evidence,
@@ -1122,6 +1123,54 @@ def main(argv: list[str] | None = None) -> int:
             global_consistency_monitor="amcl",
             **odom_execution_evidence,
         )
+    controller_config, command_smoothing = station_motion_configs(args, leg.route_kind)
+    try:
+        route_time_budget_evidence = admit_route_time_budget(
+            args=args, resolved=resolved, route_kind=leg.route_kind,
+            waypoints=execution_waypoints, preflight=preflight,
+            controller=controller_config, smoothing=command_smoothing,
+            egress_certificate=catalog_egress_certificate,
+        )
+    except ValueError as exc:
+        stop_reason = f"route time budget admission failed: {exc}"
+        stop_details = {
+            "reason": stop_reason, "fault_code": "route_time_budget_rejected",
+            "fail_closed": True, "explicit_timeout_sec": args.waypoint_timeout_sec,
+        }
+        result = FollowerResult("preflight_failed", stop_reason, 0.0, 0.0, False, stop_details)
+        _append_result(args, resolved, leg, preflight_ok=False, result=result)
+        preflight_payload.update(
+            ok=False, failures=[*preflight.failures, stop_reason],
+            route_time_budget=stop_details,
+        )
+        if args.preflight_json is not None:
+            args.preflight_json.write_text(json.dumps(preflight_payload, indent=2, sort_keys=True) + "\n")
+        emit_event(
+            event_logger, "preflight_failed", run_id=args.run_id,
+            leg_index=leg.leg_index, failures=[stop_reason],
+            observations=_observation_log_rows(preflight.observations),
+            runtime_config=preflight.runtime_config, motion_published=False,
+            stop_details=stop_details,
+        )
+        for event_name in ("route_time_budget_rejected", "safety_stop", "run_finished"):
+            emit_event(
+                event_logger, event_name, run_id=args.run_id, leg_index=leg.leg_index,
+                **mission_leg_fields, dry_run=args.dry_run, status=result.status,
+                final_status=result.status, stop_reason=stop_reason, stop_details=stop_details,
+                motion_published=False, duration_sec=0.0, distance_estimate_m=0.0,
+                results_csv=str(args.results_csv), semantic_log_path=str(args.semantic_log),
+                preflight_json_path=str(args.preflight_json or ""),
+            )
+        return 1
+    if route_time_budget_evidence:
+        preflight_payload["route_time_budget"] = route_time_budget_evidence
+        if args.preflight_json is not None:
+            args.preflight_json.write_text(json.dumps(preflight_payload, indent=2, sort_keys=True) + "\n")
+        emit_event(
+            event_logger, "route_time_budget_admitted", run_id=args.run_id,
+            leg_index=leg.leg_index, **mission_leg_fields,
+            dry_run=args.dry_run, **route_time_budget_evidence,
+        )
     if args.dry_run:
         result = FollowerResult("dry_run_ok", "", 0.0, 0.0, False)
         _append_result(args, resolved, leg, preflight_ok=True, result=result)
@@ -1136,6 +1185,7 @@ def main(argv: list[str] | None = None) -> int:
             results_csv=str(args.results_csv),
             execution_pose_frame=args.execution_pose_frame,
             odom_execution_evidence=odom_execution_evidence,
+            route_time_budget=route_time_budget_evidence,
         )
         emit_event(
             event_logger,
@@ -1330,26 +1380,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     follower_config = FollowerConfig(
-        controller=ControllerConfig(
-            max_linear_mps=args.max_linear_mps,
-            max_angular_radps=args.max_angular_radps,
-            goal_tolerance_m=args.goal_tolerance_m,
-            heading_tolerance_rad=args.heading_tolerance_rad,
-            lookahead_distance_m=args.lookahead_distance_m,
-            slow_heading_error_rad=args.slow_heading_error_rad,
-            stop_heading_error_rad=args.stop_heading_error_rad,
-            min_linear_speed_scale=args.min_linear_speed_scale,
-            max_progress_advance_m=args.max_progress_advance_m,
-            enforce_heading_corridor=(
-                leg.route_kind in HEADING_CORRIDOR_ROUTE_KINDS
-            ),
-            exact_vertex_pursuit=leg.route_kind in PHYSICAL_ROUTE_KINDS,
-        ),
-        command_smoothing=CommandSmoothingConfig(
-            enabled=not args.disable_command_smoothing,
-            max_linear_accel_mps2=args.max_linear_accel_mps2,
-            max_angular_accel_radps2=args.max_angular_accel_radps2,
-        ),
+        controller=controller_config,
+        command_smoothing=command_smoothing,
         min_obstacle_distance_m=args.min_obstacle_distance_m,
         omnidirectional_hard_stop_distance_m=(
             args.omnidirectional_hard_stop_distance_m
@@ -1373,7 +1405,11 @@ def main(argv: list[str] | None = None) -> int:
             allow_simulation_odom_after_stale_tf
         ),
         initial_sensor_wait_sec=args.initial_sensor_wait_sec,
-        waypoint_timeout_sec=args.waypoint_timeout_sec,
+        waypoint_timeout_sec=(
+            45.0 if args.waypoint_timeout_sec is None else args.waypoint_timeout_sec
+        ),
+        route_time_budget_enabled=bool(route_time_budget_evidence),
+        waypoint_timeout_limit_sec=args.waypoint_timeout_sec,
         terminal_heading_timeout_sec=args.terminal_heading_timeout_sec,
         stuck_timeout_sec=args.stuck_timeout_sec,
         stuck_progress_epsilon_m=args.stuck_progress_epsilon_m,
@@ -1500,6 +1536,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         controller_trace_jsonl=str(args.controller_trace_jsonl or ""),
         waypoint_timeout_sec=follower_config.waypoint_timeout_sec,
+        route_time_budget_enabled=follower_config.route_time_budget_enabled,
+        waypoint_timeout_limit_sec=follower_config.waypoint_timeout_limit_sec,
+        route_time_budget=route_time_budget_evidence,
         terminal_heading_timeout_sec=(
             follower_config.terminal_heading_timeout_sec
         ),

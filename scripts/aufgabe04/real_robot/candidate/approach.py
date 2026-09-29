@@ -1000,6 +1000,7 @@ def _select_initial_preapproach(
         selection_config=CameraCandidateSelectionConfig(
             linear_speed_mps=config.camera_selection_linear_speed_mps,
             angular_speed_radps=config.camera_selection_angular_speed_radps,
+            route_time_budget_enabled=True,
         ),
         support_class_by_uid=request.support_class_by_uid,
         route_uncertainty_context=request.route_uncertainty_context,

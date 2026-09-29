@@ -413,7 +413,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the automatic stationary AMCL refresh.",
     )
     parser.add_argument("--initial-sensor-wait-sec", type=float, default=2.0)
-    parser.add_argument("--waypoint-timeout-sec", type=float, default=45.0)
+    parser.add_argument(
+        "--waypoint-timeout-sec", type=float, default=None,
+        help=(
+            "Explicit fixed waypoint deadline. Physical detected-stand approaches "
+            "default to route-derived 45–120 s budgets and reject insufficient "
+            "explicit deadlines; other routes retain a 45 s default."
+        ),
+    )
     parser.add_argument(
         "--terminal-heading-timeout-sec",
         type=float,

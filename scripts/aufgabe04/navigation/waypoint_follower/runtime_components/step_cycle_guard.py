@@ -9,13 +9,19 @@ refreshes routes, drains callbacks, or controls the normal loop cadence.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
 from typing import Mapping
 
 from scripts.aufgabe04.navigation.control.driving_behavior import (
     PHYSICAL_ROUTE_KINDS,
+    controller_config_for_route_kind,
+)
+from scripts.aufgabe04.navigation.control.segment_time_budget import (
+    SegmentTimeBudget,
+    SegmentTimeBudgetError,
+    waypoint_time_budget,
 )
 from scripts.aufgabe04.navigation.control.follower_safety import (
     initial_pose_failure,
@@ -265,6 +271,50 @@ class StepCycleGuardRuntimeMixin:
             stop_details=route_check.to_log_dict(),
         )
 
+    def _frozen_waypoint_time_budget(self, pose: Pose2D) -> SegmentTimeBudget:
+        """Freeze once per admitted target; progress never renews its timer."""
+
+        key = (
+            getattr(self, "controller_route_revision", 0),
+            self.current_route_kind,
+            self.target_index,
+            self.target_started_at,
+        )
+        if getattr(self, "waypoint_time_budget_key", None) == key:
+            return self.waypoint_time_budget
+        config = self.follower_config
+        controller = controller_config_for_route_kind(
+            config.controller,
+            self.current_route_kind,
+            physical_waypoint_tolerance_m=config.physical_waypoint_tolerance_m,
+            physical_goal_tolerance_m=config.physical_goal_tolerance_m,
+        )
+        if getattr(self, "start_egress_lock_index", None) is not None:
+            controller = replace(controller, max_linear_mps=min(
+                controller.max_linear_mps, config.start_egress_max_linear_mps,
+            ))
+        budget = waypoint_time_budget(
+            self.waypoints,
+            self.target_index,
+            start_pose=pose,
+            controller=controller,
+            smoothing=config.command_smoothing,
+            timeout_limit_sec=config.waypoint_timeout_limit_sec,
+        )
+        failure = self._append_controller_trace(
+            event="waypoint_time_budget_frozen",
+            pose=pose,
+            diagnostics={
+                "waypoint_time_budget": budget.to_dict(),
+                "target_started_at": self.target_started_at,
+            },
+        )
+        if failure:
+            raise SegmentTimeBudgetError(failure)
+        self.waypoint_time_budget_key = key
+        self.waypoint_time_budget = budget
+        return budget
+
     def _waypoint_lifecycle_decision(
         self,
         step: ControllerStep,
@@ -323,11 +373,30 @@ class StepCycleGuardRuntimeMixin:
                 stop_details=stop_details,
             )
 
+        timeout_sec = self.follower_config.waypoint_timeout_sec
+        time_budget = None
+        if (self.follower_config.route_time_budget_enabled
+                and self.current_route_kind == "detected_stand_preapproach"):
+            try:
+                time_budget = self._frozen_waypoint_time_budget(pose)
+            except SegmentTimeBudgetError as exc:
+                return WaypointLifecycleDecision(
+                    WaypointLifecycleAction.STOP,
+                    stop_reason="route time budget unavailable",
+                    stop_details={
+                        "reason": "route time budget unavailable",
+                        "fault_code": "route_time_budget_rejected",
+                        "fail_closed": True,
+                        "error": str(exc),
+                        "target_index": self.target_index,
+                    },
+                )
+            timeout_sec = time_budget.timeout_sec
         timeout_now = monotonic_fn()
         timeout_elapsed = timeout_now - self.target_started_at
         timeout_failure = waypoint_timeout_failure(
             timeout_elapsed,
-            self.follower_config.waypoint_timeout_sec,
+            timeout_sec,
         )
         terminal_heading_decision = terminal_heading_budget_decision(
             getattr(
@@ -360,9 +429,7 @@ class StepCycleGuardRuntimeMixin:
                 reason=terminal_heading_decision.failure,
                 route_kind=self.current_route_kind,
                 waypoint_elapsed_sec=timeout_elapsed,
-                waypoint_timeout_sec=(
-                    self.follower_config.waypoint_timeout_sec
-                ),
+                waypoint_timeout_sec=timeout_sec,
                 terminal_heading_elapsed_sec=(
                     terminal_heading_elapsed_sec
                 ),
@@ -383,6 +450,8 @@ class StepCycleGuardRuntimeMixin:
                 robot_y_m=pose.y_m,
                 robot_yaw_rad=pose.yaw_rad,
             )
+            if time_budget is not None:
+                stop_details["waypoint_time_budget"] = time_budget.to_dict()
             return WaypointLifecycleDecision(
                 WaypointLifecycleAction.STOP,
                 stop_reason=terminal_heading_decision.failure,
@@ -397,7 +466,7 @@ class StepCycleGuardRuntimeMixin:
             reason=timeout_failure,
             route_kind=self.current_route_kind,
             elapsed_sec=timeout_elapsed,
-            timeout_sec=self.follower_config.waypoint_timeout_sec,
+            timeout_sec=timeout_sec,
             target_index=step.target_index,
             pursuit_index=step.pursuit_index,
             distance_to_target_m=step.distance_to_target_m,
@@ -412,6 +481,8 @@ class StepCycleGuardRuntimeMixin:
             robot_y_m=pose.y_m,
             robot_yaw_rad=pose.yaw_rad,
         )
+        if time_budget is not None:
+            stop_details["waypoint_time_budget"] = time_budget.to_dict()
         return WaypointLifecycleDecision(
             WaypointLifecycleAction.STOP,
             stop_reason=timeout_failure,

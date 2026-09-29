@@ -50,6 +50,8 @@ class FollowerConfig:
     # transitioning between them never renews the absolute startup deadline.
     initial_tf_acquisition_wait_sec: float = DEFAULT_INITIAL_TF_ACQUISITION_WAIT_SEC
     waypoint_timeout_sec: float = 45.0
+    route_time_budget_enabled: bool = False
+    waypoint_timeout_limit_sec: float | None = None
     terminal_heading_timeout_sec: float = DEFAULT_TERMINAL_HEADING_TIMEOUT_SEC
     stuck_timeout_sec: float = 8.0
     stuck_progress_epsilon_m: float = 0.03
@@ -125,6 +127,14 @@ class FollowerConfig:
             or self.waypoint_timeout_sec <= 0.0
         ):
             raise ValueError("waypoint_timeout_sec must be finite and positive")
+        if type(self.route_time_budget_enabled) is not bool:
+            raise ValueError("route_time_budget_enabled must be a bool")
+        if self.waypoint_timeout_limit_sec is not None and (
+            type(self.waypoint_timeout_limit_sec) not in (int, float)
+            or not math.isfinite(self.waypoint_timeout_limit_sec)
+            or self.waypoint_timeout_limit_sec <= 0.0
+        ):
+            raise ValueError("waypoint_timeout_limit_sec must be finite and positive")
         if (
             not math.isfinite(self.terminal_heading_timeout_sec)
             or self.terminal_heading_timeout_sec <= 0.0

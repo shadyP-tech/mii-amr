@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from scripts.aufgabe04.navigation.approach.exact_two_camera_contract import (
     SUPPORT_CLASS_MULTI_VIEW,
@@ -74,10 +74,15 @@ class CameraCandidateSelectionConfig:
     linear_speed_mps: float
     angular_speed_radps: float
     large_initial_turn_threshold_rad: float = 3.0 * math.pi / 4.0
+    route_time_budget_enabled: bool = False
 
     def __post_init__(self) -> None:
         _positive_finite(self.linear_speed_mps, "linear_speed_mps")
         _positive_finite(self.angular_speed_radps, "angular_speed_radps")
+        if not isinstance(self.route_time_budget_enabled, bool):
+            raise CameraCandidateSelectionError(
+                "invalid_config", "route_time_budget_enabled must be a boolean"
+            )
         threshold = _positive_finite(
             self.large_initial_turn_threshold_rad,
             "large_initial_turn_threshold_rad",
@@ -92,6 +97,7 @@ class CameraCandidateSelectionConfig:
         return {
             "linear_speed_mps": self.linear_speed_mps,
             "angular_speed_radps": self.angular_speed_radps,
+            "route_time_budget_enabled": self.route_time_budget_enabled,
             "large_initial_turn_threshold_rad": (
                 self.large_initial_turn_threshold_rad
             ),
@@ -118,11 +124,18 @@ class CameraCandidateRouteOption:
     support_class: str
     confidence: float
     hit_count: int
+    route_time_budget: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         _nonempty_string(self.candidate_uid, "candidate_uid")
         _boolean(self.feasible, "feasible")
         _boolean(self.inside_requested_standoff, "inside_requested_standoff")
+        if self.route_time_budget is not None and not isinstance(
+            self.route_time_budget, Mapping
+        ):
+            raise CameraCandidateSelectionError(
+                "invalid_option", "route_time_budget must be a mapping"
+            )
         _nonempty_string(self.support_class, "support_class")
         confidence = _finite(self.confidence, "confidence")
         if not 0.0 <= confidence <= 1.0:
@@ -164,7 +177,7 @@ class CameraCandidateRouteOption:
                     )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "candidate_uid": self.candidate_uid,
             "feasible": self.feasible,
             "failure_reason": self.failure_reason,
@@ -176,6 +189,9 @@ class CameraCandidateRouteOption:
             "confidence": self.confidence,
             "hit_count": self.hit_count,
         }
+        if self.route_time_budget is not None:
+            payload["route_time_budget"] = dict(self.route_time_budget)
+        return payload
 
 
 @dataclass(frozen=True)
