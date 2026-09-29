@@ -322,7 +322,14 @@ def validated_backside_axis_observation(
             witnessed=schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         )
         if schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION:
-            current = target_registration["witnessed_fragmentation"]["current"]
+            from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND
+
+            proof = target_registration["witnessed_fragmentation"]
+            # The proof was recomputed above. A narrow-ray subset retains its
+            # current sensor tuple inside the independently witnessed envelope.
+            if proof["kind"] == SUBSET_KIND:
+                proof = proof["envelope"]
+            current = proof["current"]
             stand = _mapping(payload.get("stand_center"), "stand_center")
             robot = _mapping(payload.get("robot_pose"), "robot_pose")
             target_key = (f"{payload.get('stream_id')}:{payload.get('stand_id')}:"

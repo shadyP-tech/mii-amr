@@ -6,6 +6,7 @@ for a recorded stand or authorize motion.
 """
 
 from dataclasses import asdict, replace
+import copy
 import json
 import math
 from pathlib import Path
@@ -42,6 +43,9 @@ from tests.aufgabe04.test_candidate_snapshot import _candidate, _snapshot
 from scripts.aufgabe04.stations.candidate_snapshot import write_candidate_snapshot
 from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
 from scripts.aufgabe04.real_robot.observer.target_reconciliation import StoppedTargetReconciliation
+from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
+from scripts.aufgabe04.real_robot.observer.scan_target_persistence import ScanPersistenceContext, StoppedScanTargetPersistence
+from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND
 
 
 class BoundedHeadObservationTests(unittest.TestCase):
@@ -95,7 +99,7 @@ class BoundedHeadObservationTests(unittest.TestCase):
     def frame(self, stamp, *, face="front", associated=True, complete=True,
               marker=None, marker_seen=None, age=.1, scan_stamp=None,
               scan_for_proof=None, qr_id="QR_003", qr_conflict=False,
-              pose=None, publish=True, no_appearance=False, reconcile=False):
+              pose=None, publish=True, no_appearance=False, reconcile=False, fragmented=False):
         marker = face == "front" if marker is None else marker
         marker_seen = marker if marker_seen is None else marker_seen
         scan_stamp = stamp if scan_stamp is None else scan_stamp
@@ -115,6 +119,8 @@ class BoundedHeadObservationTests(unittest.TestCase):
                        profile_sha256=self.profile.sha256, now_sec=stamp+.1,
                        scan=replace(options["scan"], scan_stamp_sec=scan_for_proof, receipt_sec=scan_for_proof))
         if reconcile:
+            target_key = (f"{self.adapter.args.stream_id}:{self.adapter.args.stand_id}:"
+                          f"{.6:.9f}:{0.:.9f}")
             if not hasattr(self, "reconciliation"):
                 self.reconciliation = StoppedTargetReconciliation()
                 candidate = _candidate(uid=self.adapter.args.stand_id, x_m=.6)
@@ -122,12 +128,37 @@ class BoundedHeadObservationTests(unittest.TestCase):
                     y_m=0., radius_m=.04, uncertainty_m=.02))
                 self.snapshot_path = self.root / "snapshot.json"
                 write_candidate_snapshot(self.snapshot_path, _snapshot(candidate))
+            fragmentation = None
+            if fragmented:
+                persistence = StoppedScanTargetPersistence()
+                context = ScanPersistenceContext(target_key, "0", pose, pose, stamp,
+                    .6, 0., .04, .02, .05, Pose2D(0., 0., 0.))
+                # Three independent real scan returns witness the one missing
+                # current beam; no camera result fabricates the prior support.
+                for offset in (.15, .10, .05):
+                    prior_stamp = stamp-offset
+                    prior_scan = replace(options["scan"], scan_stamp_sec=prior_stamp,
+                                         receipt_sec=prior_stamp)
+                    self.assertTrue(persistence.ingest_scan(prior_scan,
+                        context=replace(context, image_stamp_sec=prior_stamp),
+                        now_sec=prior_stamp+.01, max_scan_age_sec=.5))
+                ranges = list(options["scan"].ranges)
+                ranges[4] = math.nan
+                options["scan"] = replace(options["scan"], ranges=tuple(ranges))
+                envelope = qr_registration_envelope(options["scan"], **{
+                    key: options[key] for key in ("map_bearing_rad", "cone_half_angle_rad",
+                        "max_camera_map_bearing_delta_rad", "accepted_range_m",
+                        "now_sec", "max_scan_age_sec")},
+                    resolve_lidar_association=lambda association, scan: persistence.resolve(
+                        association, scan, context=context, now_sec=stamp+.1, max_scan_age_sec=.5))
+                fragmentation = envelope.witnessed_fragmentation
+                self.assertIsNotNone(fragmentation, persistence.last_metadata)
             options["target_reconciliation"] = self.reconciliation.observe(
                 snapshot_path=self.snapshot_path, candidate_uid=self.adapter.args.stand_id,
-                planning_frame="map", stand_center=(.6, 0.), target_key="test", epoch=0,
+                planning_frame="map", stand_center=(.6, 0.), target_key=target_key, epoch=0,
                 scan=options["scan"], scan_from_map=RigidTransform("base_scan", "map",
                     (0., 0., 0.), (0., 0., 0., 1.)), robot_pose=(pose.x_m, pose.y_m, pose.yaw_rad),
-                image_stamp_sec=stamp, now_sec=stamp+.1,
+                image_stamp_sec=stamp, now_sec=stamp+.1, fragmentation=fragmentation,
                 options={key: options[key] for key in ("map_bearing_rad", "cone_half_angle_rad",
                     "max_camera_map_bearing_delta_rad", "accepted_range_m")})
         association = associate_current_measured_head(**options)
@@ -238,6 +269,50 @@ class BoundedHeadObservationTests(unittest.TestCase):
         self.assertGreater(math.dist((center["x_m"], center["y_m"]), (.6, 0.)), .03)
         self.assertAlmostEqual(observation.bounded_orientation["half_width_rad"], self.proof.half_width_rad)
         self.assertEqual(payload["stand_center"], {"x_m": .6, "y_m": 0.})
+
+    def test_reconciled_fragmented_backside_publishes_bound_receipt(self):
+        for index in range(7):
+            _, metadata = self.frame(100.+index*.2, face="backside", reconcile=True,
+                                     fragmented=index == 6)
+            if index < 6:
+                self.assertIsNone(self.payload("backside"))
+        payload = self.payload("backside")
+        self.assertIsNotNone(payload, metadata)
+        proof = payload["target_registration"]["witnessed_fragmentation"]
+        self.assertEqual(payload["schema_version"], 4)
+        self.assertEqual(proof["kind"], SUBSET_KIND)
+        self.assertNotIn("current", proof)
+        self.assertIsNone(proof["envelope"]["current"]["scan"]["ranges"][4])
+        self.assertEqual(len(proof["envelope"]["witnesses"]), 3)
+        self.assertEqual(payload["target_registration"]["eligible_lidar_cluster_count"], 2)
+        observation = validated_backside_axis_observation(payload)
+        self.assertEqual(observation.axis_sample_count, 7)
+        self.assertIsNotNone(observation.target_reconciliation)
+        self.assertIsNotNone(observation.validated_target_center)
+        self.assertTrue(self.adapter.axis_observation_committed)
+        self.assertTrue(self.adapter.completed)
+        self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
+                         "backside_axis_committed_qr_unresolved")
+
+        for name, mutate in (
+            ("stream", lambda p: p.update(stream_id="another-stream")),
+            ("candidate", lambda p: p.update(stand_id="another-candidate")),
+            ("center", lambda p: p["stand_center"].update(x_m=.61)),
+            ("image", lambda p: p.update(sensor_stamp_sec=101.1)),
+            ("pose", lambda p: p["robot_pose"].update(x_m=.01)),
+        ):
+            with self.subTest(mismatch=name):
+                altered = copy.deepcopy(payload)
+                mutate(altered)
+                with self.assertRaisesRegex(ValueError, "witnessed target does not match receipt"):
+                    validated_backside_axis_observation(altered)
+        altered = copy.deepcopy(payload)
+        # Remove one witness's real bridging return. The wrapper's full proof
+        # must be recomputed before any receipt context may be trusted.
+        altered["target_registration"]["witnessed_fragmentation"]["envelope"][
+            "witnesses"][0]["scan"]["ranges"][4] = None
+        with self.assertRaises(ValueError):
+            validated_backside_axis_observation(altered)
 
     def test_node_passes_current_position_to_bounded_preparation(self):
         # Inject an already tested current detector/association result, then
