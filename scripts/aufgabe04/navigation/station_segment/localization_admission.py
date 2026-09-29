@@ -14,6 +14,7 @@ from scripts.aufgabe04.navigation.foundation.content_hashed_evidence import (
     write_content_hashed_json,
 )
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.planning.temporary_obstacle_overlay import apply_bound_temporary_obstacles
 from scripts.aufgabe04.navigation.coverage.coverage_replan_coordinator import (
     CoverageReplanCoordinator,
 )
@@ -495,6 +496,9 @@ def _build_odom_execution_admission(
     base_costmap = Costmap.from_occupancy_grid(
         load_occupancy_grid(args.uncertainty_map_yaml)
     ).with_arena_bounds(arena_bounds)
+    base_costmap = apply_bound_temporary_obstacles(
+        base_costmap, diagnostics_snapshot.metadata, execution_map_from_odom=map_from_odom,
+    )
     admission_config = RouteUncertaintyAdmissionConfig(
         robot_radius_m=args.uncertainty_robot_radius_m,
         collision_margin_m=args.uncertainty_collision_margin_m,

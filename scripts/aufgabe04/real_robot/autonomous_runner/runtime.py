@@ -662,6 +662,7 @@ def _run_motion_leg(
     mission_leg_permit_context: MissionLegPermitContext | None = None,
     observation_tf_evidence_path: Path | None = None,
     sensor_timing_readiness_phase: str | None = None,
+    stored_pose_tour_obstacle_monitor: bool = False,
 ) -> MotionLegOutcome:
     if sensor_timing_readiness_phase is not None and (
         not isinstance(sensor_timing_readiness_phase, str)
@@ -750,6 +751,7 @@ def _run_motion_leg(
         "coverage_plan": coverage_plan,
         "candidate_snapshot": candidate_snapshot,
         "coverage_transient_replan": coverage_transient_replan,
+        "stored_pose_tour_obstacle_monitor": stored_pose_tour_obstacle_monitor,
         "uncertainty_map_yaml": uncertainty_map_yaml,
         "uncertainty_sigma_multiplier": uncertainty_sigma_multiplier,
         "localization_branch_proof_id": localization_branch_proof_id,

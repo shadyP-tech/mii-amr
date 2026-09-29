@@ -31,6 +31,7 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
             map_frame="map",
             odom_frame="odom",
             base_frame="base_footprint",
+            scan_frame="base_scan",
             localization_source="amcl",
             max_linear_speed_mps=0.055,
             max_angular_speed_radps=0.18,
@@ -112,6 +113,22 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
             self._option(command, "--coverage-transient-replan-leg-index"),
             "1",
         )
+
+    def test_tour_monitor_is_explicit_in_both_child_phases(self):
+        for dry in (True, False):
+            with self.subTest(dry=dry):
+                identity = ({"mission_leg_evidence_kind": MissionLegKind.STORED_POSE_TOUR,
+                             "mission_leg_evidence_index": 6, "mission_leg_evidence_target_id": "candidate"}
+                            if dry else self._mission_leg_arguments(kind=MissionLegKind.STORED_POSE_TOUR, mission_leg_index=6))
+                command = build_child_runner_command(**self._base_arguments(), dry_run=dry,
+                    stored_pose_tour_obstacle_monitor=True, **identity)
+                self.assertIn("--stored-pose-tour-obstacle-monitor", command)
+                self.assertEqual(self._option(command, "--stored-pose-tour-scan-frame"), "base_scan")
+                self.assertEqual(self._option(command, "--min-obstacle-distance-m"), "0.2")
+                self.assertNotIn("--coverage-transient-replan", command)
+        with self.assertRaisesRegex(ValueError, "requires a stored-pose tour leg"):
+            build_child_runner_command(**self._base_arguments(), dry_run=True,
+                stored_pose_tour_obstacle_monitor=True, mission_leg_evidence_kind=MissionLegKind.RETURN_TO_START)
 
     def test_coverage_transient_index_does_not_select_route_artifact_leg(self):
         command = build_child_runner_command(

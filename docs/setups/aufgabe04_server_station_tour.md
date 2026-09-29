@@ -86,13 +86,39 @@ Travel uses the admitted-pose policy of up to **0.15 m/s and 0.60 rad/s**, slowi
 to **0.055 m/s and 0.18 rad/s** at corners and near the final pose. Each visit
 plans around the complete stored candidate pool and may use up to four fresh,
 independently admitted route stages when uncertainty prevents a single leg.
-Stored geometry accelerates routing; live obstacles still stop the robot.
+Temporary obstacles are handled by a tour-local LiDAR occupancy grid and stopped
+global replanning. Before every execution, three fresh stationary scans are
+transformed at their source timestamps into the continuous odometry frame. Their
+occupied cells are projected into the fresh map frame, combined with the static
+map and all saved stand keepouts, and used by A* and the child clearance checks.
+The original stand pose and heading remain the destination of every detour.
+
+While driving, the local waypoint controller monitors the next 0.8 m of the
+route corridor. A new obstruction causes a zero-velocity hold; a second distinct
+scan confirms the stop. The parent captures fresh stopped scans and localization,
+plans a new route, and admits a new single-use permit before moving again. A visit
+allows two obstacle replans in addition to its four possible uncertainty stages.
+The 0.20 m emergency LiDAR stop and all sensor/ownership checks remain active.
+Sensor, localization, ownership and stuck-motion faults terminate the tour.
+
+The occupancy grid uses 0.05 m cells. Cells clear after two valid free-ray
+observations or expire after 30 seconds; invalid/infinite rays do not clear
+obstacles. Updates and expiry take effect only in subsequent stopped plans.
+An executing leg retains its frozen obstacle snapshot. Static map cells and
+saved stand locations are never cleared by temporary observations. A blocked
+destination, no admissible detour, an unsafe starting clearance or exhausted
+replan budget stops the tour without reporting arrival or reversing blindly.
+
+This uses the existing local waypoint controller plus obstacle monitoring and
+A* replanning; it does not launch Nav2 or introduce a continuous local trajectory
+optimizer. Each new obstacle detour includes a deliberate stopped admission.
 
 ## Evidence and failures
 
 Each tour gets a new output directory. `inputs.json` records source identities,
 poses and invocation choices; `visits/` contains routes, stopped localization,
-permits and measured arrivals; `server/` records the frozen plan and an append-only
+permits, temporary obstacle snapshots, stationary scan cohorts, authenticated
+terminal outcomes and measured arrivals; `server/` records the frozen plan and an append-only
 request/response journal. The normal child-run evidence bundles are also kept.
 
 HTTP requests have bounded timeouts. A rejected or ambiguous arrival report,
@@ -105,3 +131,18 @@ another robot or clears global server state.
 
 `--server-base-url`, `--http-timeout-sec`, `--tour-id` and `--output-root` can be
 overridden. Changing the server ID changes which robot-specific plan is created.
+
+## Module responsibilities
+
+- `tour_scan_capture.py` and `tour_scan_contract.py`: passive ROS capture and pure scan validation.
+- `temporary_obstacle_overlay.py`, `temporary_scan_capture.py` and
+  `temporary_obstacle_projection.py`: occupancy updates, expiry and immutable map projection.
+- `tour_obstacle_monitor.py`: local forward-route checks before velocity publication.
+- `tour_navigation_leg.py` and `tour_obstacle_navigation.py`: exact-target planning,
+  measured arrival and bounded stopped replanning.
+- `tour_replan_binding.py` and `tour_terminal_evidence.py`: new tour authorization,
+  single-use execution slots and genuine predecessor outcomes.
+
+These modules do not change camera exploration or the server sequencing policy.
+Physical obstacle detours require workstation/robot validation; offline tests do
+not establish performance on the real course.

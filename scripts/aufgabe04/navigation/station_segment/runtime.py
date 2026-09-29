@@ -1381,6 +1381,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     follower_config = FollowerConfig(
         controller=controller_config,
+        stored_pose_tour_obstacle_monitor=args.stored_pose_tour_obstacle_monitor,
+        stored_pose_tour_robot_radius_m=args.uncertainty_robot_radius_m,
+        stored_pose_tour_scan_frame=args.stored_pose_tour_scan_frame,
         command_smoothing=command_smoothing,
         min_obstacle_distance_m=args.min_obstacle_distance_m,
         omnidirectional_hard_stop_distance_m=(

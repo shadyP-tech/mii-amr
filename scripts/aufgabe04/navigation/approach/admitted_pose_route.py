@@ -48,6 +48,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     MAX_RETURN_TO_START_LEGS, validate_stored_pose_tour_target_evidence,
 )
 from scripts.aufgabe04.navigation.execution.route_uncertainty_admission import RouteUncertaintyAdmissionConfig
+from scripts.aufgabe04.navigation.execution.tour_replan_binding import validate_tour_navigation
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
 from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json, write_route_csv,
@@ -59,6 +60,7 @@ from scripts.aufgabe04.navigation.planning.certified_exact_start_route import (
     certify_and_smooth_exact_start_route,
 )
 from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.planning.temporary_obstacle_overlay import apply_bound_temporary_obstacles
 from scripts.aufgabe04.navigation.planning.global_planner import PlanRouteResult, plan_route
 from scripts.aufgabe04.navigation.planning.exact_start_connector import (
     prepend_certified_exact_start,
@@ -230,6 +232,7 @@ def plan_admitted_pose_route(
     route_uncertainty_context: CandidateRouteUncertaintyContext | None = None,
     return_stage_index: int = 0,
     purpose: str = ADMITTED_POSE_ROUTE_PURPOSE,
+    temporary_obstacle_overlay_path: Path | None = None,
 ) -> dict[str, object]:
     """Create one independently sealed route; grant no live motion permission."""
     _pose(asdict(start), "start")
@@ -241,6 +244,20 @@ def plan_admitted_pose_route(
         {key: target_evidence.get(key) for key in ("tour_id", "visit_index", "qr_id")}
         if purpose == STORED_POSE_TOUR_ROUTE_PURPOSE else {}
     )
+    navigation = target_evidence.get("tour_navigation")
+    if navigation is not None:
+        if purpose != STORED_POSE_TOUR_ROUTE_PURPOSE or not isinstance(navigation, Mapping):
+            raise ValueError("tour navigation evidence requires stored pose tour purpose")
+        tour_identity["tour_navigation"] = validate_tour_navigation(navigation)
+        if navigation["stage_index"] != return_stage_index:
+            raise ValueError("tour navigation stage differs from planning stage")
+    overlay_binding = {}
+    if temporary_obstacle_overlay_path is not None:
+        overlay_path = Path(temporary_obstacle_overlay_path).resolve(strict=True)
+        overlay_binding = {"temporary_obstacle_overlay_json": str(overlay_path),
+                           "temporary_obstacle_overlay_sha256": file_sha256(overlay_path)}
+    elif navigation is not None:
+        raise ValueError("dynamic tour requires a temporary obstacle overlay")
     if (
         isinstance(return_stage_index, bool) or not isinstance(return_stage_index, int)
         or not 0 <= return_stage_index < MAX_RETURN_TO_START_LEGS
@@ -286,6 +303,11 @@ def plan_admitted_pose_route(
     if bundle.bundle_sha256 != snapshot.map_bundle_sha256:
         raise ValueError("stored target map differs from runtime map")
     base = Costmap.from_occupancy_grid(grid).with_arena_bounds(plan.arena_bounds)
+    base = apply_bound_temporary_obstacles(base, {
+        "route_purpose": purpose, **tour_identity, **overlay_binding,
+        "map_bundle_sha256": bundle.bundle_sha256, "planning_frame": plan.planning_frame,
+        "planning_frame_admission": target_evidence["planning_frame_admission"],
+    })
     planning = base.with_inflation(inflation_radius_m).with_station_keepouts(tuple(
         Station(
             c.candidate_uid, StationPose(c.geometry.x_m, c.geometry.y_m, 0.),
@@ -407,6 +429,10 @@ def plan_admitted_pose_route(
     )}
     shutil.copyfile(snapshot_path, paths["candidate_snapshot"])
     paths["target_evidence_json"].write_text(evidence_json)
+    if overlay_binding:
+        paths["temporary_obstacle_overlay_json"] = output_dir / "temporary_obstacle_overlay.json"
+        shutil.copyfile(overlay_binding["temporary_obstacle_overlay_json"], paths["temporary_obstacle_overlay_json"])
+        overlay_binding["temporary_obstacle_overlay_json"] = str(paths["temporary_obstacle_overlay_json"])
     stage_metadata = None
     if stage is not None:
         paths["full_return_route_json"] = output_dir / "full_return_route.json"
@@ -420,6 +446,7 @@ def plan_admitted_pose_route(
             "exact_start_connector": connector.to_metadata(),
             **return_route_geometry(full_poses),
             **({"route_purpose": purpose, **tour_identity} if tour_identity else {}),
+            **overlay_binding,
         }
         paths["full_return_route_json"].write_text(json.dumps(full_evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
         paths["uncertainty_selection_json"].write_text(json.dumps(stage.evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
@@ -461,6 +488,7 @@ def plan_admitted_pose_route(
         "stationary_turn": stationary_turn,
         "route_purpose": purpose, "motion_authorized": True,
         **tour_identity,
+        **overlay_binding,
         "planning_frame": snapshot.planning_frame, "physical_clearance_enforced": True,
         "physical_clearance": dict(physical_clearance), "inflation_radius_m": inflation_radius_m,
         "candidate_transit_radius_m": radius, "candidate_snapshot_json": str(paths["candidate_snapshot"]),
@@ -524,6 +552,9 @@ def _validate_return_stage(
         for key in ("route_purpose", "tour_id", "visit_index", "qr_id"):
             if full.get(key) != metadata.get(key):
                 raise ValueError(f"full stored-pose tour {key} mismatch")
+        for key in ("tour_navigation", "temporary_obstacle_overlay_json", "temporary_obstacle_overlay_sha256"):
+            if full.get(key) != metadata.get(key):
+                raise ValueError(f"full stored-pose tour {key} mismatch")
     for key, expected in (
         ("schema_version", 1), ("stage_index", index),
         ("start_candidate_uid", stage["start_candidate_uid"]),
@@ -583,6 +614,7 @@ def _validate_return_stage(
     if bundle.bundle_sha256 != metadata["map_bundle_sha256"]:
         raise ValueError("return selection map bundle mismatch")
     base = Costmap.from_occupancy_grid(grid).with_arena_bounds(validate_arena_boundary_evidence(metadata))
+    base = apply_bound_temporary_obstacles(base, metadata)
     admission = evaluate_admitted_return_stage_uncertainty(
         base, executable_return_poses(prefix), PlanarCovariance(**selection["covariance"]), config,
         start_pose=start, target_evidence_sha256=metadata["target_evidence_sha256"], is_final_stage=final,
@@ -651,6 +683,24 @@ def validate_admitted_pose_route_binding(
                     or (key == "visit_index" and type(metadata.get(key)) is not int)
                 ):
                     raise ValueError(f"stored-pose tour {key} differs from target evidence")
+            if metadata.get("tour_navigation") != evidence.get("tour_navigation"):
+                raise ValueError("stored-pose tour navigation differs from target evidence")
+            navigation = metadata.get("tour_navigation")
+            if navigation is not None:
+                navigation = validate_tour_navigation(navigation)
+                if navigation["stage_index"] != metadata.get("return_to_start_stage", {}).get("stage_index"):
+                    raise ValueError("stored-pose tour navigation stage differs from selected route")
+        # This also covers legacy unstaged tooling routes: no artifact may
+        # bypass scope, source replay or exact projection-frame validation.
+        if any(key in metadata for key in (
+            "temporary_obstacle_overlay_json", "temporary_obstacle_overlay_sha256", "tour_navigation",
+        )):
+            grid, bundle = load_occupancy_grid_with_bundle(
+                Path(metadata["map_yaml"]), semantic_map_id=metadata["semantic_map_id"],
+                planning_frame=metadata["planning_frame"])
+            if bundle.bundle_sha256 != metadata["map_bundle_sha256"]:
+                raise ValueError("temporary occupancy route map bundle mismatch")
+            apply_bound_temporary_obstacles(Costmap.from_occupancy_grid(grid), metadata)
         final = leg.raw_waypoints[-1]
         if not final.protected or not final.corridor or not _same_pose(final.pose, target):
             raise ValueError("route endpoint differs from exact stored admitted pose")

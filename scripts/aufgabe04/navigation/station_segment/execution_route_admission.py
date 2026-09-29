@@ -34,6 +34,7 @@ from scripts.aufgabe04.navigation.execution.mission_execution_gate import (
     validate_logistics_execution_bundle,
 )
 from scripts.aufgabe04.navigation.execution.route_revision_store import RouteRevisionError
+from scripts.aufgabe04.navigation.execution.tour_replan_binding import validate_tour_obstacle_monitor_admission
 from scripts.aufgabe04.navigation.foundation.run_events import emit_event
 from scripts.aufgabe04.navigation.control.safety_checks import (
     catalog_start_egress_certificate,
@@ -452,6 +453,10 @@ def admit_execution_route(
     execution_certificate_failures = []
     mission_execution_failures = []
     mission_execution_binding: MissionExecutionBinding | None = None
+    try:
+        validate_tour_obstacle_monitor_admission(args, diagnostics_snapshot.metadata)
+    except (OSError, ValueError) as exc:
+        mission_execution_failures.append(f"tour obstacle monitor binding is invalid: {exc}")
     if leg.route_kind in CATALOG_PHYSICAL_ROUTE_KINDS:
         try:
             catalog_egress_certificate = catalog_start_egress_certificate(

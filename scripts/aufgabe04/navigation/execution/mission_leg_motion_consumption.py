@@ -341,6 +341,18 @@ def _claim_return_to_start_stage(
 ) -> None:
     index = permit.mission_leg_index
     tour = permit.mission_leg_kind is MissionLegKind.STORED_POSE_TOUR
+    if tour:
+        from .mission_leg_motion_permit import TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+        from .tour_replan_binding import MAX_TOUR_EXECUTIONS_PER_VISIT, tour_execution_slot_path
+        authorization = load_mission_leg_motion_authorization(master_path)
+        if authorization.scope_text == TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+            # Full successor proof was checked by live permit validation. The
+            # independent slot prevents another permit/run claiming this turn.
+            visit, execution = divmod(index, MAX_TOUR_EXECUTIONS_PER_VISIT)
+            _claim_receipt_exclusively(tour_execution_slot_path(
+                master_path, permit.master_authorization_sha256, visit, execution,
+            ), receipt)
+            return
     stage_index = index % MAX_RETURN_TO_START_LEGS if tour else index
     if stage_index > 0:
         previous_path = _return_to_start_stage_path(

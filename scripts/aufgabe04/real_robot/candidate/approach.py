@@ -2112,6 +2112,163 @@ def _capture_candidate_camera_result(
     )
 
 
+def _select_initial_candidate_with_localization_refresh(
+    *, config: CandidateApproachConfig, effects: CandidateApproachEffects,
+    source_registry: StandSurveyRegistry | None, candidate_index: int,
+    eligible: set[str], exact_two_support_by_uid: Mapping[str, str] | None,
+) -> tuple[
+    CandidateApproachConfig,
+    Pose2D,
+    CameraCandidateInitialSelection,
+    CandidatePlanningFrame | None,
+]:
+    """Retry one rejected uncertainty envelope using a new stopped epoch.
+
+    Reacquisition repeats frame admission, source reprojection, and readiness
+    loading together. It does not move the robot, reuse a rejected plan, or
+    loosen admission thresholds. Invalid input and static infeasibility remain
+    terminal; only the typed all-routes uncertainty rejection is recoverable.
+    """
+
+    refresh_enabled = (
+        config.require_uncertainty_aware_selection
+        and effects.admit_planning_frame is not None
+        and effects.load_route_uncertainty_readiness is not None
+        and source_registry is not None
+    )
+    for epoch in range(2 if refresh_enabled else 1):
+        epoch_suffix = "" if epoch == 0 else f"_epoch_{epoch:03d}"
+        planning_config = config
+        frame_projection_artifacts = None
+        selection_planning_frame = None
+        route_uncertainty_context = None
+        planning_frame_evidence_path = None
+        if effects.admit_planning_frame is None:
+            current = _read_finite_pose2d(
+                effects,
+                context="initial_candidate_selection",
+            )
+        else:
+            assert source_registry is not None
+            planning_frame_evidence_path = (
+                config.session_root
+                / "preflight"
+                / f"candidate_selection_{candidate_index:03d}{epoch_suffix}_localization.json"
+            )
+            planning_frame = _run_planning_frame_admission(
+                effects,
+                planning_frame_evidence_path
+            )
+            selection_planning_frame = planning_frame
+            frame_projection_artifacts = _materialize_candidate_frame_projection(
+                source_config=config,
+                source_registry=source_registry,
+                planning_frame=planning_frame,
+                output_root=(
+                    config.session_root
+                    / "candidate_frame_projections"
+                    / f"selection_{candidate_index:03d}{epoch_suffix}"
+                ),
+            )
+            planning_config = frame_projection_artifacts.config
+            current = planning_frame.current_pose
+        if config.require_uncertainty_aware_selection:
+            loader = effects.load_route_uncertainty_readiness
+            if (
+                loader is None or planning_frame_evidence_path is None
+                or selection_planning_frame is None
+            ):
+                raise RuntimeError(
+                    "required candidate route uncertainty readiness effect "
+                    "is unavailable"
+                )
+            robot_radius_m = config.robot_radius_m
+            if (
+                isinstance(robot_radius_m, bool)
+                or not isinstance(robot_radius_m, (int, float))
+                or not math.isfinite(float(robot_radius_m))
+                or float(robot_radius_m) <= 0.0
+            ):
+                raise RuntimeError(
+                    "required candidate route uncertainty robot radius is invalid"
+                )
+            route_uncertainty_context = loader(
+                CandidateRouteUncertaintyReadinessRequest(
+                    preflight_json=planning_frame_evidence_path,
+                    expected_start=current,
+                    planning_frame=planning_config.planning_frame,
+                    odom_frame=selection_planning_frame.odom_frame,
+                    robot_radius_m=float(robot_radius_m),
+                    sigma_multiplier=(
+                        planning_config.uncertainty_sigma_multiplier
+                    ),
+                )
+            )
+            if not isinstance(route_uncertainty_context, CandidateRouteUncertaintyContext):
+                raise TypeError(
+                    "candidate route uncertainty readiness must return "
+                    "CandidateRouteUncertaintyContext"
+                )
+        try:
+            selection = effects.select_initial_preapproach(
+                CameraCandidateSelectionRequest(
+                    config=planning_config,
+                    current_pose=current,
+                    unresolved=frozenset(eligible),
+                    support_class_by_uid=exact_two_support_by_uid,
+                    route_uncertainty_context=route_uncertainty_context,
+                    source_registry=source_registry,
+                    planning_frame=selection_planning_frame,
+                )
+            )
+        except NoUncertaintyAdmittedCameraCandidateError as exc:
+            failure_evidence = {
+                **exc.to_evidence(),
+                "selection_localization_epoch": epoch,
+                "selection_planning_frame_evidence_path": (
+                    None if planning_frame_evidence_path is None
+                    else str(planning_frame_evidence_path)
+                ),
+                "candidate_frame_projection_path": (
+                    None if frame_projection_artifacts is None
+                    else str(frame_projection_artifacts.evidence_path)
+                ),
+                "eligible_candidate_uids": sorted(eligible),
+                "localization_refresh_exhausted": refresh_enabled and epoch == 1,
+                "motion_authorized": False,
+            }
+            if not refresh_enabled or epoch == 1:
+                raise NoUncertaintyAdmittedCameraCandidateError(failure_evidence) from exc
+            effects.event_sink(
+                config.session_root / "candidate_selection.jsonl",
+                {
+                    **failure_evidence,
+                    "event": "camera_candidate_selection_localization_refresh",
+                    "timestamp_unix_sec": effects.clock(),
+                    "next_selection_localization_epoch": epoch + 1,
+                    "maximum_localization_refreshes": 1,
+                    "future_motion_requires_fresh_live_gates": True,
+                },
+            )
+            continue
+        if frame_projection_artifacts is not None:
+            selection = replace(
+                selection,
+                evidence={
+                    **dict(selection.evidence),
+                    "selection_localization_epoch": epoch,
+                    "selection_planning_frame_evidence_path": str(planning_frame_evidence_path),
+                    "candidate_frame_projection_path": str(frame_projection_artifacts.evidence_path),
+                    "candidate_frame_projection_sha256": frame_projection_artifacts.evidence_sha256,
+                    "source_candidate_snapshot_sha256": candidate_snapshot_sha256(config.snapshot),
+                    "projected_candidate_snapshot_sha256": frame_projection_artifacts.snapshot_sha256,
+                    "motion_authorized": False,
+                },
+            )
+        return planning_config, current, selection, selection_planning_frame
+    raise AssertionError("bounded candidate selection did not return or reject")
+
+
 def execute_candidate_approach_phase(
     config: CandidateApproachConfig,
     effects: CandidateApproachEffects,
@@ -2210,90 +2367,25 @@ def execute_candidate_approach_phase(
                 observation_eligible
             )
         eligible = set(route_state.eligible_candidate_uids)
-        planning_config = config
-        frame_projection_artifacts = None
-        selection_planning_frame = None
-        route_uncertainty_context = None
-        planning_frame_evidence_path = None
-        if effects.admit_planning_frame is None:
-            current = _read_finite_pose2d(
-                effects,
-                context="initial_candidate_selection",
-            )
-        else:
-            assert source_registry is not None
-            planning_frame_evidence_path = (
-                config.session_root
-                / "preflight"
-                / f"candidate_selection_{candidate_index:03d}_localization.json"
-            )
-            planning_frame = _run_planning_frame_admission(
-                effects,
-                planning_frame_evidence_path
-            )
-            selection_planning_frame = planning_frame
-            frame_projection_artifacts = _materialize_candidate_frame_projection(
-                source_config=config,
-                source_registry=source_registry,
-                planning_frame=planning_frame,
-                output_root=(
-                    config.session_root
-                    / "candidate_frame_projections"
-                    / f"selection_{candidate_index:03d}"
-                ),
-            )
-            planning_config = frame_projection_artifacts.config
-            current = planning_frame.current_pose
-        if config.require_uncertainty_aware_selection:
-            loader = effects.load_route_uncertainty_readiness
-            if (
-                loader is None or planning_frame_evidence_path is None
-                or selection_planning_frame is None
-            ):
-                raise RuntimeError(
-                    "required candidate route uncertainty readiness effect "
-                    "is unavailable"
-                )
-            robot_radius_m = config.robot_radius_m
-            if (
-                isinstance(robot_radius_m, bool)
-                or not isinstance(robot_radius_m, (int, float))
-                or not math.isfinite(float(robot_radius_m))
-                or float(robot_radius_m) <= 0.0
-            ):
-                raise RuntimeError(
-                    "required candidate route uncertainty robot radius is invalid"
-                )
-            route_uncertainty_context = loader(
-                CandidateRouteUncertaintyReadinessRequest(
-                    preflight_json=planning_frame_evidence_path,
-                    expected_start=current,
-                    planning_frame=planning_config.planning_frame,
-                    odom_frame=selection_planning_frame.odom_frame,
-                    robot_radius_m=float(robot_radius_m),
-                    sigma_multiplier=(
-                        planning_config.uncertainty_sigma_multiplier
-                    ),
-                )
-            )
         try:
-            selection = effects.select_initial_preapproach(
-                CameraCandidateSelectionRequest(
-                    config=planning_config,
-                    current_pose=current,
-                    unresolved=frozenset(eligible),
-                    support_class_by_uid=exact_two_support_by_uid,
-                    route_uncertainty_context=route_uncertainty_context,
-                    source_registry=source_registry,
-                    planning_frame=selection_planning_frame,
-                )
+            (
+                planning_config, current, selection, selection_planning_frame,
+            ) = _select_initial_candidate_with_localization_refresh(
+                config=config, effects=effects, source_registry=source_registry,
+                candidate_index=candidate_index, eligible=eligible,
+                exact_two_support_by_uid=exact_two_support_by_uid,
             )
         except (
             NoFeasibleCameraCandidateError,
             NoUncertaintyAdmittedCameraCandidateError,
         ) as exc:
+            disposition = (
+                "route_admission_exhausted"
+                if isinstance(exc, NoUncertaintyAdmittedCameraCandidateError)
+                else "no_feasible_route"
+            )
             for uid in eligible:
-                goal.mark_unavailable(uid, disposition="no_feasible_route", evidence=exc.to_evidence())
+                goal.mark_unavailable(uid, disposition=disposition, evidence=exc.to_evidence())
             goal_store.write(goal)
             effects.event_sink(
                 config.session_root / "candidate_selection.jsonl",
@@ -2312,26 +2404,6 @@ def execute_candidate_approach_phase(
                 candidate_index += 1
                 continue
             raise
-        if frame_projection_artifacts is not None:
-            selection = replace(
-                selection,
-                evidence={
-                    **dict(selection.evidence),
-                    "candidate_frame_projection_path": str(
-                        frame_projection_artifacts.evidence_path
-                    ),
-                    "candidate_frame_projection_sha256": (
-                        frame_projection_artifacts.evidence_sha256
-                    ),
-                    "source_candidate_snapshot_sha256": (
-                        candidate_snapshot_sha256(config.snapshot)
-                    ),
-                    "projected_candidate_snapshot_sha256": (
-                        frame_projection_artifacts.snapshot_sha256
-                    ),
-                    "motion_authorized": False,
-                },
-            )
         _validate_initial_selection(
             selection,
             unresolved=eligible,

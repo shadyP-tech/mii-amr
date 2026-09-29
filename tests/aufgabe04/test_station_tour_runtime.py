@@ -1,7 +1,7 @@
 """Standalone entrypoint boundaries: artifact preview, RUN and navigation only."""
 
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import io
 import json
 from pathlib import Path
@@ -19,6 +19,7 @@ class TourConfig:
     semantic_map_id: str = "arena"
     localization_branch_proof_id: str = "branch"
     mission_leg_motion_authorization_json: Path = Path("old-exploration-authorization")
+    plan: object = field(default_factory=lambda: SimpleNamespace(map_bundle_sha256="a"*64))
 
 
 class StationTourRuntimeTest(unittest.TestCase):
@@ -105,13 +106,18 @@ class StationTourRuntimeTest(unittest.TestCase):
             session = self.session()
             session.config = TourConfig()
             session.profile = SimpleNamespace(robot_id="robot", resolved_runtime=lambda: SimpleNamespace(
-                namespace="robot", cmd_vel_topic="/robot/cmd_vel"))
+                namespace="robot", cmd_vel_topic="/robot/cmd_vel", odom_frame="odom"))
             args = SimpleNamespace(server_base_url="http://fixture.invalid", server_robot_id="robot",
                                    http_timeout_sec=5., stations=3, server_plan_only=False)
             client = FakeClient([])
             effects = Mock()
-            def arrived(stored, config, received_effects, *, tour_session_id, visit_index, output_root):
+            maps = []
+            def arrived(stored, config, received_effects, *, tour_session_id, visit_index, output_root,
+                        obstacle_map, capture_scan):
                 self.assertIs(received_effects, effects)
+                maps.append(obstacle_map)
+                self.assertEqual(obstacle_map.tour_id, tour_session_id)
+                self.assertTrue(callable(capture_scan))
                 self.assertEqual(config.mission_leg_motion_authorization_json, root / "motion_authorization/tour.json")
                 qr_id = next(qr for qr, value in session.poses_by_qr.items() if value is stored)
                 self.assertEqual(output_root, root / "visits" / f"{visit_index:03d}")
@@ -121,12 +127,13 @@ class StationTourRuntimeTest(unittest.TestCase):
             with patch.object(runtime, "build_navigation_effects", return_value=effects), \
                  patch("builtins.input", return_value="RUN"), \
                  patch("scripts.aufgabe04.task_client.station_tour_client.StationTourClient", return_value=client), \
-                 patch("scripts.aufgabe04.real_robot.mission.stored_pose_navigation.execute_stored_pose_navigation",
+                 patch("scripts.aufgabe04.real_robot.mission.tour_obstacle_navigation.execute_tour_obstacle_navigation",
                        side_effect=arrived) as navigate, redirect_stdout(io.StringIO()):
                 result = runtime.execute_tour(session, args, root, "tour_test")
             self.assertTrue(result["all_saved_stands_visited"])
             self.assertTrue(result["server_mission_finished"])
             self.assertEqual(navigate.call_count, 8)
+            self.assertTrue(all(value is maps[0] for value in maps))
             self.assertEqual(len(client.reported), 5)
             authorization = load_mission_leg_motion_authorization(root / "motion_authorization/tour.json")
             self.assertEqual(authorization.session_id, "tour_test")
@@ -148,5 +155,6 @@ class StationTourRuntimeTest(unittest.TestCase):
                 mission_leg_index=8, target_id="candidate", permit_json_path=Path("permit"))
             self.assertEqual(effects.run_motion_leg(request), "outcome")
             self.assertIsNone(motion.call_args.kwargs["sensor_timing_readiness_phase"])
+            self.assertTrue(motion.call_args.kwargs["stored_pose_tour_obstacle_monitor"])
             self.assertEqual(motion.call_args.kwargs["mission_leg_permit_context"].session_id, "new_tour")
             capture.assert_called_once_with("runtime", Path("/tmp/tour"), evidence_path=Path("/tmp/tour/fresh.json"))

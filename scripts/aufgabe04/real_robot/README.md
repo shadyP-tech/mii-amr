@@ -30,8 +30,10 @@ existing navigation runner and its physical-run gates.
 For a separate server-driven tour after exploration, use
 `entrypoints/run_server_station_tour.py`. It loads the saved QR pose evidence,
 drives to Start, requests a random plan from `http://10.42.0.1:8000`, and follows
-the server targets without starting camera exploration. The default is an
-offline artifact preview. See the [standalone tour instructions](../../../docs/setups/aufgabe04_server_station_tour.md)
+the server targets without starting camera exploration. Temporary LiDAR
+occupancy, forward route monitoring and bounded stopped A* replanning support
+detours to the same saved target. The default is an offline artifact preview.
+See the [standalone tour instructions](../../../docs/setups/aufgabe04_server_station_tour.md)
 for execution flags, odometry continuity and output evidence.
 
 Exact-two camera exploration separates the inspection pool from the QR goal.

@@ -41,6 +41,9 @@ class FollowerConfig:
     max_odom_age_sec: float = 1.0
     max_tf_age_sec: float = 1.0
     max_future_timestamp_sec: float = 0.25
+    stored_pose_tour_obstacle_monitor: bool = False
+    stored_pose_tour_robot_radius_m: float = 0.0
+    stored_pose_tour_scan_frame: str = ""
     runtime_nomotion_update_service: str = "request_nomotion_update"
     runtime_nomotion_update_timeout_sec: float = 2.0
     amcl_edge_future_tolerance_sec: float = 1.1
@@ -100,6 +103,16 @@ class FollowerConfig:
     )
 
     def __post_init__(self) -> None:
+        if type(self.stored_pose_tour_obstacle_monitor) is not bool:
+            raise ValueError("stored_pose_tour_obstacle_monitor must be a bool")
+        if self.stored_pose_tour_obstacle_monitor and (
+            type(self.stored_pose_tour_robot_radius_m) not in (int, float)
+            or not math.isfinite(self.stored_pose_tour_robot_radius_m)
+            or self.stored_pose_tour_robot_radius_m <= 0
+            or not isinstance(self.stored_pose_tour_scan_frame, str)
+            or not self.stored_pose_tour_scan_frame.strip()
+        ):
+            raise ValueError("tour obstacle monitor requires robot radius and exact scan frame")
         if (type(self.initial_sensor_wait_sec) not in (int, float)
                 or not math.isfinite(self.initial_sensor_wait_sec)
                 or self.initial_sensor_wait_sec <= 0):

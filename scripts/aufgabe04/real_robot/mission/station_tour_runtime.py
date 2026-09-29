@@ -70,6 +70,7 @@ def build_navigation_effects(profile, output_root: Path):
             uncertainty_sigma_multiplier=request.uncertainty_sigma_multiplier,
             localization_branch_proof_id=request.localization_branch_proof_id,
             sensor_timing_readiness_phase=None,
+            stored_pose_tour_obstacle_monitor=True,
             mission_leg_permit_context=MissionLegPermitContext(
                 mission_authorization_json=request.mission_authorization_json,
                 session_id=request.session_id, semantic_map_id=request.semantic_map_id,
@@ -90,13 +91,16 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
         write_mission_leg_motion_authorization,
     )
     from scripts.aufgabe04.logistics.station_tour import run_station_tour
-    from scripts.aufgabe04.real_robot.mission.stored_pose_navigation import execute_stored_pose_navigation
+    from scripts.aufgabe04.real_robot.mission.tour_obstacle_navigation import execute_tour_obstacle_navigation
+    from scripts.aufgabe04.navigation.planning.temporary_obstacle_overlay import TemporaryObstacleMap
+    from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import capture_tour_scan
     from scripts.aufgabe04.task_client.station_tour_client import StationTourClient
 
     effects = build_navigation_effects(session.profile, output_root)
     effects.admit_planning_frame(output_root / "preflight/before_authorization.json")
     print("Unloaded stand tour: saved Start pose first, then the server's randomized targets.")
     print("Travel limits: 0.15 m/s and 0.60 rad/s; slower near corners and final poses.")
+    print("LiDAR obstacles enter a temporary map; blocked routes stop and replan at most twice per visit.")
     print("Server actions use timed waits only; this runner does not manipulate physical cargo.")
     print("Keep the arena clear, the operator beside the robot and the physical stop ready.")
     if input("Type RUN to authorize this server station tour: ").strip() != "RUN":
@@ -112,11 +116,16 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
         operator_confirmation="RUN",
     ))
     config = replace(session.config, mission_leg_motion_authorization_json=authorization_path)
+    obstacle_map = TemporaryObstacleMap(tour_id, runtime.odom_frame, config.plan.map_bundle_sha256)
+
+    def capture_scan(path):
+        return capture_tour_scan(session.profile, tour_id=tour_id, output_path=path)
 
     def navigate(qr_id, visit_index):
         print(f"Visit {visit_index}: driving to saved {qr_id} pose", flush=True)
-        return execute_stored_pose_navigation(
+        return execute_tour_obstacle_navigation(
             session.poses_by_qr[qr_id], config, effects,
+            obstacle_map=obstacle_map, capture_scan=capture_scan,
             tour_session_id=tour_id, visit_index=visit_index,
             output_root=output_root / "visits" / f"{visit_index:03d}",
         )
@@ -185,6 +194,10 @@ def main(argv=None) -> int:
             "unloaded_asserted": args.confirm_unloaded,
             "physical_cargo_actions": False,
             "cover_all_stands": not args.server_plan_only,
+            "temporary_obstacle_navigation": {
+                "enabled": True, "ttl_sec": 30, "max_replans_per_visit": 2,
+                "policy": "stop, capture stationary LiDAR, replan and certify the same stored target",
+            },
         }
         output_root.mkdir(parents=True, exist_ok=False)
         created_output = True

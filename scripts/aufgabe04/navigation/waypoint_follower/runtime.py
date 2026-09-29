@@ -133,6 +133,9 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.constants
 from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.candidate_centering import (
     CandidateCenteringRuntimeMixin,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.tour_obstacle_monitor import (
+    TourObstacleMonitorRuntimeMixin,
+)
 
 
 try:  # pragma: no cover - exercised on ROS hosts.
@@ -202,6 +205,7 @@ def _create_dedicated_tf_listener(runtime_config: ResolvedRuntimeConfig):
 
 
 class SimpleWaypointFollowerNode(
+    TourObstacleMonitorRuntimeMixin,
     CandidateCenteringRuntimeMixin,
     StartupActiveLocalizationRuntimeMixin,
     ControlLoopRuntimeMixin,

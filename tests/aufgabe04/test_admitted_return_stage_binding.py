@@ -19,7 +19,7 @@ from scripts.aufgabe04.navigation.execution.execution_route_certificate import (
     load_execution_route_certificate,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
-    MissionLegKind, TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    MissionLegKind, LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     write_mission_leg_motion_authorization, write_mission_leg_motion_permit,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import consume_mission_leg_motion_permit
@@ -53,7 +53,7 @@ class AdmittedReturnStageBindingTest(unittest.TestCase):
             )
             self.assertFalse(result["is_final_stage"])
             master = replace(helper.authorization, session_id="fresh-tour", semantic_map_id="arena",
-                allowed_leg_kinds=(MissionLegKind.STORED_POSE_TOUR,), scope_text=TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE)
+                allowed_leg_kinds=(MissionLegKind.STORED_POSE_TOUR,), scope_text=LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE)
             master_path = root / "tour-master.json"
             digest = write_mission_leg_motion_authorization(master_path, master)
             permit = replace(helper.permit, session_id=master.session_id, semantic_map_id="arena",

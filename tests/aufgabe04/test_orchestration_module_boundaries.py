@@ -196,6 +196,8 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "sensor_timing_runtime.py",
                 "active_localization.py",
                 "startup_reseal.py",
+                "tour_scan_capture.py",
+                "tour_scan_contract.py",
             },
             "mission": {
                 "checkpoint_resume.py",
@@ -208,6 +210,8 @@ class OrchestrationModuleBoundaryTest(unittest.TestCase):
                 "stored_pose_navigation.py",
                 "stored_pose_session.py",
                 "station_tour_runtime.py",
+                "tour_obstacle_navigation.py",
+                "tour_navigation_leg.py",
                 "start_return_readiness.py",
                 "session_manifest.py",
             },

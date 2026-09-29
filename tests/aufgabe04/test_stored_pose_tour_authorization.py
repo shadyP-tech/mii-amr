@@ -10,7 +10,7 @@ from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import consume_mission_leg_motion_permit
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
-    MISSION_LEG_MOTION_AUTHORIZATION_SCOPE, TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    MISSION_LEG_MOTION_AUTHORIZATION_SCOPE, LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MissionLegKind, file_sha256, write_mission_leg_motion_authorization,
     write_mission_leg_motion_permit,
     validate_stored_pose_tour_target_evidence,
@@ -41,7 +41,7 @@ class StoredPoseTourAuthorizationTest(unittest.TestCase):
         self.master = replace(
             self.fixture.authorization, session_id="fresh-tour",
             allowed_leg_kinds=(MissionLegKind.STORED_POSE_TOUR,),
-            scope_text=TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            scope_text=LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         )
         self.master_path = self.root / "tour-master.json"
         self.master_hash = write_mission_leg_motion_authorization(self.master_path, self.master)

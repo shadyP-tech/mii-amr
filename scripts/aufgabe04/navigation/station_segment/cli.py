@@ -286,6 +286,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum acceleration for ordinary shaped angular commands.",
     )
     parser.add_argument("--min-obstacle-distance-m", type=float, default=0.20)
+    parser.add_argument("--stored-pose-tour-obstacle-monitor", action="store_true",
+        help="Require an authorized tour occupancy revision and stop on newly blocked route corridor.")
+    parser.add_argument("--stored-pose-tour-scan-frame", default="",
+        help="Exact configured LaserScan frame for the authorized tour obstacle monitor.")
     parser.add_argument(
         "--omnidirectional-hard-stop-distance-m",
         type=float,

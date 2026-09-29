@@ -74,6 +74,19 @@ class MotionCycleGuardRuntimeMixin:
         """Admit one step to command preparation or apply its zero outcome."""
 
         evaluated_at = monotonic_fn()
+        if self.follower_config.stored_pose_tour_obstacle_monitor:
+            tour_decision = self._tour_obstacle_monitor_decision(pose, step)
+            if tour_decision.action != "clear":
+                self.latest_stop_details = dict(tour_decision.details or {})
+                self.publish_repeated_zero()
+                if tour_decision.action == "hold":
+                    self._hold_zero_control_period(loop_period_sec)
+                    return MotionCycleGuardDecision(MotionCycleGuardAction.RETRY)
+                return MotionCycleGuardDecision(
+                    MotionCycleGuardAction.STOP,
+                    stop_reason=str(self.latest_stop_details["reason"]),
+                    stop_details=self.latest_stop_details,
+                )
         motion_admission = self._motion_command_admission_decision(step)
         command_admission = motion_admission.command_admission
         front_clearance_scale = motion_admission.front_clearance_scale

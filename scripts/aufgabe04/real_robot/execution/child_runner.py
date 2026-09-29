@@ -107,6 +107,7 @@ def build_child_runner_command(
     coverage_plan: Path | None = None,
     candidate_snapshot: Path | None = None,
     coverage_transient_replan: dict[str, object] | None = None,
+    stored_pose_tour_obstacle_monitor: bool = False,
     dry_run: bool,
     uncertainty_map_yaml: Path | None = None,
     uncertainty_sigma_multiplier: float = (
@@ -158,6 +159,8 @@ def build_child_runner_command(
 
     run_phase = "dry" if dry_run else "execute"
     travel_kind = mission_leg_evidence_kind if dry_run else mission_leg_kind
+    if stored_pose_tour_obstacle_monitor and travel_kind != MissionLegKind.STORED_POSE_TOUR:
+        raise ValueError("tour obstacle monitor requires a stored-pose tour leg")
     fast_start_travel = travel_kind in {MissionLegKind.RETURN_TO_START, MissionLegKind.STORED_POSE_TOUR}
     if fast_start_travel and getattr(profile, "use_sim_time", False):
         raise ValueError("fast return-to-Start travel requires a physical profile")
@@ -229,6 +232,9 @@ def build_child_runner_command(
     ]
     if fast_start_travel:
         command.extend(return_to_start_speed_policy_arguments(travel_kind))
+    if stored_pose_tour_obstacle_monitor:
+        command.extend(["--stored-pose-tour-obstacle-monitor",
+                        "--stored-pose-tour-scan-frame", profile.scan_frame])
     if odom_execution_requested:
         if any(value is None or value == "" for value in odom_fields):
             raise ValueError(

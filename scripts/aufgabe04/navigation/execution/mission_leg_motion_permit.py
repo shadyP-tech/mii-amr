@@ -89,13 +89,27 @@ MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "passed dry run and single-use permit. Checkpoints cannot be chained; "
     "failure after checkpoint dispatch stops the attempt."
 )
-TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "Authorize only this newly confirmed stored-pose tour session. Each visit "
     "must name its exact stored QR identity, candidate, source pose and source "
     "artifacts, with at most four separately sealed stages per visit. Every "
     "stage requires fresh stopped localization, an exact collision-checked "
     "route, a passed dry run and its own single-use permit. This scope grants "
     "no exploration, Start-return reuse, startup reseal or recovery motion."
+)
+TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    "Authorize only this newly confirmed stored-pose tour session. Each visit "
+    "must retain its exact stored QR identity, candidate, source pose and source "
+    "artifacts. At most four localization stages and two temporary-obstacle "
+    "detour replans, totaling at most six separately sealed physical executions, "
+    "are authorized per visit. A detour requires a genuine obstacle safety stop, "
+    "three fresh stationary scans after that child stopped, a frozen temporary "
+    "obstacle overlay, fresh stopped localization, a newly collision-checked "
+    "route, a passed dry run and a new single-use permit. Completed intermediate "
+    "stages require verified arrival before continuing; spent permits remain "
+    "spent and genuine final arrival ends the visit. Every execution uses the "
+    "stored-pose tour obstacle monitor. This scope grants no exploration, "
+    "Start-return reuse, startup reseal, localization recovery or other recovery motion."
 )
 
 
@@ -736,6 +750,7 @@ def _validate_authorization(
         _require_routine_leg_kind(kind, "allowed_leg_kinds")
     if authorization.scope_text not in (
         TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -744,7 +759,7 @@ def _validate_authorization(
         LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     ):
         raise ValueError("mission leg motion authorization scope_text mismatch")
-    is_tour_scope = authorization.scope_text == TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    is_tour_scope = authorization.scope_text in {TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE, LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE}
     if is_tour_scope != (authorization.allowed_leg_kinds == (MissionLegKind.STORED_POSE_TOUR,)):
         raise ValueError("stored_pose_tour requires a separate tour-only authorization scope")
     if MissionLegKind.STORED_POSE_TOUR in authorization.allowed_leg_kinds and not is_tour_scope:
@@ -919,9 +934,14 @@ def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bo
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         if is_tour:
             validate_stored_pose_tour_target_evidence(evidence)
+            from .tour_replan_binding import validate_tour_navigation_binding
+            authorization = _validate_master_reference(permit, Path(permit.master_authorization_path))
+            visit_index, stage_index = validate_tour_navigation_binding(
+                permit, metadata, evidence, scope_text=authorization.scope_text,
+            )
             for name, value in (
                 ("tour_id", permit.session_id),
-                ("visit_index", permit.mission_leg_index // MAX_RETURN_TO_START_LEGS),
+                ("visit_index", visit_index),
                 ("qr_id", evidence["qr_id"]),
             ):
                 if (
@@ -1207,6 +1227,7 @@ __all__ = [
     "MISSION_LEG_MOTION_AUTHORIZATION_SCHEMA_VERSION",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
+    "LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "MISSION_LEG_MOTION_PERMIT_HASH_FIELD",
     "MISSION_LEG_MOTION_PERMIT_SCHEMA_VERSION",
     "MISSION_LEG_RUN_CONFIRMATION",
