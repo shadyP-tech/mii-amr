@@ -6,6 +6,7 @@ import copy
 import json
 import math
 import unittest
+from unittest.mock import Mock
 
 from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
 from scripts.aufgabe04.perception.stand_axis_lidar_roi import PlainLaserScan
@@ -84,6 +85,12 @@ class TargetReconciliationTest(unittest.TestCase):
         proof = self.proof()
         result = self.bind(proof,now_sec=self.rows[-1]['now_sec']+.15)
         self.assertTrue(result.accepted,result.reason)
+
+    def test_reconciled_qr_does_not_use_ordinary_candidate_witness_history(self):
+        resolver = Mock(side_effect=AssertionError('reconciled geometry has its own proof'))
+        result = self.bind(self.proof(), resolve_lidar_association=resolver)
+        self.assertTrue(result.accepted, result.reason)
+        resolver.assert_not_called()
 
     def test_reused_tuple_motion_expiry_and_changed_context_cannot_reconcile(self):
         tracker=StoppedTargetReconciliation()

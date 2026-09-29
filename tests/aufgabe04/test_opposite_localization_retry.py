@@ -1,4 +1,5 @@
-"""Bounded no-motion recovery for the 20260928 opposite-face failure."""
+"""Bounded no-motion recovery for recorded opposite-face failures."""
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +93,152 @@ class OppositeLocalizationRetryTest(unittest.TestCase):
         for kwargs in [dict(motion_published=True), dict(report_mission_leg_permit=True)]:
             with self.subTest(kwargs=kwargs):
                 self.exercise_coordinator(rejection_kwargs=kwargs)
+
+    def test_bounded_endpoint_rejection_preserves_mixed_failure_recovery(self):
+        with self.mixed_failure_case() as case:
+            with self.assertRaises(CandidateInspectionRouteUnavailableError) as caught:
+                case.invoke()
+            self.assertEqual(case.epochs, [case.root/'opposite',
+                                          case.root/'opposite/localization_001'])
+            self.assertEqual(caught.exception.reason_code, OPPOSITE_UNCERTAINTY_EXHAUSTED)
+            failures = caught.exception.evidence['planning_epoch_failures']
+            self.assertEqual(len(failures), 2)
+            for failure in failures:
+                evidence = failure['evidence']
+                self.assertEqual(len(evidence['uncertainty_rejections']), 2)
+                self.assertEqual(len(evidence['static_feasibility_rejections']), 2)
+                self.assertTrue(evidence['no_motion_uncertainty_rejections_verified'])
+                self.assertFalse(evidence['motion_published'])
+                self.assertFalse(evidence['motion_permit_issued'])
+            self.assertEqual(len(case.children), 4)
+            self.assertEqual(len({r.run_id for r in case.children}), 4)
+            self.assertEqual(len({r.permit_json_path for r in case.children}), 4)
+            self.assertEqual(len({p.output_dir for p in case.plans}), 8)
+            self.assertTrue(all(p.axis_observation_path == case.source_receipt for p in case.plans))
+            self.assertTrue(all(p.approach_normal_rad == 1.2 for p in case.plans))
+            self.assertEqual(sum(e['event'] == 'opposite_localization_refresh_requested'
+                                 for e in case.events), 1)
+            case.checkpoint.assert_called_once()
+            checkpoint = case.checkpoint.call_args.kwargs
+            self.assertEqual(checkpoint['candidate_root'], case.root/'opposite/localization_001')
+            self.assertEqual(len(checkpoint['rejected_routes']), 2)
+            self.assertTrue(all('_localization_001_' in route[2]
+                                for route in checkpoint['rejected_routes']))
+            case.arrival.assert_not_called()
+
+    def test_mixed_failure_can_complete_after_one_fresh_epoch(self):
+        with self.mixed_failure_case(fresh_epoch_success=True) as case:
+            self.assertIs(case.invoke(), case.arrived)
+            self.assertEqual(len(case.epochs), 2)
+            self.assertEqual(len(case.children), 4)
+            self.assertEqual(sum(e['event'] == 'opposite_localization_refresh_requested'
+                                 for e in case.events), 1)
+            case.checkpoint.assert_not_called()
+            case.arrival.assert_called_once()
+            self.assertEqual(case.arrival.call_args.kwargs['candidate_root'],
+                             case.root/'opposite/localization_001')
+
+    def test_all_bounded_endpoint_rejections_do_not_refresh(self):
+        with self.mixed_failure_case(all_endpoints_rejected=True) as case:
+            with self.assertRaises(CandidateInspectionRouteUnavailableError) as caught:
+                case.invoke()
+            self.assertEqual(caught.exception.reason_code, 'opposite_static_routes_exhausted')
+            self.assertEqual(len(case.epochs), 1)
+            self.assertEqual(len(case.plans), 4)
+            self.assertEqual(case.children, [])
+            self.assertFalse(caught.exception.evidence['no_motion_uncertainty_rejections_verified'])
+            self.assertEqual(caught.exception.evidence['uncertainty_rejections'], [])
+            self.assertEqual(len(caught.exception.evidence['static_feasibility_rejections']), 4)
+            case.checkpoint.assert_not_called()
+            case.arrival.assert_not_called()
+
+    def test_malformed_endpoint_evidence_after_uncertainty_remains_terminal(self):
+        malformed = ValueError('bounded orientation has unexpected fields')
+        with self.mixed_failure_case(endpoint_error=malformed) as case:
+            with self.assertRaises(ValueError) as caught:
+                case.invoke()
+            self.assertIs(caught.exception, malformed)
+            self.assertEqual(len(case.epochs), 1)
+            self.assertEqual(len(case.children), 2)
+            self.assertEqual(len(case.plans), 3)
+            self.assertFalse(any(e['event'] == 'opposite_localization_refresh_requested'
+                                 for e in case.events))
+            case.checkpoint.assert_not_called()
+            case.arrival.assert_not_called()
+
+    def test_source_orientation_failure_remains_terminal_before_planning(self):
+        with self.mixed_failure_case(source_orientation_rejected=True) as case:
+            with self.assertRaises(CandidateInspectionRouteUnavailableError) as caught:
+                case.invoke()
+            self.assertEqual(caught.exception.reason_code, 'route_unavailable')
+            self.assertEqual(case.epochs, [])
+            self.assertEqual(case.plans, [])
+            self.assertEqual(case.children, [])
+            self.assertEqual([e['event'] for e in case.events],
+                             ['opposite_localization_recovery_exhausted'])
+            self.assertEqual(case.events[0]['planning_epoch'], 0)
+            case.checkpoint.assert_not_called()
+            case.arrival.assert_not_called()
+
+    @contextmanager
+    def mixed_failure_case(self, *, endpoint_error=None, all_endpoints_rejected=False,
+                           source_orientation_rejected=False, fresh_epoch_success=False):
+        """Replay the mixed chain through production retry/motion coordinators."""
+        factory = fixtures.AutonomousCandidateApproachTest()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = factory._candidate('candidate_1', .2, 0.)
+            config = replace(factory._config(root, (candidate,)), approach_offset_m=.5,
+                candidate_transit_radius_m=.34,
+                physical_clearance={"minimum_active_standoff_m":.33,
+                    "minimum_collision_standoff_m":.28,
+                    "minimum_candidate_transit_radius_m":.34,"minimum_static_inflation_m":.25})
+            write_free_map(root, resolution=.05)
+            frame = approach._CandidateObservationFrame(config=config, candidate=candidate,
+                planning_frame=None, decision_binding=None)
+            source_receipt = root/'original_backside.json'
+            observation = approach.CandidateObservation(None, None, source_receipt)
+            plans, children, epochs, events = [], [], [], []
+            if endpoint_error is None:
+                endpoint_error = approach.BoundedOrientationViewUnavailableError(
+                    'bounded orientation endpoint exceeds QR viewing obliquity for plausible angles')
+            def admit(**kw):
+                epochs.append(kw['candidate_root'])
+                return config, candidate, Pose2D(0,0,0), None, None
+            def plan(request):
+                plans.append(request)
+                if all_endpoints_rejected or request.approach_offset_m < .45:
+                    raise endpoint_error
+                return {'route_csv': str(request.output_dir/'route.csv')}
+            def run(request):
+                children.append(request)
+                if fresh_epoch_success and len(epochs) == 2 and plans[-1].approach_offset_m == .45:
+                    return factory._completed(request)
+                return factory._route_uncertainty_rejection(request)
+            def checkpoint(**kw):
+                self.assertEqual(len(epochs), 2)
+                return None
+            effects = approach.CandidateApproachEffects(read_current_pose=lambda:Pose2D(0,0,0),
+                run_motion_leg=run, capture_observation=Mock(), plan_preapproach=plan,
+                admit_planning_frame=Mock(), event_sink=lambda _, e:events.append(e))
+            arrived = object()
+            with patch.object(approach, '_admit_opposite_face_planning_geometry', side_effect=admit), \
+                 patch.object(approach, 'opposite_face_normal', return_value=1.2,
+                              side_effect=endpoint_error if source_orientation_rejected else None), \
+                 patch.object(approach, 'load_backside_axis_planning_observation',
+                              return_value=SimpleNamespace(validated_target_center={
+                                  'x_m':.2, 'y_m':0., 'uncertainty_m':.024178})), \
+                 patch.object(approach, 'try_opposite_checkpoint', side_effect=checkpoint) as checkpoint_mock, \
+                 patch.object(approach, '_admit_camera_arrival_geometry', return_value=arrived) as arrival:
+                def invoke():
+                    return approach._move_certified_opposite_face(
+                        observation_frame=frame, observation=observation, source_config=config,
+                        effects=effects, source_registry=None, candidate_root=root/'opposite',
+                        candidate_run_id='mission_inspect', candidate_index=1)
+                yield SimpleNamespace(root=root, plans=plans, children=children, epochs=epochs,
+                    events=events, source_receipt=source_receipt, invoke=invoke, arrived=arrived,
+                    checkpoint=checkpoint_mock, arrival=arrival)
+            effects.capture_observation.assert_not_called()
 
     def exercise_coordinator(self, *, center_uncertainty=0.0, rejection_kwargs=None):
         factory = fixtures.AutonomousCandidateApproachTest()

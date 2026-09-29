@@ -1919,10 +1919,12 @@ def _move_certified_opposite_face_epoch(
                     raise CandidateInspectionRouteUnavailableError(
                         "quantized opposite-face goal repeats an observed view"
                     )
-        except BoundedOrientationViewUnavailableError as exc:
-            raise CandidateInspectionRouteUnavailableError(str(exc)) from exc
         except ValueError as exc:
-            if not is_approach_feasibility_failure(exc):
+            # Valid orientation evidence can rule out this endpoint without
+            # ruling out other standoffs or a fresh localization epoch. Keep
+            # prior verified uncertainty failures for the aggregate recovery.
+            if not (isinstance(exc, BoundedOrientationViewUnavailableError)
+                    or is_approach_feasibility_failure(exc)):
                 raise
             feasibility_failures.append(f"{inspection_offset_m:.3f} m: {exc}")
             effects.event_sink(

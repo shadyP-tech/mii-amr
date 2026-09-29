@@ -1,6 +1,7 @@
 """A decoded neighbor inside a search crop cannot lend target identity."""
 
 from dataclasses import replace
+import json
 import math
 import unittest
 
@@ -11,6 +12,10 @@ from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, ImageRoi
 from scripts.aufgabe04.real_robot.observer.evidence import EvidencePose, PassiveObserverEvidence
 from scripts.aufgabe04.real_robot.observer.qr_target_binding import bind_qr_observations_to_target
+from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.real_robot.observer.scan_target_persistence import (
+    ScanPersistenceContext, StoppedScanTargetPersistence, registered_target_metadata_is_unique,
+)
 
 
 class QrTargetBindingTest(unittest.TestCase):
@@ -100,6 +105,59 @@ class QrTargetBindingTest(unittest.TestCase):
         binding = self.bind((self.observation(14),), scan=self.scan(14), registered=True)
         self.assertFalse(binding.accepted)
         self.assertEqual(binding.reason, "camera_map_bearing_delta_exceeds_limit")
+
+    def witnessed_resolver(self):
+        state = StoppedScanTargetPersistence()
+        context = ScanPersistenceContext('candidate1', '0', Pose2D(0, 0, 0),
+            Pose2D(0, 0, 0), 10., .76, 0., .1, .02, .04, Pose2D(0, 0, 0))
+        for stamp in (9.4, 9.6, 9.8):
+            state.ingest_scan(self.scan(ranges=(.7,) * 5, stamp=stamp),
+                context=replace(context, image_stamp_sec=stamp), now_sec=stamp + .05,
+                max_scan_age_sec=.5)
+        return lambda a, s: state.resolve(a, s, context=context, now_sec=10., max_scan_age_sec=.5)
+
+    def test_registered_qr_uses_witnessed_internal_fragments_without_parallax(self):
+        scan = self.scan(ranges=(.7, .7, math.nan, .7, .7))
+        self.assertFalse(self.bind((self.observation(),), scan=scan, registered=True).accepted)
+        binding = self.bind((self.observation(),), scan=scan, registered=True,
+                            resolve_lidar_association=self.witnessed_resolver())
+        self.assertTrue(binding.accepted, binding.reason)
+        self.assertEqual(binding.qr_texts_for_evidence, ('Start',))
+        self.assertTrue(registered_target_metadata_is_unique(binding.association))
+        cluster = binding.association['search_association']
+        self.assertEqual(cluster['eligible_cluster_count'], 2)
+        self.assertEqual(cluster['selected_cluster_source_indices'], (0, 1, 3, 4))
+        from scripts.aufgabe04.artifacts.qr_verified_observation_pose import (
+            build_qr_verified_observation_pose, validate_qr_verified_observation_pose, SOURCE_GATES,
+        )
+        receipt = build_qr_verified_observation_pose(candidate_uid='candidate1', stream_id='test',
+            qr_id='Start', planning_frame='map', stand_center=dict(x_m=.76, y_m=0.),
+            robot_pose=dict(x_m=0., y_m=0., yaw_rad=0.), sensor_stamp_sec=10., scan_stamp_sec=10.,
+            checked_at_sec=10., robot_profile_sha256='a'*64, calibration_profile_sha256='b'*64,
+            stand_model_profile_sha256='c'*64, target_key='candidate1', motion_epoch=0,
+            camera_signature=(400., 400., 400., 300.),
+            qr_corners_px=tuple((u+self.roi.x0, v+self.roi.y0) for u,v in self.observation().corners),
+            image_shape=(600, 800), qr_binding=binding.metadata(), source_gates={k:True for k in SOURCE_GATES},
+            localization_provenance=dict(map_frame='map', base_frame='base_footprint',
+                scan_frame='base_scan', camera_frame='camera_optical',
+                exact_image_transform_stamp_sec=10., exact_scan_transform_stamp_sec=10.))
+        persisted = validate_qr_verified_observation_pose(json.loads(json.dumps(receipt, allow_nan=False)))
+        self.assertTrue(persisted['completion_authorized'])
+        self.assertFalse(persisted['facing_ready'])
+        self.assertFalse(persisted['motion_authorized'])
+
+    def test_qr_witnesses_do_not_override_a_finite_competitor_or_independent_envelope(self):
+        for intervening in (.9, .55):
+            with self.subTest(intervening=intervening):
+                binding = self.bind((self.observation(),), registered=True,
+                    scan=self.scan(ranges=(.7, .7, intervening, .7, .7)),
+                    resolve_lidar_association=self.witnessed_resolver())
+                self.assertFalse(binding.accepted)
+        binding = self.bind((self.observation(),), allow_independent_registration=True,
+            scan=self.scan(ranges=(.7, .7, math.nan, .7, .7)),
+            resolve_lidar_association=self.witnessed_resolver())
+        self.assertFalse(binding.accepted)
+        self.assertEqual(binding.reason, 'independent_qr_registration_envelope_not_unique')
 
     def test_range_staleness_and_unique_cluster_gates_remain_required(self):
         for registered in (False, True):

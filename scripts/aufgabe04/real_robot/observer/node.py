@@ -570,9 +570,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if len(self._pending_scan_witnesses) + len(batch.scans) > 20 or (
                 batch.counts.get("ingress_overwritten_scans", 0)):
             # Missing intervening scans cannot preserve consecutive witnesses.
-            persistence = getattr(self, "_scan_target_persistence", None)
-            if persistence is not None:
-                persistence.reset()
+            self._reset_scan_witnesses()
             self._camera_count("scan_witness_ingress_gap")
         self._pending_scan_witnesses.extend(batch.scans)
         for name, count in batch.counts.items():
@@ -588,12 +586,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
 
     def _reset_scan_witnesses(self):
         self._pending_scan_witnesses = deque(maxlen=20)
-        persistence = getattr(self, "_scan_target_persistence", None)
-        if persistence is not None:
-            persistence.reset()
-        registration = getattr(self, "_registration_persistence", None)
-        if registration is not None:
-            registration.reset()
+        for name in ("_scan_target_persistence", "_qr_scan_target_persistence",
+                     "_registration_persistence"):
+            persistence = getattr(self, name, None)
+            if persistence is not None:
+                persistence.reset()
 
     def _lookup_scan_witness(self, target, source, stamp=None):
         # Independent exact-time witness reads must not replace the selected
@@ -615,10 +612,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             return
         if getattr(self, "_scan_target_persistence", None) is None:
             self._scan_target_persistence = StoppedScanTargetPersistence()
+        if getattr(self, "_qr_scan_target_persistence", None) is None:
+            self._qr_scan_target_persistence = StoppedScanTargetPersistence()
         if getattr(self, "_registration_persistence", None) is None:
             self._registration_persistence = StoppedScanTargetPersistence()
         valid = collect_pending_scan_witnesses(
-            pending, ScanWitnessFanout(self._scan_target_persistence, self._registration_persistence),
+            pending, ScanWitnessFanout(self._scan_target_persistence,
+                self._qr_scan_target_persistence, self._registration_persistence),
             now_sec=lambda: self.node.get_clock().now().nanoseconds / 1e9,
             lookup=self._lookup_scan_witness, args=self.args, profile=self.profile,
             calibration=self.calibration, target_key=self._target_evidence_key(),
@@ -830,8 +830,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._pending_candidate_centering = None
         self._candidate_centering_ready = None
         self._productive_view_hold = None
-        self._scan_target_persistence = None
         self._reset_scan_witnesses()
+        self._scan_target_persistence = None
+        self._qr_scan_target_persistence = None
         self._reset_candidate_search("observation_evidence_reset")
         self._camera_framing = None
         self._front_view_recovery = None
@@ -1531,6 +1532,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         lower_surface_bound, upper_surface_bound = scan_target.accepted_range_m
         if getattr(self, "_scan_target_persistence", None) is None:
             self._scan_target_persistence = StoppedScanTargetPersistence()
+        if getattr(self, "_qr_scan_target_persistence", None) is None:
+            self._qr_scan_target_persistence = StoppedScanTargetPersistence()
 
         # These transforms and this observation epoch are immutable for this
         # image. Prepare them once; each proposal still supplies its own head
@@ -1564,6 +1567,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             resolver = (self._scan_target_persistence.preview if preview
                         else self._scan_target_persistence.resolve)
             return resolver(
+                association, current_scan, context=scan_persistence_context,
+                now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+                max_scan_age_sec=self.args.max_sensor_age_sec)
+
+        def resolve_qr_lidar_association(association, current_scan):
+            # The selected symbol owns its ray history. A preceding head fit
+            # must not consume raw witnesses or clear this independent proof.
+            if scan_persistence_context is None:
+                self._qr_scan_target_persistence.reset()
+                return association
+            return self._qr_scan_target_persistence.resolve(
                 association, current_scan, context=scan_persistence_context,
                 now_sec=self.node.get_clock().now().nanoseconds / 1e9,
                 max_scan_age_sec=self.args.max_sensor_age_sec)
@@ -2262,7 +2276,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
             target_reconciliation=target_reconciliation,
             fragmentation=registration_fragmentation,
-            resolve_lidar_association=lambda a,s: resolve_lidar_association(a,s,preview=True),
+            resolve_lidar_association=resolve_qr_lidar_association,
             candidate_context=(None if getattr(self.args,"candidate_crop_snapshot",None) is None else
                 dict(snapshot_path=str(self.args.candidate_crop_snapshot),candidate_uid=self.args.stand_id,
                     scan_from_map=dict(parent_frame=self.profile.scan_frame,child_frame=self.profile.map_frame,
@@ -2270,6 +2284,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             allow_independent_registration=(viewer_geometry and
                 getattr(self.args, "qr_observation_pose_json", None) is not None),
         )
+        model_metadata["qr_scan_target_persistence"] = dict(
+            self._qr_scan_target_persistence.last_metadata)
         if qr_texts:
             previous = getattr(self,'_qr_binding_diagnostic',{})
             self._qr_binding_diagnostic = dict(decoded_frame_count=previous.get('decoded_frame_count',0)+1,
@@ -3323,6 +3339,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "camera_pipeline_counts": dict(getattr(self, "_camera_pipeline_counters", {})),
             "scan_witness_diagnostics": (None if getattr(self, "_scan_target_persistence", None) is None
                 else self._scan_target_persistence.diagnostics.snapshot()),
+            "qr_scan_witness_diagnostics": (None if getattr(self, "_qr_scan_target_persistence", None) is None
+                else self._qr_scan_target_persistence.diagnostics.snapshot()),
             "camera_framing": getattr(self, "_camera_framing", None),
             "camera_centering": candidate_centering_status(self),
             "inspection_acquisition_opportunity": (

@@ -155,6 +155,12 @@ def bind_qr_observations_to_target(
         if depth_envelope is not None:
             association = bind_ray_to_envelope(association, scan, depth_envelope,
                 now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
+        if (target_reconciliation is None and resolve_lidar_association is not None
+                and association.rejection_reason == 'ambiguous_registered_camera_clusters'):
+            # A decoded symbol owns its own ray even when no parallax/depth
+            # fallback was necessary. Resolve only raw fragmentation here;
+            # reconciled positions and witnessed subsets have separate proofs.
+            association = resolve_lidar_association(association, scan)
         cluster = association.search_association
     else:
         association = associate_candidate_lidar_target(scan, **common)

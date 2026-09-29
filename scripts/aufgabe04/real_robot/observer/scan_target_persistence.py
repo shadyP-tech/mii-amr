@@ -629,14 +629,13 @@ class StoppedScanTargetPersistence:
                     self.last_metadata = dict(accepted=False, reason=str(exc),
                         witness_scan_count=len(proof["witnesses"]),
                         witness_stamps_sec=[old["scan"]["scan_stamp_sec"] for old in proof["witnesses"]])
-                    # Compatible endpoint fragments may wait for three real
+                    # Compatible bounded fragments may wait for three real
                     # witnesses. They never become witnesses themselves. Any
                     # geometric, context, timing or continuity contradiction
-                    # still consumes the history, as for internal gaps.
+                    # still consumes the history. An intermittent internal
+                    # dropout must not erase the witnesses it needs to recover.
                     try:
-                        if not seam:
-                            raise ValueError("not endpoint fragments")
-                        _resolved(entry, proof["witnesses"], kind=ENDPOINT_WITNESS_KIND,
+                        _resolved(entry, proof["witnesses"], kind=proof["kind"],
                                   allow_partial=True)
                     except (TypeError, ValueError, ArithmeticError, KeyError) as partial_exc:
                         self.last_metadata["history_reset_reason"] = str(partial_exc)

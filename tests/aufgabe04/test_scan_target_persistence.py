@@ -100,6 +100,49 @@ class ScanTargetPersistenceTest(unittest.TestCase):
             self.observe(10.)
         self.assertFalse(self.observe(10.2, ranges=self.fragmented())[0].associated)
 
+    def test_internal_dropouts_preserve_partial_history_without_becoming_witnesses(self):
+        for scan_only in (False, True):
+            with self.subTest(scan_only=scan_only):
+                self.state.reset()
+                for index, stamp in enumerate((10., 10.2, 10.4)):
+                    if scan_only:
+                        self.assertTrue(self.ingest(stamp))
+                        self.assertTrue(self.ingest(stamp + .05, ranges=self.fragmented()))
+                    else:
+                        self.observe(stamp)
+                    result = self.observe(stamp + .1, ranges=self.fragmented())[0]
+                    self.assertEqual(result.associated, index == 2, self.state.last_metadata)
+                    self.assertEqual(len(self.state._history), index + 1)
+                proof = json.loads(json.dumps(result.witnessed_fragmentation, allow_nan=False))
+                self.assertEqual([w['scan']['scan_stamp_sec'] for w in proof['witnesses']],
+                                 [10., 10.2, 10.4])
+                self.assertTrue(registered_target_is_unique(validated_witnessed_fragmentation(proof)))
+                self.assertEqual(result.search_association.selected_cluster_source_indices, (3, 4, 6))
+                self.assertEqual(result.search_association.eligible_cluster_count, 2)
+                # Current fragment observations cannot renew old real witnesses.
+                for stamp in (10.9, 11.3):
+                    self.assertTrue(self.observe(stamp, ranges=self.fragmented())[0].associated)
+                self.assertFalse(self.observe(11.5, ranges=self.fragmented())[0].associated)
+
+    def test_internal_partial_history_still_clears_on_a_geometric_contradiction(self):
+        for value in (.9, .64):
+            with self.subTest(intervening_return=value):
+                self.state.reset()
+                self.observe(10.)
+                self.assertFalse(self.observe(10.1, ranges=self.fragmented())[0].associated)
+                ranges = list(self.fragmented())
+                ranges[4], ranges[5] = .59, value
+                self.assertFalse(self.observe(10.2, ranges=tuple(ranges))[0].associated)
+                self.assertEqual(self.state._history, [])
+                self.observe(10.3)
+                self.observe(10.4)
+                self.assertFalse(self.observe(10.5, ranges=self.fragmented())[0].associated)
+
+    def test_partial_internal_history_requires_real_support_on_both_sides(self):
+        self.observe(10., ranges=(math.inf,) * 3 + (.6, .601) + (math.inf,) * 4)
+        self.assertFalse(self.observe(10.1, ranges=self.fragmented())[0].associated)
+        self.assertEqual(self.state._history, [])
+
     def test_scan_only_witnesses_support_first_head_after_camera_misses(self):
         for stamp in (10., 10.2, 10.4):
             self.assertTrue(self.ingest(stamp))
