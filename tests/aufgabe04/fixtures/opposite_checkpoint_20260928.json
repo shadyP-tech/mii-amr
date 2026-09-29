@@ -1,0 +1,398 @@
+{
+  "source_run": "stand_explore_exact2_camera_all5_20260928T150641Z",
+  "scope": "derived offline budget inputs; not motion evidence",
+  "arena_bounds": {
+    "center_x_m": 0.0,
+    "center_y_m": 0.0,
+    "length_m": 3.9,
+    "margin_m": 0.0,
+    "width_m": 1.898,
+    "yaw_deg": 0.0
+  },
+  "routes": [
+    {
+      "attempt": "inspection_001_localization_001_opposite_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.618142518691915,
+          "y_m": -0.35194048678902606,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -0.9449999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.1949999999999998,
+          "y_m": -0.014999999999999902,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.4949999999999997,
+          "y_m": -0.1649999999999998,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5949999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": -0.04573955518260878
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.0030873223184789073,
+        "xy_m2": 0.0,
+        "yy_m2": 0.0030873223184789073
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.618142518691915,
+        "heading_reference_y_m": -0.35194048678902606,
+        "heading_sigma_rad": 0.04383273827020896,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.024012092814072628
+    },
+    {
+      "attempt": "inspection_001_localization_001_opposite_standoff_001_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.618142518691915,
+          "y_m": -0.35194048678902606,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -0.9449999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.1949999999999998,
+          "y_m": -0.014999999999999902,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.4949999999999997,
+          "y_m": -0.1649999999999998,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5949999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": -0.04573955518260878
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.0029005715852517787,
+        "xy_m2": 0.0,
+        "yy_m2": 0.0029005715852517787
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.618142518691915,
+        "heading_reference_y_m": -0.35194048678902606,
+        "heading_sigma_rad": 0.04430767729848323,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.021632473123043616
+    },
+    {
+      "attempt": "inspection_001_opposite_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.6204390479437869,
+          "y_m": -0.34711813882368653,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -0.9949999999999997,
+          "y_m": -0.014999999999999902,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.1949999999999998,
+          "y_m": 0.03500000000000014,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.3949999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.6449999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": -0.020225753643575862
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.003883270969560596,
+        "xy_m2": 0.0,
+        "yy_m2": 0.003883270969560596
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.6204390479437869,
+        "heading_reference_y_m": -0.34711813882368653,
+        "heading_sigma_rad": 0.059309098851346956,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.12690366951607285
+    },
+    {
+      "attempt": "inspection_001_opposite_standoff_001_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.6204390479437869,
+          "y_m": -0.34711813882368653,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -0.9949999999999997,
+          "y_m": -0.014999999999999902,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.1949999999999998,
+          "y_m": 0.03500000000000014,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.3949999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5449999999999997,
+          "y_m": -0.2649999999999999,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5949999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": -0.02240177247370937
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.004131550403034787,
+        "xy_m2": 0.0,
+        "yy_m2": 0.004131550403034787
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.6204390479437869,
+        "heading_reference_y_m": -0.34711813882368653,
+        "heading_sigma_rad": 0.0488281127921822,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.052129057649433985
+    },
+    {
+      "attempt": "inspection_003_localization_001_opposite_standoff_001_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.6961417835125223,
+          "y_m": -0.17222468980316352,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.1949999999999998,
+          "y_m": 0.03500000000000014,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.4449999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5949999999999998,
+          "y_m": -0.2649999999999999,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.6449999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": 0.01405636944674153
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.001309487470291622,
+        "xy_m2": 0.0,
+        "yy_m2": 0.001309487470291622
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.6961417835125223,
+        "heading_reference_y_m": -0.17222468980316352,
+        "heading_sigma_rad": 0.03281757334735039,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.011896312675161669
+    },
+    {
+      "attempt": "inspection_003_opposite_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.6766424938519985,
+          "y_m": -0.17109932218851548,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.0949999999999998,
+          "y_m": 0.03500000000000014,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.3449999999999998,
+          "y_m": -0.014999999999999902,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.6449999999999998,
+          "y_m": -0.4149999999999998,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.6449999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": 0.01074810664622378
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.0039935528501119505,
+        "xy_m2": 0.0,
+        "yy_m2": 0.0039935528501119505
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.6766424938519985,
+        "heading_reference_y_m": -0.17109932218851548,
+        "heading_sigma_rad": 0.04651240802424102,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.09756926957353579
+    },
+    {
+      "attempt": "inspection_003_opposite_standoff_001_dry_uncertainty_budget.json",
+      "poses": [
+        {
+          "x_m": -0.6766424938519985,
+          "y_m": -0.17109932218851548,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.0949999999999998,
+          "y_m": 0.03500000000000014,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.3449999999999998,
+          "y_m": -0.014999999999999902,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5449999999999997,
+          "y_m": -0.2649999999999999,
+          "yaw_mode": "unconstrained_nan",
+          "yaw_rad": null
+        },
+        {
+          "x_m": -1.5949999999999998,
+          "y_m": -0.46499999999999986,
+          "yaw_mode": "constrained",
+          "yaw_rad": 0.011961700463055733
+        }
+      ],
+      "covariance": {
+        "xx_m2": 0.0030676839818159795,
+        "xy_m2": 0.0,
+        "yy_m2": 0.0030676839818159795
+      },
+      "config": {
+        "braking_latency_distance_m": 0.015,
+        "collision_margin_m": 0.02,
+        "empirical_odom_drift_bound_m": 0.02,
+        "fixed_odom_tracking_bound_m": 0.03,
+        "heading_lever_arm_m": 0.105,
+        "heading_reference_x_m": -0.6766424938519985,
+        "heading_reference_y_m": -0.17109932218851548,
+        "heading_sigma_rad": 0.038736877602250426,
+        "localization_sigma_multiplier": 2.0,
+        "robot_radius_m": 0.105,
+        "sampling_spacing_m": 0.005
+      },
+      "margin_m": -0.01106659490450479
+    }
+  ]
+}

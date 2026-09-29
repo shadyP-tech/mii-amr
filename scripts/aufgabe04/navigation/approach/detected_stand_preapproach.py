@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint, endpoint_evidence_matches
+from scripts.aufgabe04.navigation.approach.opposite_checkpoint_route import (
+    CHECKPOINT_BEARING_MODE, validate_opposite_checkpoint_binding,
+)
 
 import csv
 import json
@@ -154,6 +157,10 @@ def validate_detected_stand_preapproach_binding(
         failures.append(f"invalid detected stand diagnostics: {exc}")
         return PreflightStatus(ok=False, failures=failures)
 
+    if metadata.get("approach_bearing_mode") == CHECKPOINT_BEARING_MODE:
+        checkpoint_status = validate_opposite_checkpoint_binding(metadata, leg, candidate_snapshot_path)
+        failures.extend(checkpoint_status.failures)
+        return PreflightStatus(ok=not failures, failures=failures)
     if metadata.get("route_kind") != DETECTED_STAND_PREAPPROACH_ROUTE_KIND:
         failures.append("detected stand route kind does not match diagnostics")
     if metadata.get("route_purpose") != DETECTED_STAND_PREAPPROACH_ROUTE_PURPOSE:
@@ -483,6 +490,7 @@ def seal_detected_stand_preapproach(
     source_payload = _load_json(source_diagnostics)
     source_metadata = dict(_metadata(source_payload))
     if source_metadata.get("approach_bearing_mode") not in {
+        CHECKPOINT_BEARING_MODE,
         ROBOT_TO_STAND_BEARING_MODE,
         CAMERA_AXIS_FACE_BEARING_MODE,
         INSPECTION_VIEW_BEARING_MODE,

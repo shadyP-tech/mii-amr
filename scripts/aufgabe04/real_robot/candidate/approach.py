@@ -26,6 +26,7 @@ from scripts.aufgabe04.real_robot.candidate.inspection_route_search import bound
 from scripts.aufgabe04.real_robot.candidate.opposite_localization_retry import (
     OPPOSITE_UNCERTAINTY_EXHAUSTED, with_opposite_localization_retry,
 )
+from scripts.aufgabe04.real_robot.candidate.opposite_checkpoint import try_opposite_checkpoint
 from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import (
     CandidateQrGoalIncompleteError, CandidateQrGoalProgress, CandidateQrGoalProgressStore,
     resolve_candidate_qr_goal, validate_candidate_qr_goal_completion,
@@ -1773,6 +1774,7 @@ def _move_certified_opposite_face(
             source_config=source_config, effects=effects, source_registry=source_registry,
             candidate_root=root, candidate_run_id=candidate_run_id + suffix,
             candidate_index=candidate_index, observed_view_normals=observed_view_normals,
+            allow_checkpoint=(epoch == 1),
         )
 
     return with_opposite_localization_retry(
@@ -1796,6 +1798,7 @@ def _move_certified_opposite_face_epoch(
     candidate_run_id: str,
     candidate_index: int,
     observed_view_normals: tuple[float, ...] = (),
+    allow_checkpoint: bool = False,
 ) -> _CandidateObservationFrame:
     """Execute the unchanged certified backside-to-opposite-face motion contract."""
 
@@ -1864,6 +1867,7 @@ def _move_certified_opposite_face_epoch(
     opposite_motion_outcome = None
     feasibility_failures = []
     uncertainty_failures = []
+    rejected_routes = []
     axis_geometry = load_backside_axis_planning_observation(axis_planning_evidence_path)
     current_center = axis_geometry.validated_target_center
     resolution = (read_map_metadata(opposite_config.map_yaml).resolution
@@ -1981,6 +1985,7 @@ def _move_certified_opposite_face_epoch(
             uncertainty_failures.append(
                 f"{inspection_offset_m:.3f} m: {rejected.stop_reason}"
             )
+            rejected_routes.append((opposite_plan_request, opposite_sealed, route_attempt.run_id))
             effects.event_sink(
                 source_config.session_root / "candidate_selection.jsonl",
                 {
@@ -2004,6 +2009,41 @@ def _move_certified_opposite_face_epoch(
             )
             continue
     if opposite_motion_outcome is None:
+        if allow_checkpoint and current_center is not None:
+            def execute_prefix(request, sealed, run_id):
+                # Checkpoint routes cannot be replaced with full stand routes
+                # by startup/runtime recovery. Failure stops this bounded attempt.
+                return _execute_candidate_motion(
+                    config=replace(opposite_config, max_startup_reseals_per_leg=0,
+                                   max_runtime_localization_reseals_per_leg=0),
+                    effects=effects, candidate_root=candidate_root / "opposite_checkpoint",
+                    plan_request=request, initial_sealed=sealed, run_id=run_id,
+                    leg_kind=MissionLegKind.OPPOSITE_FACE, candidate_index=candidate_index,
+                    target_id=candidate.candidate_uid,
+                )
+
+            def continue_from_checkpoint():
+                return _move_certified_opposite_face_epoch(
+                    observation_frame=observation_frame, observation=observation,
+                    source_config=source_config, effects=effects, source_registry=source_registry,
+                    candidate_root=candidate_root / "after_checkpoint",
+                    candidate_run_id=candidate_run_id + "_after_checkpoint",
+                    candidate_index=candidate_index, observed_view_normals=observed_view_normals,
+                    allow_checkpoint=False,
+                )
+
+            checkpoint_result = try_opposite_checkpoint(
+                rejected_routes=rejected_routes, config=opposite_config, effects=effects,
+                planning_frame=opposite_planning_frame, candidate_root=candidate_root,
+                execute_prefix=execute_prefix, continue_from_checkpoint=continue_from_checkpoint,
+                event_sink=lambda payload: effects.event_sink(
+                    source_config.session_root / "candidate_selection.jsonl",
+                    {"schema_version": 1, "timestamp_unix_sec": effects.clock(),
+                     "candidate_uid": candidate.candidate_uid, **payload},
+                ),
+            )
+            if checkpoint_result is not None:
+                return checkpoint_result
         details = "; ".join(uncertainty_failures + feasibility_failures)
         exhaustion = {
             "uncertainty_rejections": list(uncertainty_failures),

@@ -522,7 +522,14 @@ def _build_odom_execution_admission(
     route_yaw_lever_arm_m = max(
         route_yaw_lever_arm_m, admission_config.heading_lever_arm_m,
     )
-    if (
+    if diagnostics_snapshot.metadata.get("approach_bearing_mode") == "opposite-localization-checkpoint":
+        admission = evaluate_admitted_return_stage_uncertainty(
+            base_costmap, map_route, covariance, admission_config,
+            start_pose=Pose2D(**diagnostics_snapshot.metadata["exact_start_connector"]["exact_start"]),
+            target_evidence_sha256=diagnostics_snapshot.metadata["opposite_localization_checkpoint"]["parent_route_sha256"],
+            is_final_stage=False,
+        )
+    elif (
         getattr(leg, "route_kind", "") == "admitted_candidate_pose"
         and getattr(leg, "stationary_turn", False) is True
         and diagnostics_snapshot.metadata.get("stationary_turn") is True

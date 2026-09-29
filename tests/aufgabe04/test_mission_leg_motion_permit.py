@@ -7,6 +7,7 @@ from pathlib import Path
 from scripts.aufgabe04.artifacts.content_store import payload_sha256, write_content_hashed_json
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MAX_RETURN_TO_START_LEGS,
@@ -61,7 +62,7 @@ class MissionLegMotionPermitTest(unittest.TestCase):
             "dry_uncertainty_budget",
         ):
             path = self.root / f"{name}.artifact"
-            path.write_text(f"sealed {name}\n", encoding="utf-8")
+            path.write_text(json.dumps({"metadata": {}}) if name == "diagnostics" else f"sealed {name}\n", encoding="utf-8")
             self.artifacts[name] = path
         self.permit = MissionLegMotionPermit(
             master_authorization_sha256=self.master_sha256,
@@ -328,6 +329,23 @@ class MissionLegMotionPermitTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "requires a separate typed RUN"):
             replace(self.permit, mission_leg_kind="startup_reseal")
+
+    def test_opposite_checkpoint_requires_current_scope_and_same_candidate(self):
+        self.artifacts['diagnostics'].write_text(json.dumps({'metadata': {
+            'approach_bearing_mode': 'opposite-localization-checkpoint',
+            'selected_candidate_stand_id': 'candidate-001',
+        }}))
+        permit = replace(self.permit, mission_leg_kind=MissionLegKind.OPPOSITE_FACE,
+                         target_id='candidate-001', diagnostics_sha256=self._sha('diagnostics'))
+        write_mission_leg_motion_permit(self.permit_path, permit)
+        with self.assertRaisesRegex(ValueError, 'candidate differs'):
+            write_mission_leg_motion_permit(self.root/'wrong-target.json', replace(permit,target_id='neighbor'))
+        legacy = replace(self.authorization, scope_text=LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE)
+        legacy_path = self.root/'legacy-master.json'
+        digest = write_mission_leg_motion_authorization(legacy_path,legacy)
+        old_permit = replace(permit,master_authorization_path=str(legacy_path),master_authorization_sha256=digest)
+        with self.assertRaisesRegex(ValueError, 'explicit checkpoint mission scope'):
+            write_mission_leg_motion_permit(self.root/'legacy-permit.json',old_permit)
 
     def test_permit_cannot_broaden_master_allowed_leg_kinds(self):
         narrow_master = replace(

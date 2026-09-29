@@ -71,7 +71,7 @@ LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
 )
 
 
-MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
     + " A validated candidate-position epoch recovery may instead use one "
     "separately sealed arrival turn of at most thirty degrees followed by "
@@ -79,6 +79,15 @@ MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "measured travel per view. Three fresh stopped scans, unique candidate "
     "association, calibrated camera bearing, and the same live motion checks "
     "are required; no stand angle or survey landmark is rewritten."
+)
+MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    + " After exhausted no-motion opposite-face uncertainty admission, one "
+    "separately sealed route prefix may stop at an existing waypoint for "
+    "fresh stationary localization. The remaining opposite route retains the "
+    "same candidate and original backside geometry, and requires a new plan, "
+    "passed dry run and single-use permit. Checkpoints cannot be chained; "
+    "failure after checkpoint dispatch stops the attempt."
 )
 TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "Authorize only this newly confirmed stored-pose tour session. Each visit "
@@ -642,7 +651,7 @@ def validate_mission_leg_motion_permit(
             live_path=live_path,
             supplied_sha256=supplied_hash,
         )
-    _validate_return_to_start_route_scope(permit, authorization)
+    _validate_routine_route_scope(permit, authorization)
     return permit
 
 
@@ -728,6 +737,7 @@ def _validate_authorization(
     if authorization.scope_text not in (
         TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -743,6 +753,7 @@ def _validate_authorization(
         MissionLegKind.RETURN_TO_START in authorization.allowed_leg_kinds
         and authorization.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         }
@@ -815,7 +826,7 @@ def _validate_permit_references(permit: MissionLegMotionPermit) -> None:
     authorization = _validate_master_reference(permit, Path(permit.master_authorization_path))
     for name, path, digest in _permit_artifacts(permit):
         _validate_bound_artifact(name, path, digest)
-    _validate_return_to_start_route_scope(permit, authorization)
+    _validate_routine_route_scope(permit, authorization)
 
 
 def validate_stored_pose_tour_target_evidence(evidence: object) -> None:
@@ -962,9 +973,17 @@ def validate_return_to_start_stage_binding(permit: MissionLegMotionPermit) -> bo
         raise ValueError(f"invalid return_to_start stage binding: {exc}") from exc
 
 
-def _validate_return_to_start_route_scope(
+def _validate_routine_route_scope(
     permit: MissionLegMotionPermit, authorization: MissionLegMotionAuthorization,
 ) -> None:
+    if permit.mission_leg_kind == MissionLegKind.OPPOSITE_FACE:
+        import json
+        metadata = json.loads(Path(permit.diagnostics_path).read_text()).get("metadata", {})
+        if metadata.get("approach_bearing_mode") == "opposite-localization-checkpoint":
+            if authorization.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+                raise ValueError("opposite checkpoint requires the explicit checkpoint mission scope")
+            if metadata.get("selected_candidate_stand_id") != permit.target_id:
+                raise ValueError("opposite checkpoint candidate differs from permit target")
     if permit.mission_leg_kind not in {MissionLegKind.RETURN_TO_START, MissionLegKind.STORED_POSE_TOUR}:
         return
     final_stage = validate_return_to_start_stage_binding(permit)

@@ -14,6 +14,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MissionLegKind,
     load_mission_leg_motion_authorization,
     mission_leg_motion_authorization_sha256,
@@ -45,6 +46,7 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
     master = load_mission_leg_motion_authorization(Path(str(permit["master_authorization_path"])))
     if (master.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -79,7 +81,10 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
             raise ValueError('previous centering turn index does not decrease')
         previous = load_candidate_centering_result(previous_path)
         recovery = recovery or previous.get('arrival_recovery') is True
-    if recovery and master.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+    if recovery and master.scope_text not in {
+        MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    }:
         raise ValueError('mission RUN does not authorize extended arrival recovery')
     if permit.get('arrival_recovery', False) != recovery:
         raise ValueError('centering arrival recovery authority mismatch')

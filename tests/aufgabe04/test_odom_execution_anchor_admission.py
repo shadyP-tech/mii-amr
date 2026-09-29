@@ -54,6 +54,15 @@ def context(anchor, transform):
 
 
 class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
+    def test_opposite_checkpoint_rechecks_stop_envelope_with_fresh_covariance(self):
+        budget = self._assert_real_admission(stationary_turn=False, opposite_checkpoint=True)
+        envelopes = budget['admission']['endpoint_orientation_envelopes']
+        self.assertEqual([item['endpoint'] for item in envelopes],
+                         ['initial_orientation', 'stopped_endpoint_orientation'])
+        with self.assertRaises(RouteUncertaintyAdmissionRejected):
+            self._assert_real_admission(stationary_turn=False, opposite_checkpoint=True,
+                                        position_variance=1.)
+
     def test_real_admission_publishes_v2_and_shares_stationary_budget_context_anchor(self):
         self._assert_real_admission(stationary_turn=False)
 
@@ -113,6 +122,7 @@ class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
     def _assert_real_admission(
         self, *, stationary_turn, return_stage=False, final_stage=False,
         position_variance=.000625, heading_lever_arm_m=.7,
+        opposite_checkpoint=False,
     ):
         transform = PlanarTransform2D(-4, 1, 0)
         route = (Pose2D(1, 1, float("nan")), Pose2D(1, 1, 1)) if stationary_turn else (Pose2D(1, 1, 0), Pose2D(1.3, 1, 0))
@@ -144,11 +154,16 @@ class OdomExecutionAnchorAdmissionTest(unittest.TestCase):
             arena_boundary_overlay=True, arena_bounds=dict(length_m=10., width_m=10.,
                 center_x_m=5., center_y_m=5., yaw_deg=0., margin_m=0.), map_bundle_sha256="d" * 64,
         ))
-        if stationary_turn or return_stage:
+        if stationary_turn or return_stage or opposite_checkpoint:
             diagnostics.metadata.update(
                 stationary_turn=stationary_turn,
                 exact_start_connector={"exact_start": {"x_m": 1., "y_m": 1., "yaw_rad": 0.}},
                 target_evidence_sha256="e" * 64,
+            )
+        if opposite_checkpoint:
+            diagnostics.metadata.update(
+                approach_bearing_mode="opposite-localization-checkpoint",
+                opposite_localization_checkpoint={"parent_route_sha256": "a" * 64},
             )
         if return_stage:
             diagnostics.metadata["return_to_start_stage"] = {
