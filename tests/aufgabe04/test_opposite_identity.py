@@ -63,7 +63,7 @@ class OppositeIdentityTests(unittest.TestCase):
             planning_frame='map', stand_center=dict(x_m=.6, y_m=0.), model_sha256='a'*64)
         self.adapter._opposite_identity_context = self.context
 
-    def run_image(self, observations=None, *, late=False):
+    def run_image(self, observations=None, *, late=False, support=None):
         adapter = self.adapter
         adapter.profile.scan_frame = 'scan'
         crop = crop_evidence('scan')
@@ -85,7 +85,7 @@ class OppositeIdentityTests(unittest.TestCase):
             fit = stack.enter_context(patch(module+'estimate_stand_axis_from_metric_model', side_effect=AssertionError('front fit requested')))
             viewer = stack.enter_context(patch(module+'evaluate_viewer_head', side_effect=AssertionError('front search requested')))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.current_scan_qr_search', return_value=(attempt, crop['search'])))
-            stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_opposite_target_support', return_value=None))
+            stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_opposite_target_support', return_value=support))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.exclusive_identity_crop', return_value=(attempt, crop)))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_qr_observations_bgr', side_effect=decode))
             adapter._process_latest()
@@ -104,6 +104,23 @@ class OppositeIdentityTests(unittest.TestCase):
         self.assertEqual(self.adapter.observation_evidence.snapshot().current_axis_sample_count, 0)
         self.assertEqual(self.adapter._camera_pipeline_counters['processed_images'], 1)
         self.assertEqual(json.loads(self.adapter.args.status_json.read_text())['state'], 'qr_observation_pose_committed')
+
+    def test_post_turn_decode_still_prepares_current_framing_verification(self):
+        self.adapter.args.observation_not_before_sec = 99.
+        self.adapter.profile.odom_frame = 'odom'
+        lookup = self.adapter._lookup
+        self.adapter._lookup = lambda target, source, stamp: lookup(
+            'map' if target == 'odom' else target, source, stamp)
+        support = SimpleNamespace()
+        with patch('scripts.aufgabe04.real_robot.observer.opposite_identity.prepare_candidate_centering',
+                   return_value=None) as prepare:
+            payload = self.run_image(support=support)
+        self.assertIsNotNone(payload)
+        prepare.assert_called_once()
+        self.assertIs(prepare.call_args.kwargs['association'], support)
+        self.assertEqual(prepare.call_args.kwargs['image_stamp_sec'], 100.)
+        self.assertIsNotNone(prepare.call_args.kwargs['odom_pose'])
+        self.assertFalse(prepare.call_args.kwargs['allow_advisory'])
 
     def test_discovery_catalog_preserves_retained_axis(self):
         from scripts.aufgabe04.real_robot.candidate.approach import CandidateObservation

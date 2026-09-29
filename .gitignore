@@ -163,3 +163,9 @@ tests/aufgabe04/fixtures/candidate_position_epoch/*
 !tests/aufgabe04/fixtures/candidate_position_epoch/observations.json
 !tests/aufgabe04/fixtures/candidate_position_epoch/late_run_frame.png
 !tests/aufgabe04/fixtures/candidate_position_epoch/README.md
+!tests/aufgabe04/fixtures/candidate_position_epoch_radial/
+tests/aufgabe04/fixtures/candidate_position_epoch_radial/*
+!tests/aufgabe04/fixtures/candidate_position_epoch_radial/candidate_snapshot.json
+!tests/aufgabe04/fixtures/candidate_position_epoch_radial/candidate_frame_projection.json
+!tests/aufgabe04/fixtures/candidate_position_epoch_radial/observations.json
+!tests/aufgabe04/fixtures/candidate_position_epoch_radial/README.md

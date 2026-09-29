@@ -8,7 +8,9 @@ from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import exclusi
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import prepare_qr_observation_pose
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
 from scripts.aufgabe04.real_robot.observer.opposite_target_support import detect_opposite_target_support
-from scripts.aufgabe04.real_robot.observer.candidate_centering_receipt import prepare_candidate_centering
+from scripts.aufgabe04.real_robot.observer.candidate_centering_receipt import (
+    prepare_candidate_centering, centering_observation_requested,
+)
 from scripts.aufgabe04.qr_scanning.isolated_qr_views import rectify_isolated_qr_view, ISOLATED_QR_VIEWS
 from scripts.aufgabe04.real_robot.configuration.geometry import pose2d_from_transform
 
@@ -87,8 +89,9 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
             camera_signature=camera_signature, image_shape=frame.shape, roi=attempt.roi,
             model_profile_sha256=adapter.stand_model_profile.sha256, metadata=metadata,
             retained_backside_orientation=orientation, arrival_target_reconciliation=target_reconciliation)
-    if (support is not None and not binding.accepted
-            and getattr(adapter.args, 'candidate_centering_json', None) is not None):
+    if (support is not None and centering_observation_requested(adapter.args)
+            and (not binding.accepted
+                 or getattr(adapter.args, 'observation_not_before_sec', None) is not None)):
         try:
             odom_pose = pose2d_from_transform(adapter._lookup(
                 adapter.profile.odom_frame, adapter.profile.base_frame, image_stamp))
@@ -99,7 +102,8 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
             image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan.scan_stamp_sec,
             target_key=adapter._target_evidence_key(), robot_pose=robot_pose, odom_pose=odom_pose,
             intrinsics=intrinsics, scan_from_camera=scan_from_camera,
-            base_from_camera=base_from_camera, metadata=metadata)
+            base_from_camera=base_from_camera, metadata=metadata,
+            allow_advisory=not binding.accepted)
     update = adapter._record_observation_frame(robot_pose=robot_pose, image_stamp_sec=image_stamp_sec,
         scan_stamp_sec=scan.scan_stamp_sec, observed_at_sec=now,
         lidar_associated=(support is not None or crop.get('accepted') is True

@@ -138,17 +138,15 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
         cone_half_angle_rad=cone_half_angle_rad,max_camera_map_bearing_delta_rad=max_camera_map_bearing_delta_rad,
         accepted_range_m=accepted_range_m,now_sec=now_sec,max_scan_age_sec=max_scan_age_sec, fragmentation=fragmentation)
     reference, limit = map_bearing_rad, max_camera_map_bearing_delta_rad
+    association_range = accepted_range_m
     if target_reconciliation is not None:
-        from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+        from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import validated_reconciliation_envelope
         try:
-            proof_scan, original, _, reference = validate_reconciliation(target_reconciliation,
-                image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan.scan_stamp_sec)
-            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
-            check_current_scan(proof_scan, scan)
-            if (tuple(original.accepted_range_m) != tuple(accepted_range_m)
-                    or abs(original.map_bearing_rad-map_bearing_rad) > 1e-9):
-                return miss('reconciliation_search_mismatch')
+            _, original, _, reference = validated_reconciliation_envelope(target_reconciliation,
+                scan=scan, image_stamp_sec=image_stamp_sec, map_bearing_rad=map_bearing_rad,
+                accepted_range_m=accepted_range_m)
             envelope = original
+            association_range = envelope.accepted_range_m
             limit = min(cone_half_angle_rad, math.radians(3))
         except (ValueError, TypeError, KeyError, OSError) as exc:
             return miss('invalid_target_reconciliation', detail=str(exc))
@@ -175,7 +173,7 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
                 continue
             try:
                 bearing, uncertainty, depth = finite_target_bearing(center_px=center,intrinsics=intrinsics,
-                    scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=accepted_range_m)
+                    scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=association_range)
             except ValueError:
                 continue
             if abs(math.remainder(bearing-reference,math.tau))+uncertainty > limit:
@@ -184,7 +182,7 @@ def detect_opposite_target_support(frame, cv2, *, attempt, intrinsics, model_pro
                 continue
             lidar = associate_camera_registered_candidate_lidar_target(scan,
                 map_bearing_rad=reference, observed_camera_bearing_rad=bearing,
-                cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
+                cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=association_range,
                 now_sec=now_sec+time.monotonic()-started, max_scan_age_sec=max_scan_age_sec,
                 min_cluster_sample_count=1, max_camera_map_bearing_delta_rad=limit)
             lidar = bind_ray_to_envelope(lidar, scan, envelope,

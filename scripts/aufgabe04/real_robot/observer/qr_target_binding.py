@@ -21,7 +21,7 @@ from scripts.aufgabe04.perception.stand_axis_handoff import rectified_pixel_bear
 from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
 from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
-from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import validated_reconciliation_envelope
 from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique, bind_ray_to_envelope
 from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
 
@@ -100,6 +100,7 @@ def bind_qr_observations_to_target(
     depth_envelope = envelope
     reference = map_bearing_rad
     limit = max_camera_map_bearing_delta_rad
+    association_range = accepted_range_m
     if target_reconciliation is not None or any(scan_from_camera.translation_xyz_m):
         try:
             depth_envelope = envelope or qr_registration_envelope(scan,
@@ -107,14 +108,11 @@ def bind_qr_observations_to_target(
                 max_camera_map_bearing_delta_rad=limit, accepted_range_m=accepted_range_m,
                 now_sec=now_sec, max_scan_age_sec=max_scan_age_sec, fragmentation=fragmentation)
             if target_reconciliation is not None:
-                proof_scan, proof_envelope, _, reference = validate_reconciliation(
-                    target_reconciliation, scan_stamp_sec=scan.scan_stamp_sec)
-                from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
-                check_current_scan(proof_scan, scan)
-                if (tuple(proof_envelope.accepted_range_m) != tuple(accepted_range_m)
-                        or abs(proof_envelope.map_bearing_rad-map_bearing_rad) > 1e-9):
-                    raise ValueError('reconciliation_different_candidate_envelope')
+                _, proof_envelope, _, reference = validated_reconciliation_envelope(
+                    target_reconciliation, scan=scan, map_bearing_rad=map_bearing_rad,
+                    accepted_range_m=accepted_range_m)
                 depth_envelope = proof_envelope
+                association_range = proof_envelope.accepted_range_m
             if not envelope_is_unique(depth_envelope):
                 if target_reconciliation is not None or not (camera_registration_accepted or independent):
                     raise ValueError('finite_qr_range_not_unique')
@@ -135,16 +133,17 @@ def bind_qr_observations_to_target(
             bearing, uncertainty, depth = finite_target_bearing(
                 center_px=(sum(p[0] for p in corners)/4+roi.x0, sum(p[1] for p in corners)/4+roi.y0),
                 intrinsics=intrinsics, scan_from_camera=scan_from_camera,
-                distance_m=depth_envelope.distance_m, range_interval_m=accepted_range_m)
+                distance_m=depth_envelope.distance_m, range_interval_m=association_range)
             finite = dict(policy='calibrated_scan_range_ray', bearing_rad=bearing,
                 uncertainty_rad=uncertainty, optical_depth_m=depth,
-                range_m=depth_envelope.distance_m, range_interval_m=accepted_range_m,
+                range_m=depth_envelope.distance_m, range_interval_m=association_range,
                 scan_from_camera=asdict(scan_from_camera), intrinsics=asdict(intrinsics))
             if target_reconciliation is not None:
                 limit = cone_half_angle_rad
             if abs(math.remainder(bearing-reference, math.tau))+uncertainty > limit:
                 raise ValueError('camera_map_bearing_interval_exceeds_limit')
-            common.update(observed_camera_bearing_rad=bearing, map_bearing_rad=reference)
+            common.update(observed_camera_bearing_rad=bearing, map_bearing_rad=reference,
+                          accepted_range_m=association_range)
         except (ValueError,TypeError,KeyError,ArithmeticError,OSError) as exc:
             return QrTargetBinding(False,str(exc),symbol_count=1,camera_bearing_rad=bearing,
                 finite_bearing=finite)

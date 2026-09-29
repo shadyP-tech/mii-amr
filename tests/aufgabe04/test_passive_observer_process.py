@@ -64,6 +64,22 @@ class _Process:
 
 
 class PassiveObserverProcessTests(unittest.TestCase):
+    def test_ready_centering_precedes_qr_only_but_preserves_full_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = dict(recommendation_path=root / "recommendation.json",
+                axis_observation_path=root / "axis.json",
+                candidate_centering_path=root / "centering.json",
+                qr_observation_pose_path=root / "qr.json")
+            paths["qr_observation_pose_path"].write_text("{}")
+            for key, kind in (("candidate_centering_path", "candidate_centering"),
+                              ("recommendation_path", "recommendation")):
+                paths[key].write_text("{}")
+                evidence = monitor_passive_observer_process(
+                    process=_Process(wait_outcomes=(0,)), timeout_sec=90, **paths)
+                self.assertEqual(evidence.artifact_kind, kind)
+                self.assertEqual(evidence.artifact_path, paths[key])
+
     def test_qr_pose_completion_wins_axis_and_advisory_but_not_recommendation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

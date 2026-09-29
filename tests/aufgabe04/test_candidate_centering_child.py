@@ -174,6 +174,25 @@ def test_successful_turn_persists_revisions_and_requires_new_sensor_epoch(tmp_pa
         capture_with_centering(**args)
 
 
+def test_qr_and_advice_require_turn_and_a_new_observation(tmp_path):
+    initial=SimpleNamespace(recommendation_path=None,qr_observation_pose_path='old-qr',
+                            centering_advisory_path='advice')
+    fresh=SimpleNamespace(recommendation_path=None,qr_observation_pose_path='fresh-qr')
+    capture=Mock(side_effect=[initial,fresh])
+    turn=Mock(return_value=('after',SimpleNamespace(
+        result={'actual_angular_travel_rad':.09,'stopped_at_sec':12.},
+        result_path=tmp_path/'result.json')))
+    result,frame=capture_with_centering(candidate_uid='candidate',frame='before',
+        output_dir=tmp_path,view_index=0,timeout_sec=90.,capture=capture,turn=turn,
+        monotonic=lambda:10.)
+    assert result is fresh and frame=='after'
+    assert turn.call_count==1
+    assert capture.call_args_list[1].args[-1]==12.
+    progress=json.loads((tmp_path/'centering_progress.json').read_text())
+    assert progress['phase']=='observation_returned'
+    assert progress['camera_centering_status_path'].endswith('recenter_01/capture/observer_status.json')
+
+
 def test_failed_turn_records_progress_without_reobservation(tmp_path):
     capture=Mock(return_value=SimpleNamespace(recommendation_path=None,centering_advisory_path='advice'))
     with pytest.raises(RuntimeError,match='lost sensor'):
@@ -213,12 +232,16 @@ def test_second_turn_requires_fresh_observation_and_preserves_spent_travel(turn_
     process.assert_not_called()
 
 
-def test_two_turn_budget_disables_further_centering_but_allows_fresh_capture(tmp_path):
+@pytest.mark.parametrize('completion_field',['recommendation_path','qr_observation_pose_path'])
+def test_two_turn_budget_disables_further_centering_but_allows_fresh_capture(tmp_path,completion_field):
     calls=[]
     def capture(frame,root,index,enabled,remaining,not_before):
         calls.append((enabled,not_before))
-        return SimpleNamespace(recommendation_path='complete' if len(calls)==3 else None,
+        result=SimpleNamespace(recommendation_path=None,qr_observation_pose_path=None,
                                centering_advisory_path='advice')
+        if len(calls)==3:
+            setattr(result,completion_field,'complete')
+        return result
     def turn(frame,advice,root,index,remaining,previous):
         assert remaining==pytest.approx(math.radians(12)-index*.08)
         return frame,SimpleNamespace(result={'actual_angular_travel_rad':.08,'stopped_at_sec':12.+index},

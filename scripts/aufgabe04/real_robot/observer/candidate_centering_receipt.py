@@ -35,22 +35,45 @@ class CandidateCenteringFrame:
     scan_from_camera: object
     base_from_camera: object
     metadata: dict
+    allow_advisory: bool = True
 
 
 def prepare_candidate_centering(*, crop, association, image_stamp_sec,
         scan_stamp_sec, target_key, robot_pose, odom_pose, intrinsics,
-        scan_from_camera, base_from_camera, metadata):
+        scan_from_camera, base_from_camera, metadata, allow_advisory=True):
     if (not crop.accepted or association is None or not association.accepted
             or odom_pose is None):
         return None
     return CandidateCenteringFrame(image_stamp_sec, scan_stamp_sec, target_key,
         robot_pose, odom_pose, association, intrinsics, scan_from_camera,
-        base_from_camera, metadata)
+        base_from_camera, metadata, allow_advisory)
+
+
+def centering_observation_requested(args):
+    # A final post-turn capture still verifies framing after motion is disabled.
+    return (getattr(args, "candidate_centering_json", None) is not None
+            or getattr(args, "observation_not_before_sec", None) is not None)
+
+
+def candidate_centering_status(adapter):
+    """Report measured framing without treating missing advice as success."""
+    if not centering_observation_requested(adapter.args):
+        return None
+    current = getattr(adapter, "_pending_candidate_centering", None)
+    diagnostic = (None if current is None else current.metadata.get("candidate_centering"))
+    if diagnostic is None:
+        return dict(state="blocked", camera_centered=False,
+            reason="fresh_admitted_current_head_required", motion_authorized=False)
+    result = dict(diagnostic)
+    if not adapter._source_freshness(current.image_stamp_sec, current.scan_stamp_sec).accepted:
+        result.update(state="blocked", camera_centered=False, ready=False,
+            reason="centering_observation_expired_before_publication")
+    return result
 
 
 def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_sec):
     adapter._candidate_centering_ready = None
-    if getattr(adapter.args, "candidate_centering_json", None) is None:
+    if not centering_observation_requested(adapter.args):
         return
     current = getattr(adapter, "_pending_candidate_centering", None)
     if current is None or current.image_stamp_sec != image_stamp_sec:
@@ -67,10 +90,6 @@ def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_
         adapter.stand_model_profile.sha256, current.intrinsics, current.scan_from_camera,
         current.base_from_camera), now_sec=now, axis_sample_accepted=update.axis_sample_accepted)
     current.metadata["productive_view_opportunity"] = hold.metadata(now)
-    if hold_pending:
-        current.metadata["candidate_centering"] = dict(ready=False,
-            reason="preserve_productive_geometry_view", motion_authorized=False)
-        return
     try:
         advisory = build_camera_centering_advisory(
             association=current.association, intrinsics=current.intrinsics,
@@ -91,18 +110,30 @@ def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_
             diagnostics=current.metadata.setdefault("candidate_centering", {}))
     except (TypeError, ValueError, ArithmeticError) as exc:
         current.metadata["candidate_centering"] = {
-            "ready": False, "reason": "centering_advisory_rejected", "detail": str(exc)}
+            "state": "blocked", "camera_centered": False, "ready": False,
+            "reason": "centering_advisory_rejected", "detail": str(exc)}
         return
     if advisory is None:
+        return
+    diagnostic = current.metadata["candidate_centering"]
+    if not current.allow_advisory:
+        diagnostic.update(state="deferred", reason="preserve_retained_geometry_qr_completion")
+        return
+    if getattr(adapter.args, "candidate_centering_json", None) is None:
+        diagnostic.update(state="blocked", reason="centering_motion_disabled_for_capture")
+        return
+    if hold_pending:
+        diagnostic.update(state="deferred", reason="preserve_productive_geometry_view")
         return
     framing = review_centering_destination(advisory,
         search_association=current.association.lidar_association.search_association)
     current.metadata["centering_framing"] = framing.metadata()
     if not framing.allowed:
-        current.metadata["candidate_centering"] = dict(ready=False,
-            reason=framing.reason, motion_authorized=False)
+        diagnostic.update(state="blocked", reason=framing.reason)
         return
-    current.metadata["candidate_centering"] = advisory.metadata()
+    current.metadata["candidate_centering"] = {**advisory.metadata(),
+        "state": "correction_required", "ready": True, "camera_centered": False,
+        "reason": "fresh_current_head_off_center"}
     adapter._candidate_centering_ready = current, advisory
 
 

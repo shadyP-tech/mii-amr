@@ -26,7 +26,7 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import (
 )
 from scripts.aufgabe04.real_robot.observer.current_head_detection import current_head_detection_admission
 from scripts.aufgabe04.real_robot.observer.stopped_target_search import StoppedTargetSearch
-from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import validated_reconciliation_envelope
 from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
 
 
@@ -72,7 +72,8 @@ def associate_current_measured_head(
 
     ``projection`` and scale remain the original map/TF values. A separately
     bounded current-scan search hint may supply the spatial comparison center;
-    the original bearing/range gates and that same cluster remain mandatory.
+    the original source options and that same cluster remain mandatory. An
+    authenticated position epoch may supply its independently replayed range.
     Intrinsics describe the full rectified image; the ROI offset is added once.
     The caller checks image freshness before this call and again at publication.
     """
@@ -151,27 +152,24 @@ def associate_current_measured_head(
     except (TypeError, ValueError, ArithmeticError):
         return replace(result, reason="current_head_projection_invalid")
     association_reference, association_limit = map_bearing_rad, max_camera_map_bearing_delta_rad
+    association_range = accepted_range_m
     if target_reconciliation is not None:
         try:
-            proof_scan, envelope, _, association_reference = validate_reconciliation(target_reconciliation,
-                scan_stamp_sec=scan.scan_stamp_sec)
-            from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
-            check_current_scan(proof_scan, scan)
-            if (proof_scan.scan_frame_id != scan.scan_frame_id
-                    or tuple(envelope.accepted_range_m) != tuple(accepted_range_m)
-                    or envelope.map_bearing_rad != map_bearing_rad):
-                raise ValueError('reconciliation scan frame changed')
+            _, envelope, _, association_reference = validated_reconciliation_envelope(
+                target_reconciliation, scan=scan, map_bearing_rad=map_bearing_rad,
+                accepted_range_m=accepted_range_m)
+            association_range = envelope.accepted_range_m
             bearing, uncertainty, _ = finite_target_bearing(center_px=center,intrinsics=intrinsics,
-                scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=accepted_range_m)
+                scan_from_camera=scan_from_camera,distance_m=envelope.distance_m,range_interval_m=association_range)
             if abs(math.remainder(bearing-association_reference,math.tau))+uncertainty > cone_half_angle_rad:
                 raise ValueError('head ray interval misses reconciled cluster')
             association_limit = cone_half_angle_rad
             result = replace(result,target_reconciliation=target_reconciliation,fitted_head_bearing_rad=bearing)
-        except (ValueError,TypeError,KeyError,ArithmeticError) as exc:
+        except (ValueError,TypeError,KeyError,ArithmeticError,OSError) as exc:
             return replace(result,reason=str(exc))
     association = associate_camera_registered_candidate_lidar_target(
         scan, map_bearing_rad=association_reference, observed_camera_bearing_rad=bearing,
-        cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=accepted_range_m,
+        cone_half_angle_rad=cone_half_angle_rad, accepted_range_m=association_range,
         now_sec=now_sec, max_scan_age_sec=max_scan_age_sec,
         min_cluster_sample_count=min_cluster_sample_count,
         max_camera_map_bearing_delta_rad=association_limit,

@@ -47,6 +47,7 @@ def capture_with_centering(
     turn_limit = MAX_CENTERING_TURNS
     travel_limit = MAX_CENTERING_TRAVEL_RAD
     arrival_recovery = False
+    observation_status_path = None
 
     def persist(phase):
         nonlocal revision
@@ -59,6 +60,10 @@ def capture_with_centering(
             "actual_angular_travel_rad": travel,
             "observation_not_before_sec": not_before,
             "turn_history": history, "motion_authorized": False,
+            "camera_centering_status_path": observation_status_path,
+            # A stopped turn/arrival is not a camera measurement. The linked
+            # observer status reports centered, blocked or deferred explicitly.
+            "camera_centering_verification": "requires_current_observer_measurement",
         }
         receipt = history_dir / f"revision_{revision:03d}.json"
         digest = write_content_hashed_json(receipt, payload, hash_field="candidate_centering_progress_sha256")
@@ -83,14 +88,17 @@ def capture_with_centering(
         capture_dir = (output_dir if not history else
                        output_dir / f"recenter_{len(history):02d}" / "capture")
         observation = capture(frame, capture_dir, view_index, enabled, remaining_sec, not_before)
-        # Completion always outranks an optional advisory, including injected
-        # effects that expose both artifacts in the same result.
+        observation_status_path = str(capture_dir / "observer_status.json")
+        # Preserve a full geometry recommendation. A QR-only result cannot hide
+        # actionable advice; return only the fresh post-turn capture afterwards.
+        # Disabled budgets never revive motion even if an injected effect also
+        # exposes an advisory alongside its completed observation.
         complete = (observation.recommendation_path is not None or
                     getattr(observation, "qr_observation_pose_path", None) is not None)
         advisory_path = getattr(observation, "centering_advisory_path", None)
-        if complete or advisory_path is None:
-            if history:
-                persist("observation_returned")
+        if (observation.recommendation_path is not None or advisory_path is None
+                or complete and not enabled):
+            persist("observation_returned")
             return observation, frame
         if not history and Path(advisory_path).is_file():
             from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory

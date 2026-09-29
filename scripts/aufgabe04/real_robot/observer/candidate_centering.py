@@ -192,6 +192,10 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
     The observer must additionally commit it only after the same frame passes
     its stationary-epoch and identity gates. This helper does not replace them.
     """
+    if diagnostics is not None:
+        diagnostics.update(state="blocked", ready=False, camera_centered=False,
+            reason="current_head_centering_unavailable", motion_authorized=False,
+            image_stamp_sec=image_stamp_sec, scan_stamp_sec=None)
     try:
         lidar = association.lidar_association
         search = lidar.search_association if lidar is not None else None
@@ -206,6 +210,11 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
                 or search.scan_frame_id != scan_from_camera.parent_frame):
             return None
         scan_stamp = search.scan_stamp_sec
+        if diagnostics is not None:
+            diagnostics.update(scan_stamp_sec=scan_stamp,
+                measured_u_px=association.full_image_center_px[0],
+                target_u_px=intrinsics.width_px/2.,
+                deadband_px=intrinsics.fx_px*math.tan(CENTERING_DEADBAND_RAD))
         _finite((now_sec, image_stamp_sec, scan_stamp, odom_stamp_sec, max_age_sec,
                  max_image_scan_skew_sec, consumed_rotation_rad))
         if not 0 < max_age_sec <= .5 or not 0 < max_image_scan_skew_sec <= .1:
@@ -227,6 +236,9 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
             base_from_camera=base_from_camera,
             remaining_rotation_rad=total-consumed_rotation_rad, maximum_rotation_rad=total)
         if not required:
+            if diagnostics is not None:
+                diagnostics.update(state="centered", camera_centered=True,
+                    reason="fresh_current_head_inside_centering_deadband")
             return None
         advisory = CameraCenteringAdvisory(candidate_uid, target_key, stream_id, planning_frame,
             motion_epoch, anchor_pose, anchor_odom_pose, odom_stamp_sec, image_stamp_sec,
@@ -245,7 +257,8 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
         return validate_camera_centering_advisory(advisory.metadata())
     except CenteringBudgetExceeded as exc:
         if diagnostics is not None:
-            diagnostics.update(ready=False, reason="centering_budget_exceeded",
+            diagnostics.update(state="blocked", ready=False, camera_centered=False,
+                reason="centering_budget_exceeded",
                 detail=str(exc), motion_authorized=False, recovery="bounded_inspection_view")
         return None
     except (AttributeError, TypeError, ValueError, ArithmeticError):

@@ -170,6 +170,7 @@ from scripts.aufgabe04.real_robot.observer.qr_observation_pose import (
 )
 from scripts.aufgabe04.real_robot.observer.candidate_centering_receipt import (
     prepare_candidate_centering, record_candidate_centering, commit_candidate_centering,
+    centering_observation_requested, candidate_centering_status,
 )
 from scripts.aufgabe04.artifacts.backside_axis_observation import MINIMUM_BACKSIDE_AXIS_CONFIDENCE
 from scripts.aufgabe04.real_robot.observer.camera_publication import (
@@ -2426,7 +2427,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         # Centering alone requires an exact odometry anchor. A missing optional
         # transform cannot suppress an otherwise admissible current QR result.
         centering_odom_pose = None
-        if (getattr(self.args, "candidate_centering_json", None) is not None
+        if (centering_observation_requested(self.args)
                 and getattr(self.profile, "odom_frame", None) is not None):
             try:
                 centering_odom_pose = pose2d_from_transform(self._lookup(
@@ -2448,7 +2449,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         model_metadata["candidate_head_tracking"] = (
             {**search_metadata, "tracker_update": asdict(tracker_update)} if viewer_geometry
             else dict(candidate_search.last_metadata))
-        if getattr(self.args, "candidate_centering_json", None) is not None:
+        if centering_observation_requested(self.args):
             self._pending_candidate_centering = prepare_candidate_centering(
                 crop=current_crop, association=current_head_association,
                 image_stamp_sec=image.stamp_sec, scan_stamp_sec=scan.stamp_sec,
@@ -3216,9 +3217,12 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
     def _write_status(self, state: str, **details) -> None:
         if getattr(self,'_qr_binding_diagnostic',None) is not None:
             details['qr_binding_diagnostic'] = self._qr_binding_diagnostic
+        # Keep usable geometry and its fixed acquisition opportunity. Once a
+        # bounded current-head correction is ready, QR-only completion must not
+        # bypass it; the post-turn capture must independently reacquire identity.
         committed = (commit_immediate_front(self) or commit_bounded_head(self)
-                     or commit_qr_observation_pose(self)
-                     or (None if qr_observation_grace_pending(self) or backside_center_grace_pending(self) else commit_candidate_centering(self)))
+                     or (None if qr_observation_grace_pending(self) or backside_center_grace_pending(self) else commit_candidate_centering(self))
+                     or commit_qr_observation_pose(self))
         if committed is not None:
             state, committed_details = committed
             details = {**details, **committed_details}
@@ -3320,6 +3324,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             "scan_witness_diagnostics": (None if getattr(self, "_scan_target_persistence", None) is None
                 else self._scan_target_persistence.diagnostics.snapshot()),
             "camera_framing": getattr(self, "_camera_framing", None),
+            "camera_centering": candidate_centering_status(self),
             "inspection_acquisition_opportunity": (
                 None if getattr(self, "_inspection_progress", None) is None
                 else self._inspection_progress.acquisition_metadata(now_monotonic_sec=time.monotonic())

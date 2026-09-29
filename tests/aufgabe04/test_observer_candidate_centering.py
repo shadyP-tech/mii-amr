@@ -52,7 +52,8 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
 
     def frame(self, stamp=100., *, bounded=False, complete=True, associated=True,
               ambiguous=False, age=.1, skew=0., pose=None, odom=True,
-              symbols=0, qr=False, publish=True, axis=False, scan_topology=None):
+              symbols=0, qr=False, publish=True, axis=False, scan_topology=None,
+              center_px=None, allow_advisory=True):
         adapter = self.adapter
         self.fixture.clock_sec = stamp + age
         options = (bounded_fixtures.BoundedHeadDetectionTests().options() if bounded
@@ -65,6 +66,8 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
                 ranges=(.55, .55, math.inf, .55, .55, .55, .55, .55, .55))
         options["now_sec"] = stamp + .1
         association = associate_current_measured_head(**options)
+        if center_px is not None:
+            association = replace(association, full_image_center_px=center_px)
         if scan_topology is not None:
             association = replace(association, lidar_association=replace(association.lidar_association,
                 search_association=replace(association.lidar_association.search_association,
@@ -81,7 +84,7 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
             scan_from_camera=options["scan_from_camera"],
             base_from_camera=RigidTransform("base", "camera", (0., 0., 0.),
                                            options["scan_from_camera"].rotation_xyzw),
-            metadata=metadata)
+            metadata=metadata, allow_advisory=allow_advisory)
         texts = ()
         if qr:
             _, binding, observations = association_fixtures.CurrentHeadAssociationTests().qr_binding(options)
@@ -199,13 +202,65 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertTrue(update.motion_epoch_reset)
         self.assertIsNone(self.result())
 
-    def test_current_qr_completion_has_priority_over_centering(self):
+    def test_current_qr_completion_cannot_bypass_ready_centering(self):
         self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
         self.frame(qr=True)
+        self.assertFalse(self.adapter.args.qr_observation_pose_json.exists())
+        self.assertIsNotNone(self.result())
+        self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
+                         "candidate_centering_committed")
+
+    def test_current_qr_still_completes_when_safe_centering_is_blocked(self):
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.frame(qr=True, scan_topology=dict(profile="full_rotation", sample_count=360,
+            angle_min_rad=0., angle_increment_rad=math.tau/360))
         self.assertTrue(self.adapter.args.qr_observation_pose_json.exists())
         self.assertIsNone(self.result())
-        self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
-                         "qr_observation_pose_committed")
+        status = json.loads(self.adapter.args.status_json.read_text())
+        self.assertEqual(status["state"], "qr_observation_pose_committed")
+        self.assertEqual(status["camera_centering"]["state"], "blocked")
+        self.assertFalse(status["camera_centering"]["camera_centered"])
+
+    def test_post_turn_capture_verifies_deadband_even_when_motion_is_disabled(self):
+        self.adapter.args.candidate_centering_json = None
+        self.adapter.args.observation_not_before_sec = 99.
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.frame(qr=True, center_px=(400., 300.))
+        status = json.loads(self.adapter.args.status_json.read_text())
+        self.assertEqual(status["state"], "qr_observation_pose_committed")
+        self.assertEqual(status["camera_centering"]["state"], "centered")
+        self.assertTrue(status["camera_centering"]["camera_centered"])
+        self.assertEqual(status["camera_centering"]["image_stamp_sec"], 100.)
+        self.assertEqual(status["camera_centering"]["scan_stamp_sec"], 100.)
+
+    def test_post_turn_off_center_capture_reports_disabled_motion(self):
+        self.adapter.args.candidate_centering_json = None
+        self.adapter.args.observation_not_before_sec = 99.
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.frame(qr=True)
+        status = json.loads(self.adapter.args.status_json.read_text())
+        self.assertEqual(status["camera_centering"]["state"], "blocked")
+        self.assertEqual(status["camera_centering"]["reason"], "centering_motion_disabled_for_capture")
+        self.assertFalse(status["camera_centering"]["camera_centered"])
+
+    def test_retained_geometry_verification_does_not_create_new_motion_policy(self):
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.frame(qr=True, allow_advisory=False)
+        self.assertIsNone(self.result())
+        status = json.loads(self.adapter.args.status_json.read_text())
+        self.assertEqual(status["state"], "qr_observation_pose_committed")
+        self.assertEqual(status["camera_centering"]["state"], "deferred")
+        self.assertEqual(status["camera_centering"]["reason"],
+                         "preserve_retained_geometry_qr_completion")
+        self.assertFalse(status["camera_centering"]["camera_centered"])
+
+    def test_stale_measured_center_cannot_be_reported_as_centered(self):
+        self.frame(center_px=(400., 300.), publish=False)
+        self.fixture.clock_sec = 100.7
+        PassiveRealViewpointNode._write_status(self.adapter, "collecting_consensus")
+        status = json.loads(self.adapter.args.status_json.read_text())
+        self.assertEqual(status["camera_centering"]["state"], "blocked")
+        self.assertFalse(status["camera_centering"]["camera_centered"])
 
     def test_publication_rechecks_age_and_does_not_reuse_declined_receipt(self):
         self.frame(publish=False)

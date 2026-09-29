@@ -16,10 +16,10 @@ from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapsho
 ROOT=Path(__file__).parent/'fixtures/candidate_position_epoch'
 
 
-def recorded_rows():
-    snapshot=load_candidate_snapshot(ROOT/'candidate_snapshot.json')
+def recorded_rows(root=ROOT):
+    snapshot=load_candidate_snapshot(root/'candidate_snapshot.json')
     g=snapshot.candidate_for('survey_candidate_0005').geometry
-    data=json.loads((ROOT/'observations.json').read_text())
+    data=json.loads((root/'observations.json').read_text())
     for row in data['rows']:
         s=row['sensors']['scan'];h=s['header']
         scan=PlainLaserScan(ranges=tuple(float(v) for v in s['ranges']),
@@ -31,13 +31,13 @@ def recorded_rows():
         point=transform_point((g.x_m,g.y_m,0.),tf);dist=math.hypot(*point[:2])
         pose=next(t for t in row['tf_samples'] if t['target_frame']=='map' and t['source_frame']=='base_footprint')
         q=pose['rotation_xyzw']
-        yield dict(snapshot_path=ROOT/'candidate_snapshot.json',candidate_uid='survey_candidate_0005',
+        yield dict(snapshot_path=root/'candidate_snapshot.json',candidate_uid='survey_candidate_0005',
             planning_frame='map',stand_center=(g.x_m,g.y_m),target_key='recorded-target',epoch=0,
             scan=scan,scan_from_map=tf,robot_pose=(*pose['translation_xyz_m'][:2],2*math.atan2(q[2],q[3])),
             image_stamp_sec=row['image_stamp_sec'],now_sec=row['image_received_ros_sec']+row['selected_monotonic_sec']-row['image_received_monotonic_sec'],
             options=dict(map_bearing_rad=math.atan2(point[1],point[0]),cone_half_angle_rad=math.radians(3),
                          max_camera_map_bearing_delta_rad=math.radians(12),accepted_range_m=(dist-2*g.radius_m-g.uncertainty_m-.04,dist+.04)),
-            position_epoch_path=ROOT/'candidate_frame_projection.json')
+            position_epoch_path=root/'candidate_frame_projection.json')
 
 
 def recorded_proof():
@@ -78,10 +78,10 @@ def test_recovery_rejects_invalid_evidence(defect):
     with pytest.raises(ValueError):validate_reconciliation(proof)
 
 
-def camera_inputs():
+def camera_inputs(root=ROOT):
     from types import SimpleNamespace
     from scripts.aufgabe04.real_robot.configuration.geometry import intrinsics_from_camera_info
-    data=json.loads((ROOT/'observations.json').read_text())
+    data=json.loads((root/'observations.json').read_text())
     row=data['rows'][-1]
     ci=dict(row['sensors']['camera_info']);ci['header']=SimpleNamespace(**ci['header'])
     def tf(parent,child):

@@ -73,8 +73,23 @@ def epoch_cluster(entry, snapshot, uid, scan, scan_from_map):
     ordinary = associate_candidate_lidar_target(scan, cone_half_angle_rad=math.radians(15.), **common)
     if ordinary.eligible_cluster_count:
         raise ValueError('ordinary candidate envelope must be empty for epoch recovery')
-    envelope = associate_candidate_lidar_target(scan, cone_half_angle_rad=MAX_RECOVERY_BEARING_RAD, **common)
-    if not envelope.associated or envelope.eligible_cluster_count != 1 or envelope.selected_cluster_sample_count < 3:
+    # Reproject both authenticated hypotheses into this exact scan frame.
+    # Preserve the original surface offsets rather than inventing a larger
+    # global tolerance. Searching their enclosing interval also counts returns
+    # in any gap between them, so separate hypotheses cannot hide a competitor.
+    old = rows[uid].provenance.frozen_map_point
+    current_point = transform_point((g.x_m, g.y_m, 0.), scan_from_map)
+    frozen_point = transform_point((old.x_m, old.y_m, 0.), scan_from_map)
+    delta = math.hypot(*frozen_point[:2])-math.hypot(*current_point[:2])
+    lower, upper = options['accepted_range_m']
+    recovery_range = (max(0., min(lower, lower+delta)), max(upper, upper+delta))
+    envelope = associate_candidate_lidar_target(scan, cone_half_angle_rad=MAX_RECOVERY_BEARING_RAD,
+        **{**common, 'accepted_range_m': recovery_range})
+    if not envelope.eligible_cluster_count:
+        raise ValueError('epoch recovery has no cluster in position hypotheses')
+    if envelope.eligible_cluster_count > 1:
+        raise ValueError('epoch recovery has competing clusters in position hypotheses')
+    if not envelope.associated or envelope.selected_cluster_sample_count < 3:
         raise ValueError('epoch recovery requires one unique three-beam cluster')
     points = [(scan.ranges[i]*math.cos(scan.angle_min+i*scan.angle_increment),
                scan.ranges[i]*math.sin(scan.angle_min+i*scan.angle_increment), 0.)
@@ -86,7 +101,6 @@ def epoch_cluster(entry, snapshot, uid, scan, scan_from_map):
     q = scan_from_map.rotation_xyzw
     world = rotate_vector(tuple(a-b for a,b in zip(mean,scan_from_map.translation_xyz_m)),
                           (-q[0],-q[1],-q[2],q[3]))[:2]
-    old = rows[uid].provenance.frozen_map_point
     # Require agreement with the old map hypothesis AND a capped displacement
     # from the current one. Localization change alone never grants identity.
     if (math.dist(world,(old.x_m,old.y_m)) > g.radius_m+g.uncertainty_m+.05
@@ -100,6 +114,20 @@ def epoch_cluster(entry, snapshot, uid, scan, scan_from_map):
         exclusion = MAX_DISPLACEMENT_M + 2*(other.radius_m+other.uncertainty_m)
         if min(math.dist(world,p) for p in ((other.x_m,other.y_m),(old_other.x_m,old_other.y_m))) <= exclusion:
             raise ValueError('another candidate can explain epoch recovery target')
+    # The broad union has established uniqueness. Keep the surviving model's
+    # tighter interval for calibrated finite-distance rays; using the entire
+    # localization displacement as optical depth uncertainty would regress
+    # valid angular-only recovery. Never trim a cluster to fit a hypothesis.
+    distances = tuple(scan.ranges[i] for i in envelope.selected_cluster_source_indices)
+    frozen_range = (max(0., lower+delta), upper+delta)
+    for interval in (tuple(options['accepted_range_m']), frozen_range):
+        if all(interval[0] <= distance <= interval[1] for distance in distances):
+            envelope = associate_candidate_lidar_target(scan,
+                cone_half_angle_rad=MAX_RECOVERY_BEARING_RAD,
+                **{**common, 'accepted_range_m': interval})
+            break
+    else:
+        raise ValueError('epoch recovery cluster spans incompatible range hypotheses')
     return scan, envelope, world, math.atan2(mean[1],mean[0])
 
 
@@ -110,13 +138,36 @@ def is_epoch_recovery(proof):
 
 def check_current_scan(proof_scan, scan):
     """A shared timestamp is insufficient to bind a replayed scan."""
-    fields = ('scan_frame_id', 'scan_stamp_sec', 'angle_min', 'angle_max',
+    fields = ('scan_frame_id', 'scan_stamp_sec', 'receipt_sec', 'angle_min', 'angle_max',
               'angle_increment', 'range_min', 'range_max', 'scan_topology_profile')
     if (any(getattr(proof_scan, k) != getattr(scan, k) for k in fields)
             or len(proof_scan.ranges) != len(scan.ranges)
             or any(a != b and not (not math.isfinite(a) and not math.isfinite(b))
                    for a, b in zip(proof_scan.ranges, scan.ranges))):
         raise ValueError('reconciliation scan differs from current observation')
+
+
+def validated_reconciliation_envelope(proof, *, scan, map_bearing_rad, accepted_range_m,
+                                      image_stamp_sec=None):
+    """Replay recovery while binding its unmodified source candidate options.
+
+    The returned range is recomputed from authenticated position hypotheses;
+    callers must never overwrite the source options to make a proof match.
+    The fourth result is the measured cluster bearing for the narrow ray only.
+    """
+    from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+    result = validate_reconciliation(proof, image_stamp_sec=image_stamp_sec,
+                                     scan_stamp_sec=scan.scan_stamp_sec)
+    proof_scan, envelope, _, _ = result
+    check_current_scan(proof_scan, scan)
+    original = proof['entries'][-1]['options']
+    if (tuple(original['accepted_range_m']) != tuple(accepted_range_m)
+            or abs(original['map_bearing_rad']-map_bearing_rad) > 1e-9
+            or abs(envelope.map_bearing_rad-map_bearing_rad) > 1e-9
+            or not is_epoch_recovery(proof)
+                and tuple(envelope.accepted_range_m) != tuple(accepted_range_m)):
+        raise ValueError('reconciliation differs from original candidate envelope')
+    return result
 
 
 def recovered_search(proof, *, scan, original_projection, camera_from_map, intrinsics, model_profile):
