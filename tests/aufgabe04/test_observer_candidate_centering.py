@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
@@ -147,25 +147,52 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
                 "physical_shifted_registered_" + scenario, publish_immediate=True)
         return adapter, recommendation, output
 
-    def test_real_processing_preserves_productive_geometry_before_centering(self):
+    def test_real_processing_centers_before_accumulating_head_geometry(self):
         adapter, recommendation, output = self.run_processing("head_only")
         self.assertIsNone(recommendation)
-        self.assertFalse(output.exists())
-        self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 7)
-        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 7)
-        self.assertFalse(adapter.completed)
+        self.assertTrue(output.exists())
+        self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 1)
+        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 0)
+        self.assertTrue(adapter.completed)
+        self.assertFalse(json.loads(output.read_text())["motion_authorized"])
 
-    def test_productive_opportunity_is_fixed_and_does_not_renew_on_miss(self):
-        module = "scripts.aufgabe04.real_robot.observer.candidate_centering_receipt.time.monotonic"
-        for stamp, axis in ((100., True), (101., False), (104.9, True)):
-            with patch(module, return_value=stamp):
-                update, metadata = self.frame(stamp, axis=axis)
-            self.assertIsNone(self.result())
-            self.assertEqual(update.axis_sample_accepted, axis)
-            self.assertEqual(metadata["candidate_centering"]["reason"], "preserve_productive_geometry_view")
-        with patch(module, return_value=105.):
-            self.frame(105.)
-        self.assertIsNotNone(self.result())  # Linear scanner fixture: no boundary veto.
+    def test_real_current_head_and_qr_cannot_complete_before_ready_centering(self):
+        adapter, recommendation, output = self.run_processing("bound_qr")
+        self.assertIsNone(recommendation)
+        self.assertTrue(output.exists())
+        self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 1)
+        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 0)
+        self.assertTrue(adapter.completed)
+
+    def test_first_admitted_frame_centers_without_waiting_for_geometry(self):
+        update, metadata = self.frame(axis=True, qr=True)
+        self.assertIsNotNone(self.result())
+        self.assertTrue(update.frame_accepted)
+        self.assertTrue(update.qr_sample_accepted)
+        self.assertFalse(update.snapshot.poisoned)
+        self.assertFalse(update.axis_sample_accepted)
+        self.assertEqual(update.snapshot.current_axis_sample_count, 0)
+        self.assertIsNone(update.axis_consensus)
+        self.assertEqual(metadata["candidate_centering"]["reason"], "fresh_current_head_off_center")
+
+    def test_centered_frame_admits_geometry_without_an_unnecessary_turn(self):
+        update, metadata = self.frame(axis=True, center_px=(400., 300.))
+        self.assertIsNone(self.result())
+        self.assertTrue(update.axis_sample_accepted)
+        self.assertEqual(update.snapshot.current_axis_sample_count, 1)
+        self.assertTrue(metadata["candidate_centering"]["camera_centered"])
+        self.assertFalse(self.adapter.completed)
+
+    def test_ready_centering_discards_prior_precision_samples_in_same_view(self):
+        for index in range(6):
+            update, _ = self.frame(100. + index * .2, axis=True,
+                                   center_px=(400., 300.), publish=False)
+        self.assertEqual(update.snapshot.current_axis_sample_count, 6)
+        update, _ = self.frame(101.2, axis=True)
+        self.assertIsNotNone(self.result())
+        self.assertFalse(update.axis_sample_accepted)
+        self.assertEqual(update.snapshot.current_axis_sample_count, 0)
+        self.assertIsNone(update.axis_consensus)
 
     def test_boundary_veto_does_not_publish_or_complete(self):
         _, metadata = self.frame(scan_topology=dict(profile="full_rotation", sample_count=360,
@@ -190,6 +217,17 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
                 self.frame(**kwargs)
                 self.assertIsNone(self.result())
 
+    def test_rejected_source_or_conflicting_identity_never_prepares_centering(self):
+        for kwargs in ({"associated": False}, {"age": .6}, {"skew": -.2},
+                       {"symbols": 2}):
+            with self.subTest(kwargs=kwargs):
+                self.adapter._reset_observation_evidence()
+                update, _ = self.frame(axis=True, **kwargs)
+                self.assertFalse(update.frame_accepted)
+                self.assertIsNone(getattr(self.adapter, "_candidate_centering_ready", None))
+                self.assertIsNone(self.result())
+                self.assertFalse(self.adapter.completed)
+
     def test_poisoned_or_changed_stationary_epoch_cannot_advise(self):
         self.frame(publish=False)
         self.frame(100.2, symbols=2)
@@ -202,6 +240,15 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertTrue(update.motion_epoch_reset)
         self.assertIsNone(self.result())
 
+    def test_duplicate_frame_cannot_reuse_a_previously_ready_advisory(self):
+        self.frame(publish=False)
+        self.assertIsNotNone(self.adapter._candidate_centering_ready)
+        update, _ = self.frame()
+        self.assertFalse(update.frame_accepted)
+        self.assertEqual(update.reason, "duplicate_frame_stamp")
+        self.assertIsNone(self.result())
+        self.assertFalse(self.adapter.completed)
+
     def test_current_qr_completion_cannot_bypass_ready_centering(self):
         self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
         self.frame(qr=True)
@@ -209,6 +256,36 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertIsNotNone(self.result())
         self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
                          "candidate_centering_committed")
+
+    def test_ready_centering_precedes_all_precision_commits_and_grace_periods(self):
+        self.frame(axis=True, publish=False)
+        self.assertIsNotNone(self.adapter._candidate_centering_ready)
+        prefix = "scripts.aufgabe04.real_robot.observer.node."
+        commits = {name: Mock(return_value=None) for name in (
+            "commit_immediate_front", "commit_bounded_head", "commit_qr_observation_pose")}
+        with patch.multiple("scripts.aufgabe04.real_robot.observer.node", **commits), \
+             patch(prefix + "qr_observation_grace_pending", return_value=True), \
+             patch(prefix + "backside_center_grace_pending", return_value=True):
+            PassiveRealViewpointNode._write_status(self.adapter, "collecting_consensus")
+        self.assertIsNotNone(self.result())
+        self.assertTrue(self.adapter.completed)
+        for commit in commits.values():
+            commit.assert_not_called()
+        self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
+                         "candidate_centering_committed")
+
+    def test_expired_centering_cannot_fall_through_to_precision_commit(self):
+        self.frame(axis=True, publish=False)
+        self.assertIsNotNone(self.adapter._candidate_centering_ready)
+        self.fixture.clock_sec = 100.7
+        commits = {name: Mock(return_value=None) for name in (
+            "commit_immediate_front", "commit_bounded_head", "commit_qr_observation_pose")}
+        with patch.multiple("scripts.aufgabe04.real_robot.observer.node", **commits):
+            PassiveRealViewpointNode._write_status(self.adapter, "collecting_consensus")
+        self.assertIsNone(self.result())
+        self.assertFalse(self.adapter.completed)
+        for commit in commits.values():
+            commit.assert_not_called()
 
     def test_current_qr_still_completes_when_safe_centering_is_blocked(self):
         self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"

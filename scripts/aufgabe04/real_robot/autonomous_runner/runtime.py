@@ -1256,6 +1256,18 @@ def _require_completed_motion(outcome: MotionLegOutcome) -> None:
         )
 
 
+def _capture_candidate_lidar_view(*, profile, request):
+    from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import capture_candidate_lidar_view
+    from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import capture_tour_scan
+    return capture_candidate_lidar_view(
+        request, capture_cohort=lambda bound: capture_tour_scan(
+            profile, tour_id=bound.viewpoint_id,
+            output_path=bound.output_dir / "scan_cohort.json",
+            observation_not_before_sec=bound.observation_not_before_sec,
+        ),
+    )
+
+
 def _capture_lidar_epoch(
     *,
     profile,
@@ -2967,6 +2979,10 @@ def _run_mission(parser, args) -> int:
             server_robot_id=args.server_robot_id,
             stop_after_camera_candidates=args.stop_after_camera_candidates,
             calibration_profile_sha256=profile.calibration_profile_sha256,
+            camera_calibration=calibration,
+            lidar_scan_frame=profile.scan_frame,
+            lidar_scan_topic=runtime.scan_topic,
+            measured_stand_model=stand_model,
             robot_profile_sha256=real_robot_profile_sha256(profile),
             approach_offset_m=args.candidate_approach_offset_m,
             final_facing_offset_m=args.final_facing_offset_m,
@@ -3022,6 +3038,7 @@ def _run_mission(parser, args) -> int:
         candidate_phase = execute_candidate_approach_phase(
             candidate_config,
             CandidateApproachEffects(
+                capture_lidar_view=lambda request: _capture_candidate_lidar_view(profile=profile, request=request),
                 read_current_pose=lambda: read_current_pose2d_from_amcl(
                     namespace=profile.namespace,
                     amcl_topic=profile.amcl_topic,

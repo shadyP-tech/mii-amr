@@ -76,6 +76,7 @@ class CandidatePreapproachPlan:
     minimum_static_inflation_m: float
     goal_cell_selection: GoalCellSelectionEvidence | None
     validated_target_center: dict | None = None
+    camera_alignment: dict | None = None
 
     @property
     def map_bundle_sha256(self) -> str:

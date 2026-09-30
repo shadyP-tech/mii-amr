@@ -1,4 +1,4 @@
-"""Motion-neutral framing vetoes and a fixed opportunity for useful geometry.
+"""Motion-neutral scan-boundary vetoes for camera centering.
 
 These policies only decline optional centering. They never select new scan
 returns, change a centering target, relax admission, or authorize a turn.
@@ -11,35 +11,6 @@ from scripts.aufgabe04.real_robot.observer.candidate_centering import (
     center_point_in_base, project_center_after_turn,
 )
 from scripts.aufgabe04.real_robot.observer.scan_target_persistence import scan_pose_from_camera_extrinsics
-
-PRODUCTIVE_VIEW_OPPORTUNITY_SEC = 5.0
-
-
-class ProductiveViewHold:
-    """One non-renewable geometry opportunity per calibrated stationary epoch."""
-    def __init__(self):
-        self.context = None
-        self.started = None
-        self.poisoned = False
-
-    def observe(self, *, context, now_sec, axis_sample_accepted, poisoned=False):
-        if not math.isfinite(now_sec) or now_sec < 0:
-            raise ValueError("productive view clock must be finite and nonnegative")
-        if context != self.context:
-            self.context, self.started, self.poisoned = context, None, False
-        self.poisoned = self.poisoned or poisoned
-        if self.poisoned:
-            return False
-        if self.started is None and axis_sample_accepted:
-            self.started = now_sec
-        return self.started is not None and 0 <= now_sec-self.started < PRODUCTIVE_VIEW_OPPORTUNITY_SEC
-
-    def metadata(self, now_sec):
-        deadline = None if self.started is None else self.started+PRODUCTIVE_VIEW_OPPORTUNITY_SEC
-        return dict(policy="productive_geometry_before_optional_centering", duration_sec=PRODUCTIVE_VIEW_OPPORTUNITY_SEC,
-            deadline_monotonic_sec=deadline, remaining_sec=None if deadline is None else max(0., deadline-now_sec),
-            renews_on_soft_miss=False, extends_parent_deadline=False, motion_authorized=False)
-
 
 @dataclass(frozen=True)
 class FramingDecision:

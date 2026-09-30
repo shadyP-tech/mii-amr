@@ -71,8 +71,6 @@ def epoch_cluster(entry, snapshot, uid, scan, scan_from_map):
         accepted_range_m=options['accepted_range_m'], now_sec=entry['checked_at_sec'],
         max_scan_age_sec=.5, min_cluster_sample_count=1)
     ordinary = associate_candidate_lidar_target(scan, cone_half_angle_rad=math.radians(15.), **common)
-    if ordinary.eligible_cluster_count:
-        raise ValueError('ordinary candidate envelope must be empty for epoch recovery')
     # Reproject both authenticated hypotheses into this exact scan frame.
     # Preserve the original surface offsets rather than inventing a larger
     # global tolerance. Searching their enclosing interval also counts returns
@@ -91,6 +89,15 @@ def epoch_cluster(entry, snapshot, uid, scan, scan_from_map):
         raise ValueError('epoch recovery has competing clusters in position hypotheses')
     if not envelope.associated or envelope.selected_cluster_sample_count < 3:
         raise ValueError('epoch recovery requires one unique three-beam cluster')
+    # The ordinary cone can clip the same stand to one or two edge beams.
+    # Recover only when those exact beams belong to the unique full cluster;
+    # the expanded search above still counts even single-beam competitors.
+    if ordinary.eligible_cluster_count and not (
+        ordinary.associated and ordinary.eligible_cluster_count == 1
+        and 0 < ordinary.selected_cluster_sample_count < 3
+        and set(ordinary.selected_cluster_source_indices) < set(envelope.selected_cluster_source_indices)
+    ):
+        raise ValueError('ordinary envelope is not a clipped subset of the unique recovery cluster')
     points = [(scan.ranges[i]*math.cos(scan.angle_min+i*scan.angle_increment),
                scan.ranges[i]*math.sin(scan.angle_min+i*scan.angle_increment), 0.)
               for i in envelope.selected_cluster_source_indices]

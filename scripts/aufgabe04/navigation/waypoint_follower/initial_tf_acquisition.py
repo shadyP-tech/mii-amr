@@ -4,7 +4,7 @@ The shared startup deadline also bounds first sensor delivery. Extra sensor
 acquisition requires never-received inputs and both executors serviced. TF wait
 is available only for never-acquired required TF edges, with fresh sensors and
 a demonstrably serviced TF executor. Within an already-entered cold phase, a
-structurally valid first stale global sample may wait for a fresh replacement
+structurally valid first stale required sample may wait for a fresh replacement
 under the same deadline. This is neither runtime TF recovery nor localization
 resealing; it cannot authorize a command or bypass admission.
 """
@@ -115,7 +115,7 @@ class InitialTfAcquisition:
             and failure["target_frame"] == target_frame
             and failure["source_frame"] == source_frame
         )
-        waitable_stale = self._waitable_first_stale_global_sample(role, edge, failure)
+        waitable_stale = self._waitable_first_stale_required_sample(role, edge, failure)
         edge["non_acquisition_failure_seen"] |= not cold
         edge["non_acquisition_failure_count"] += not cold
         edge["waitable_stale_sample_count"] += waitable_stale
@@ -126,7 +126,8 @@ class InitialTfAcquisition:
             "monitor_warning": failure.get("monitor_warning"),
             "age_sec": failure.get("age_sec"), "stamp_sec": failure.get("stamp_sec"),
             "structural_validation_passed": failure.get("structural_validation_passed"),
-            "waitable_first_stale_global_sample": waitable_stale,
+            "waitable_first_stale_global_sample": waitable_stale and role == "global_consistency",
+            "waitable_first_stale_execution_sample": waitable_stale and role == "execution_pose",
         })
         del edge["recent_failures"][:-8]
 
@@ -171,11 +172,9 @@ class InitialTfAcquisition:
             if failure_details.get("target_frame") == edge["target_frame"]
             and failure_details.get("source_frame") == edge["source_frame"]
         ]
-        waitable_stale = (
-            matched_roles == ["global_consistency"]
-            and self._waitable_first_stale_global_sample(
-                "global_consistency", self.edges["global_consistency"], failure_details,
-            )
+        waitable_role = matched_roles[0] if len(matched_roles) == 1 else None
+        waitable_stale = waitable_role is not None and self._waitable_first_stale_required_sample(
+            waitable_role, self.edges[waitable_role], failure_details,
         )
         if self.acquisition_wait_sec <= 0:
             self.denial_reason = "cold_tf_acquisition_disabled"
@@ -189,7 +188,7 @@ class InitialTfAcquisition:
             self.denial_reason = "required_tf_edge_already_acquired"
         elif any(
             edge.get("non_acquisition_failure_seen", False)
-            and not (role == "global_consistency" and waitable_stale)
+            and not (role == waitable_role and waitable_stale)
             for role, edge in self.edges.items()
         ):
             self.denial_reason = "required_tf_edge_has_non_acquisition_failure"
@@ -207,7 +206,7 @@ class InitialTfAcquisition:
             return True
         return False
 
-    def _waitable_first_stale_global_sample(self, role, edge, sample) -> bool:
+    def _waitable_first_stale_required_sample(self, role, edge, sample) -> bool:
         """Classify a stopped wait candidate; retain its non-cold history.
 
         Sensor/executor health, zero motion, admission and the absolute deadline
@@ -216,26 +215,35 @@ class InitialTfAcquisition:
         """
 
         context = self.execution_context
-        execution = self.edges.get("execution_pose", {})
-        execution_sample = execution.get("last_sample", {})
         if (
-            role != "global_consistency" or self.phase != "cold_tf_acquisition"
+            role not in ("execution_pose", "global_consistency") or self.phase != "cold_tf_acquisition"
             or not self.extension_used or not isinstance(context, Mapping)
             or set(self.required_edges) != {"execution_pose", "global_consistency"}
             or edge["successful_sample_count"] != 0
             or edge["non_acquisition_failure_count"] != edge["waitable_stale_sample_count"]
-            or execution.get("current_ready") is not True
-            or execution.get("successful_sample_count", 0) <= 0
-            or execution.get("non_acquisition_failure_seen") is not False
-            or execution.get("target_frame") != context.get("odom_frame")
-            or execution.get("source_frame") != context.get("base_frame")
-            or edge["target_frame"] != context.get("map_frame")
-            or edge["source_frame"] != context.get("odom_frame")
+        ):
+            return False
+        bindings = {
+            "execution_pose": (context.get("odom_frame"), context.get("base_frame")),
+            "global_consistency": (context.get("map_frame"), context.get("odom_frame")),
+        }
+        target, source = bindings[role]
+        peer_role = "global_consistency" if role == "execution_pose" else "execution_pose"
+        peer_target, peer_source = bindings[peer_role]
+        peer = self.edges.get(peer_role, {})
+        peer_sample = peer.get("last_sample", {})
+        if (
+            peer.get("current_ready") is not True
+            or peer.get("successful_sample_count", 0) <= 0
+            or peer.get("non_acquisition_failure_seen") is not False
+            or peer.get("target_frame") != peer_target
+            or peer.get("source_frame") != peer_source
+            or edge["target_frame"] != target or edge["source_frame"] != source
         ):
             return False
         for current, target, source in (
-            (sample, context.get("map_frame"), context.get("odom_frame")),
-            (execution_sample, context.get("odom_frame"), context.get("base_frame")),
+            (sample, target, source),
+            (peer_sample, peer_target, peer_source),
         ):
             if (current.get("source") != "tf_lookup"
                     or current.get("target_frame") != target or current.get("source_frame") != source
@@ -249,10 +257,10 @@ class InitialTfAcquisition:
             and sample.get("structural_validation_passed") is True
             and sample.get("available") is False and sample.get("validation_passed") is False
             and sample["age_sec"] > sample["max_age_sec"]
-            and execution_sample.get("reason") == "fresh_transform"
-            and execution_sample.get("available") is True
-            and execution_sample.get("validation_passed") is True
-            and -execution_sample["max_future_sec"] <= execution_sample["age_sec"] <= execution_sample["max_age_sec"]
+            and peer_sample.get("reason") == "fresh_transform"
+            and peer_sample.get("available") is True
+            and peer_sample.get("validation_passed") is True
+            and -peer_sample["max_future_sec"] <= peer_sample["age_sec"] <= peer_sample["max_age_sec"]
         )
 
     def acquisition_deadline_exhausted(self, now: float) -> bool:

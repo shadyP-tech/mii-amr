@@ -14,6 +14,10 @@ from typing import Mapping
 
 from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
 
+from scripts.aufgabe04.navigation.approach.camera_head_alignment import (
+    camera_alignment_endpoint, camera_facing_base_yaw, requested_camera_base_pose,
+    validate_camera_alignment,
+)
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     INSPECTION_VIEW_BEARING_MODE,
 )
@@ -148,6 +152,7 @@ def compute_candidate_preapproach_plan(
     inspection_view_normal_rad: float | None = None,
     planning_context: CandidatePlanningContext | None = None,
     validated_target_center: dict | None = None,
+    camera_alignment: dict | None = None,
 ) -> CandidatePreapproachPlan:
     """Compute the exact route used for both candidate scoring and sealing."""
 
@@ -167,11 +172,26 @@ def compute_candidate_preapproach_plan(
     if candidate is None:
         raise ValueError(f"unknown candidate {candidate_uid!r}")
     geometry = planning_target_geometry(candidate, validated_target_center)
+    alignment_target = None
     extra_uncertainty = 0. if validated_target_center is None else geometry.uncertainty_m
     if validated_target_center is not None and (approach_normal_rad is None or planning_context is not None):
         raise ValueError('reconciled target requires a fresh certified opposite-face plan')
     if snapshot.map_bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("candidate snapshot map differs from coverage plan")
+    if camera_alignment is not None:
+        validate_camera_alignment(camera_alignment)
+        if (inspection_view_normal_rad is None or approach_normal_rad is not None
+                or validated_target_center is not None
+                or camera_alignment["candidate_uid"] != candidate_uid
+                or camera_alignment["candidate_snapshot_sha256"] != candidate_snapshot_sha256(snapshot)
+                or abs(normalize_angle(camera_alignment["view_normal_rad"]-inspection_view_normal_rad)) > 1e-9
+                or abs(camera_alignment["camera_standoff_m"]-approach_offset_m) > 1e-9):
+            raise ValueError("calibrated camera alignment binding mismatch")
+        if math.hypot(camera_alignment["center_x_m"]-geometry.x_m,
+                      camera_alignment["center_y_m"]-geometry.y_m) > geometry.radius_m+geometry.uncertainty_m:
+            raise ValueError("fitted head center outside candidate envelope")
+        alignment_target = replace(geometry, x_m=camera_alignment["center_x_m"],
+            y_m=camera_alignment["center_y_m"], uncertainty_m=camera_alignment["center_uncertainty_m"])
 
     if approach_normal_rad is not None and inspection_view_normal_rad is not None:
         raise ValueError("inspection view and certified face normal are exclusive")
@@ -225,6 +245,10 @@ def compute_candidate_preapproach_plan(
     )
     try:
         visits = tuple(build_station_visits(("D00",), stations))
+        if camera_alignment is not None:
+            requested_base = requested_camera_base_pose(camera_alignment)
+            visits = (replace(visits[0], target=replace(visits[0].target,
+                pose=StationPose(requested_base.x_m, requested_base.y_m, requested_base.yaw_rad))),)
         targets = navigation_targets_from_visits(
             visits,
             context.costmaps.target_costmap,
@@ -255,6 +279,8 @@ def compute_candidate_preapproach_plan(
             route_rejection_reason=lambda route: (
                 (None if validated_target_center is None else _current_target_clearance_failure(route, geometry,
                     context.minimum_candidate_transit_radius_m+extra_uncertainty))
+                or (None if alignment_target is None else _current_target_clearance_failure(
+                    route, alignment_target, context.minimum_candidate_transit_radius_m+alignment_target.uncertainty_m))
                 or _candidate_route_clearance_failure(
                     candidate_uid=candidate_uid,
                     route=route,
@@ -309,6 +335,14 @@ def compute_candidate_preapproach_plan(
         geometry.y_m - endpoint.y_m,
         geometry.x_m - endpoint.x_m,
     )
+    if camera_alignment is not None:
+        terminal_yaw = camera_facing_base_yaw(camera_alignment, endpoint.x_m, endpoint.y_m)
+        if math.hypot(endpoint.x_m-alignment_target.x_m, endpoint.y_m-alignment_target.y_m) < context.minimum_active_standoff_m+alignment_target.uncertainty_m:
+            raise CandidatePreapproachUnreachableError(candidate_uid, "fitted head standoff uncertainty")
+        alignment_endpoint = camera_alignment_endpoint(camera_alignment,
+            Pose2D(endpoint.x_m, endpoint.y_m, terminal_yaw))
+        if not alignment_endpoint["accepted"]:
+            raise CandidatePreapproachUnreachableError(candidate_uid, "camera_alignment_uncertainty_budget_exceeded")
     initial_turn, turn_burden = route_turn_metrics(
         result.route,
         start_yaw_rad=start.yaw_rad,
@@ -369,6 +403,7 @@ def compute_candidate_preapproach_plan(
         minimum_static_inflation_m=context.minimum_static_inflation_m,
         goal_cell_selection=goal_cell_selection,
         validated_target_center=validated_target_center,
+        camera_alignment=camera_alignment,
     )
 
 

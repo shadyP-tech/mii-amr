@@ -89,15 +89,14 @@ def capture_with_centering(
                        output_dir / f"recenter_{len(history):02d}" / "capture")
         observation = capture(frame, capture_dir, view_index, enabled, remaining_sec, not_before)
         observation_status_path = str(capture_dir / "observer_status.json")
-        # Preserve a full geometry recommendation. A QR-only result cannot hide
-        # actionable advice; return only the fresh post-turn capture afterwards.
+        # Acquisition precedes completion: neither geometry nor QR-only evidence
+        # can hide actionable advice. Return the fresh post-turn capture.
         # Disabled budgets never revive motion even if an injected effect also
         # exposes an advisory alongside its completed observation.
         complete = (observation.recommendation_path is not None or
                     getattr(observation, "qr_observation_pose_path", None) is not None)
         advisory_path = getattr(observation, "centering_advisory_path", None)
-        if (observation.recommendation_path is not None or advisory_path is None
-                or complete and not enabled):
+        if advisory_path is None or complete and not enabled:
             persist("observation_returned")
             return observation, frame
         if not history and Path(advisory_path).is_file():

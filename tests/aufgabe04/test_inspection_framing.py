@@ -1,4 +1,4 @@
-"""Recorded centering boundary regression and fixed productive-view budget."""
+"""Recorded centering boundary regression."""
 from copy import deepcopy
 import json
 import math
@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
-from scripts.aufgabe04.real_robot.observer.inspection_framing import ProductiveViewHold, review_centering_destination
+from scripts.aufgabe04.real_robot.observer.inspection_framing import review_centering_destination
 
 FIXTURE = Path(__file__).parent / 'fixtures/backside_framing_20260922.json'
 
@@ -50,21 +50,3 @@ class InspectionFramingTests(unittest.TestCase):
             self.assertEqual(result.reason, 'centering_boundary_geometry_unavailable')
         self.search.scan_topology = {'profile': 'linear'}
         self.assertTrue(review_centering_destination(self.advisory, search_association=self.search).allowed)
-
-    def test_hold_has_fixed_budget_context_reset_and_sticky_poison(self):
-        hold = ProductiveViewHold()
-        def observe(t, axis=False, **kwargs):
-            return hold.observe(context=kwargs.pop('context', 'epoch1'), now_sec=t,
-                                axis_sample_accepted=axis, **kwargs)
-        self.assertFalse(observe(9))
-        self.assertTrue(observe(10, True))
-        self.assertTrue(observe(12))
-        self.assertTrue(observe(14.99, True))
-        self.assertFalse(observe(15, True))
-        self.assertEqual(hold.metadata(15)['remaining_sec'], 0)
-        self.assertTrue(observe(16, True, context='epoch2'))
-        self.assertFalse(observe(17, True, context='epoch2', poisoned=True))
-        self.assertFalse(observe(18, True, context='epoch2'))
-        self.assertTrue(observe(19, True, context='epoch3'))
-        with self.assertRaises(ValueError):
-            observe(math.nan)

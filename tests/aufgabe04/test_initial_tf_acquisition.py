@@ -71,6 +71,10 @@ class LookupException(Exception):
     pass
 
 
+class ConnectivityException(Exception):
+    pass
+
+
 class InitialTfAcquisitionTest(unittest.TestCase):
     def make_node(self, *, reconnect_at=None, details=None, extra_wait=3.0):
         clock = _Clock()
@@ -161,6 +165,26 @@ class InitialTfAcquisitionTest(unittest.TestCase):
             return transform
 
         node.tf_buffer.lookup_transform.side_effect = delayed_map
+        return node, clock
+
+    def make_delayed_stale_execution_node(self, *, fresh_at=None, stale_at=3.25, map_at=0.0):
+        # coverage_001 in the 20260929T151758Z run had 12 cold execution
+        # lookups, then a structurally valid first sample aged 1.643782593 s.
+        # The relative callback schedule and later fresh delivery are synthetic.
+        node, clock = self.make_sampled_node(map_at=map_at)
+        original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+        def delayed_execution(target, source, *args, **kwargs):
+            if target == "odom" and clock.now < stale_at:
+                raise ConnectivityException(_cold_failure()["exception"])
+            transform = original_lookup(target, source, *args, **kwargs)
+            if target == "odom" and (fresh_at is None or clock.now < fresh_at):
+                ns = int((100.0 + clock.now - 1.643782593) * 1e9)
+                transform.header.stamp.sec = ns // 1_000_000_000
+                transform.header.stamp.nanosec = ns % 1_000_000_000
+            return transform
+
+        node.tf_buffer.lookup_transform.side_effect = delayed_execution
         return node, clock
 
     @staticmethod
@@ -673,6 +697,252 @@ class InitialTfAcquisitionTest(unittest.TestCase):
         self.assertIsNotNone(admitted.pose)
         self.assertEqual(admitted.details["reason"], "fresh_transform")
         self.assertTrue(admitted.details["validation_passed"])
+
+    def test_recorded_first_stale_execution_waits_for_fresh_replacement(self):
+        for map_at in (0.0, 3.25):
+            with self.subTest(map_at=map_at):
+                node, clock = self.make_delayed_stale_execution_node(fresh_at=3.5, map_at=map_at)
+                node._global_consistency_monitor_failure = Mock(wraps=node._global_consistency_monitor_failure)
+                original_buffer, original_context = node.tf_buffer, node.odom_execution_context
+
+                self.assertEqual(self.wait(node, clock), "")
+
+                self.assertEqual(clock.now, 3.5)
+                self.assertIs(node.tf_buffer, original_buffer)
+                self.assertIs(node.odom_execution_context, original_context)
+                self.assertIsNone(node.latest_stop_details)
+                self.assertFalse(node.motion_published)
+                evidence = node.latest_initial_tf_acquisition
+                self.assertEqual(evidence["phase"], "cold_tf_acquisition")
+                self.assertEqual(evidence["maximum_startup_wait_sec"], 5.0)
+                self.assertTrue(evidence["extension_used"])
+                self.assertFalse(evidence["deadline_exhausted"])
+                self.assertFalse(evidence["motion_authorized"])
+                edge = evidence["edges"]["execution_pose"]
+                self.assertEqual(edge["attempt_count"], 14)
+                self.assertEqual(edge["successful_sample_count"], 1)
+                self.assertTrue(edge["non_acquisition_failure_seen"])
+                self.assertEqual(edge["waitable_stale_sample_count"], 1)
+                self.assertEqual(edge["recent_failures"][-2]["attempt"], 12)
+                self.assertEqual(edge["recent_failures"][-2]["exception_type"], "ConnectivityException")
+                stale = edge["recent_failures"][-1]
+                self.assertEqual(stale["attempt"], 13)
+                self.assertAlmostEqual(stale["age_sec"], 1.643782593, places=8)
+                self.assertTrue(stale["structural_validation_passed"])
+                self.assertTrue(stale["waitable_first_stale_execution_sample"])
+                self.assertFalse(stale["waitable_first_stale_global_sample"])
+                self.assertEqual(edge["last_sample"]["reason"], "fresh_transform")
+                self.assertTrue(edge["last_sample"]["validation_passed"])
+                self.assertEqual(evidence["edges"]["global_consistency"]["successful_sample_count"],
+                                 14 if map_at == 0.0 else 2)
+                node._global_consistency_monitor_failure.assert_called()
+                admitted = node._global_consistency_monitor_failure.call_args.kwargs["map_lookup"]
+                self.assertIsNotNone(admitted.pose)
+                self.assertTrue(admitted.details["validation_passed"])
+                self.assertEqual(node.publish_zero.call_count, 14)
+                for call in node._append_controller_trace.call_args_list:
+                    command = call.kwargs["effective_command"]
+                    self.assertEqual((command.linear_x_mps, command.angular_z_radps), (0.0, 0.0))
+
+    def test_persistent_first_stale_execution_exhausts_same_budget_without_reseal(self):
+        node, clock = self.make_delayed_stale_execution_node()
+        failure, evidence = self.assert_stopped(
+            node, clock, deadline=5.0, denial="cold_tf_acquisition_deadline_exhausted",
+        )
+        self.assertEqual(failure, "TF transform unavailable: odom <- base_footprint")
+        self.assertEqual(node.latest_stop_details["reason"], "stale_transform")
+        self.assertAlmostEqual(node.latest_stop_details["age_sec"], 1.643782593, places=8)
+        self.assertFalse(node.latest_stop_details["available"])
+        self.assertFalse(node.latest_stop_details["validation_passed"])
+        self.assertTrue(node.latest_stop_details["structural_validation_passed"])
+        edge = evidence["edges"]["execution_pose"]
+        self.assertFalse(edge["current_ready"])
+        self.assertEqual(edge["successful_sample_count"], 0)
+        self.assertGreater(edge["waitable_stale_sample_count"], 1)
+        self.assertTrue(edge["non_acquisition_failure_seen"])
+        self.assert_initial_stop_cannot_reseal(node, failure)
+
+    def assert_initial_stop_cannot_reseal(self, node, failure):
+        from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.control_results import initial_runtime_input_stop_details
+        from scripts.aufgabe04.navigation.localization.prestart_localization_reseal import evaluate_prestart_localization_reseal
+        terminal = initial_runtime_input_stop_details(node.latest_stop_details, reason=failure, motion_published=False)
+        decision = evaluate_prestart_localization_reseal(status="stopped", motion_published=False, stop_details=terminal)
+        self.assertFalse(decision.eligible)
+        self.assertFalse(decision.automatic_motion_authorized)
+
+    def test_first_stale_execution_then_missing_preserves_failure_history(self):
+        node, clock = self.make_delayed_stale_execution_node()
+        original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+        def missing_again(target, source, *args, **kwargs):
+            if target == "odom" and clock.now > 3.25:
+                raise ConnectivityException(_cold_failure()["exception"])
+            return original_lookup(target, source, *args, **kwargs)
+
+        node.tf_buffer.lookup_transform.side_effect = missing_again
+        failure, evidence = self.assert_stopped(
+            node, clock, deadline=3.5, denial="required_tf_edge_has_non_acquisition_failure",
+        )
+        self.assertEqual(node.latest_stop_details["reason"], "lookup_exception")
+        edge = evidence["edges"]["execution_pose"]
+        self.assertTrue(edge["non_acquisition_failure_seen"])
+        self.assertEqual(edge["waitable_stale_sample_count"], 1)
+        self.assertEqual(edge["successful_sample_count"], 0)
+        self.assert_initial_stop_cannot_reseal(node, failure)
+
+    def test_first_stale_execution_requires_valid_payload_and_past_stamp(self):
+        for defect in ("frame", "quaternion", "translation", "stamp_sec", "stamp_nanosec", "future"):
+            with self.subTest(defect=defect):
+                node, clock = self.make_delayed_stale_execution_node(fresh_at=3.5)
+                original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+                def invalid_execution(target, source, *args, **kwargs):
+                    transform = original_lookup(target, source, *args, **kwargs)
+                    if target == "odom":
+                        if defect == "frame":
+                            transform.child_frame_id = "another_base"
+                        elif defect == "quaternion":
+                            transform.transform.rotation.w = 2.0
+                        elif defect == "translation":
+                            transform.transform.translation.x = float("nan")
+                        elif defect == "stamp_sec":
+                            transform.header.stamp.sec = -1
+                        elif defect == "stamp_nanosec":
+                            transform.header.stamp.nanosec = 1_000_000_000
+                        else:
+                            transform.header.stamp.sec += 4
+                    return transform
+
+                node.tf_buffer.lookup_transform.side_effect = invalid_execution
+                _, evidence = self.assert_stopped(
+                    node, clock, deadline=3.25, denial="required_tf_edge_has_non_acquisition_failure",
+                )
+                expected_reason = ("future_transform" if defect == "future" else
+                                   "malformed_transform_stamp" if defect.startswith("stamp_") else
+                                   "malformed_transform_pose")
+                self.assertEqual(node.latest_stop_details["reason"], expected_reason)
+                self.assertEqual(evidence["edges"]["execution_pose"]["waitable_stale_sample_count"], 0)
+
+    def test_first_stale_execution_before_cold_phase_cannot_extend_budget(self):
+        node, clock = self.make_delayed_stale_execution_node(stale_at=1.75, fresh_at=3.5)
+        _, evidence = self.assert_stopped(
+            node, clock, deadline=2.0, denial="required_tf_edge_has_non_acquisition_failure",
+        )
+        self.assertFalse(evidence["extension_used"])
+        self.assertEqual(evidence["edges"]["execution_pose"]["waitable_stale_sample_count"], 0)
+
+    def test_established_execution_edge_staleness_is_not_first_sample_acquisition(self):
+        node, clock = self.make_sampled_node(map_at=None)
+        original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+        def established_execution_stale(target, source, *args, **kwargs):
+            transform = original_lookup(target, source, *args, **kwargs)
+            if target == "odom" and clock.now >= 3.25:
+                transform.header.stamp.sec -= 2
+            return transform
+
+        node.tf_buffer.lookup_transform.side_effect = established_execution_stale
+        _, evidence = self.assert_stopped(
+            node, clock, deadline=3.25, denial="required_tf_edge_already_acquired",
+        )
+        edge = evidence["edges"]["execution_pose"]
+        self.assertGreater(edge["successful_sample_count"], 0)
+        self.assertEqual(edge["waitable_stale_sample_count"], 0)
+
+    def test_first_stale_execution_cannot_use_failed_peer_from_current_cycle(self):
+        for defect in ("missing", "stale", "future", "invalid", "never_acquired"):
+            with self.subTest(defect=defect):
+                node, clock = self.make_delayed_stale_execution_node(fresh_at=3.5)
+                original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+                def failed_peer(target, source, *args, **kwargs):
+                    if target == "map" and (defect == "never_acquired" or
+                                              (defect == "missing" and clock.now >= 3.25)):
+                        raise LookupException('"map" does not exist')
+                    transform = original_lookup(target, source, *args, **kwargs)
+                    if target == "map" and clock.now >= 3.25:
+                        if defect in ("stale", "future"):
+                            transform.header.stamp.sec += -2 if defect == "stale" else 2
+                        elif defect == "invalid":
+                            transform.transform.rotation.w = 2.0
+                    return transform
+
+                node.tf_buffer.lookup_transform.side_effect = failed_peer
+                _, evidence = self.assert_stopped(
+                    node, clock, deadline=3.25,
+                    denial=("required_tf_edge_has_non_acquisition_failure" if defect == "never_acquired"
+                            else "required_tf_edge_already_acquired"),
+                )
+                self.assertEqual(evidence["edges"]["execution_pose"]["waitable_stale_sample_count"], 0)
+
+    def test_first_stale_execution_and_replacement_both_require_map_continuity(self):
+        for drift_at in (3.25, 3.5):
+            with self.subTest(drift_at=drift_at):
+                node, clock = self.make_delayed_stale_execution_node(fresh_at=3.5)
+                original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+                def drifting_peer(target, source, *args, **kwargs):
+                    transform = original_lookup(target, source, *args, **kwargs)
+                    if target == "map" and clock.now >= drift_at:
+                        transform.transform.translation.x += 0.2
+                    return transform
+
+                node.tf_buffer.lookup_transform.side_effect = drifting_peer
+                failure, evidence = self.assert_stopped(
+                    node, clock, deadline=drift_at, denial="continuity_admission_failed",
+                )
+                self.assertTrue(evidence["admission_failure_seen"])
+                self.assertEqual(node.latest_stop_details["continuity"]["reason"], "map_from_odom_translation_drift")
+                self.assert_initial_stop_cannot_reseal(node, failure)
+
+    def test_first_stale_execution_wait_rechecks_sensors_executors_and_motion(self):
+        for defect in ("sensor", "tf_executor", "sensor_executor", "motion"):
+            with self.subTest(defect=defect):
+                node, clock = self.make_delayed_stale_execution_node(fresh_at=4.0)
+                if defect == "sensor":
+                    def freshness(*args):
+                        if clock.now >= 3.5:
+                            node.latest_stop_details = {"source": "message_freshness", "reason": "stale scan"}
+                            return "stale scan"
+                        return ""
+                    node._freshness_failure.side_effect = freshness
+                elif defect.endswith("executor"):
+                    setattr(node, f"initial_{defect}_health_probe", Mock(side_effect=lambda: {"ready": clock.now < 3.5}))
+                else:
+                    def report_motion(timeout):
+                        clock.wait(timeout)
+                        node.motion_published = clock.now >= 3.5
+                    node._service_or_wait_for_callbacks.side_effect = report_motion
+                if defect == "motion":
+                    self.assertEqual(self.wait(node, clock), "initial runtime input acquisition requested after motion")
+                    self.assertEqual(clock.now, 3.5)
+                    self.assertEqual(node.latest_initial_tf_acquisition["denial_reason"], "motion_already_published")
+                    self.assertNotIn("initial_runtime_input_ready", [c.kwargs["event"] for c in node._append_controller_trace.call_args_list])
+                    node.publish_zero.assert_called()
+                else:
+                    self.assert_stopped(
+                        node, clock, deadline=3.5,
+                        denial="sensor_inputs_not_fresh" if defect == "sensor" else f"{defect}_not_ready",
+                    )
+                self.assertGreaterEqual(node.latest_initial_tf_acquisition["edges"]["execution_pose"]["waitable_stale_sample_count"], 1)
+
+    def test_first_stale_execution_cannot_admit_fresh_sample_at_or_after_deadline(self):
+        for blocking in (False, True):
+            with self.subTest(blocking=blocking):
+                node, clock = self.make_delayed_stale_execution_node(fresh_at=4.75 if blocking else 5.0)
+                original_lookup = node.tf_buffer.lookup_transform.side_effect
+
+                def late_lookup(target, source, *args, **kwargs):
+                    transform = original_lookup(target, source, *args, **kwargs)
+                    if blocking and target == "odom" and clock.now >= 4.75:
+                        clock.now = 5.1
+                    return transform
+
+                node.tf_buffer.lookup_transform.side_effect = late_lookup
+                self.assert_stopped(
+                    node, clock, deadline=5.1 if blocking else 5.0,
+                    denial="cold_tf_acquisition_deadline_exhausted",
+                )
 
     def test_persistent_first_stale_global_sample_exhausts_same_budget_without_reseal(self):
         node, clock = self.make_delayed_stale_map_node()

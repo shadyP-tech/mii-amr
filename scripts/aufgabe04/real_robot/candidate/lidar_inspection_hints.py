@@ -15,6 +15,18 @@ from scripts.aufgabe04.navigation.coverage.coverage_visibility_reporting import 
 def load_camera_lidar_hints(*, survey_root, plan, snapshot, registry, planning_frame):
     if registry is None or planning_frame is None:
         return {}, {"reason": "survey_planning_frame_unavailable", "motion_authorized": False}
+    receipts, failures = load_camera_lidar_receipts(
+        survey_root=survey_root, plan=plan, snapshot=snapshot, registry=registry,
+    )
+    hints, candidates = derive_lidar_inspection_hints(
+        snapshot=snapshot, registry=registry, planning_frame=planning_frame, receipts=receipts,
+    )
+    return hints, {"candidates": candidates, "unavailable_epochs": failures,
+                   "motion_authorized": False, "stand_axis_authorized": False}
+
+
+def load_camera_lidar_receipts(*, survey_root, plan, snapshot, registry):
+    """Read original survey evidence without changing its registry or IDs."""
     receipts, failures = [], {}
     viewpoint_ids = sorted({v for c in registry.candidates
                             if c.candidate_uid in snapshot.candidate_uids for v in c.viewpoint_ids})
@@ -36,8 +48,4 @@ def load_camera_lidar_hints(*, survey_root, plan, snapshot, registry, planning_f
             # Hints are optional. Unavailable or corrupt evidence cannot steer a
             # view; the ordinary candidate route and all its checks remain.
             failures[viewpoint_id] = str(exc)
-    hints, candidates = derive_lidar_inspection_hints(
-        snapshot=snapshot, registry=registry, planning_frame=planning_frame, receipts=receipts,
-    )
-    return hints, {"candidates": candidates, "unavailable_epochs": failures,
-                   "motion_authorized": False, "stand_axis_authorized": False}
+    return tuple(receipts), failures

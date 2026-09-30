@@ -13,6 +13,9 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.camera_head_alignment import (
+    requested_camera_base_pose, camera_facing_base_yaw, camera_alignment_endpoint,
+)
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     INSPECTION_VIEW_BEARING_MODE,
     load_candidate_inspection_view,
@@ -220,6 +223,7 @@ def validate_detected_stand_preapproach_binding(
     from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
     geometry = selected.geometry
     estimate = None
+    camera_alignment = None
     if bearing_mode == CAMERA_AXIS_FACE_BEARING_MODE:
         axis_path_value = metadata.get("axis_observation_json")
         if not isinstance(axis_path_value, str) or not axis_path_value:
@@ -370,10 +374,23 @@ def validate_detected_stand_preapproach_binding(
                 raise ValueError("inspection view cannot claim certified backside axis")
             offset = _finite_number(metadata.get("approach_offset_m"), "approach_offset_m")
             normal = float(view["view_normal_rad"])
-            if math.hypot(
-                final.pose.x_m - selected.geometry.x_m - offset * math.cos(normal),
-                final.pose.y_m - selected.geometry.y_m - offset * math.sin(normal),
-            ) > 0.06:
+            camera_alignment = view.get("camera_alignment")
+            if metadata.get("camera_alignment") != camera_alignment:
+                raise ValueError("camera alignment differs from bound inspection view")
+            if camera_alignment is None:
+                expected_x = selected.geometry.x_m + offset * math.cos(normal)
+                expected_y = selected.geometry.y_m + offset * math.sin(normal)
+            else:
+                if abs(camera_alignment["camera_standoff_m"]-offset) > 1e-9:
+                    raise ValueError("camera alignment standoff binding mismatch")
+                requested = requested_camera_base_pose(camera_alignment)
+                expected_x, expected_y = requested.x_m, requested.y_m
+                if math.hypot(camera_alignment["center_x_m"]-selected.geometry.x_m,
+                              camera_alignment["center_y_m"]-selected.geometry.y_m) > selected.geometry.radius_m+selected.geometry.uncertainty_m:
+                    raise ValueError("fitted head center outside candidate envelope")
+                if not camera_alignment_endpoint(camera_alignment, final.pose)["accepted"]:
+                    raise ValueError("camera alignment endpoint exceeds angular budget")
+            if math.hypot(final.pose.x_m-expected_x, final.pose.y_m-expected_y) > .06:
                 raise ValueError("inspection terminal position differs from requested view")
         except (OSError, TypeError, KeyError, ValueError) as exc:
             failures.append(f"inspection view validation failed: {exc}")
@@ -420,6 +437,11 @@ def validate_detected_stand_preapproach_binding(
         geometry.y_m - final.pose.y_m,
         geometry.x_m - final.pose.x_m,
     )
+    if camera_alignment is not None:
+        try:
+            expected_yaw = camera_facing_base_yaw(camera_alignment, final.pose.x_m, final.pose.y_m)
+        except ValueError as exc:
+            failures.append(str(exc))
     if (
         math.isfinite(final.pose.yaw_rad)
         and _angle_error(final.pose.yaw_rad, expected_yaw)
@@ -427,6 +449,13 @@ def validate_detected_stand_preapproach_binding(
     ):
         failures.append("terminal yaw does not face the selected stand")
 
+    if camera_alignment is not None:
+        fitted_x, fitted_y = camera_alignment["center_x_m"], camera_alignment["center_y_m"]
+        fit_uncertainty = camera_alignment["center_uncertainty_m"]
+        if math.hypot(final.pose.x_m-fitted_x, final.pose.y_m-fitted_y)+1e-9 < minimum_active+fit_uncertainty:
+            failures.append("terminal pose violates uncertain fitted head standoff")
+        if _minimum_route_clearance_m(leg, fitted_x, fitted_y)+1e-9 < minimum_transit+fit_uncertainty:
+            failures.append("route violates uncertain fitted head keepout")
     if estimate is not None:
         current_distance = math.hypot(final.pose.x_m-geometry.x_m,final.pose.y_m-geometry.y_m)
         if current_distance+1e-9 < minimum_active+geometry.uncertainty_m:

@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.camera_head_alignment import validate_camera_alignment
 from scripts.aufgabe04.artifacts.content_store import (
     load_content_hashed_json,
     payload_sha256,
@@ -70,6 +71,14 @@ def load_candidate_inspection_view(path: Path) -> dict[str, object]:
                 raise ValueError(f"inspection view {field} is malformed")
             if file_sha256(Path(source["path"])) != source.get("sha256"):
                 raise ValueError(f"inspection view {field} content changed")
+    alignment = payload.get("camera_alignment")
+    if alignment is not None:
+        validate_camera_alignment(alignment)
+        if (payload["purpose"] != "lidar_axis_hint"
+                or alignment["candidate_uid"] != payload["candidate_uid"]
+                or alignment["candidate_snapshot_sha256"] != payload["candidate_snapshot_sha256"]
+                or abs(math.remainder(alignment["view_normal_rad"]-normal, 2*math.pi)) > 1e-9):
+            raise ValueError("inspection view camera alignment binding mismatch")
     return payload
 
 
@@ -116,6 +125,7 @@ def write_candidate_inspection_view(
     view_index: int,
     source_observation_path: Path | None = None,
     source_view_path: Path | None = None,
+    camera_alignment: dict | None = None,
 ) -> dict[str, object]:
     candidate = snapshot.candidate_for(candidate_uid)
     if candidate is None:
@@ -142,5 +152,8 @@ def write_candidate_inspection_view(
         "motion_authorized": False,
         "stand_axis_authorized": False,
     }
+    if camera_alignment is not None:
+        validate_camera_alignment(camera_alignment)
+        payload["camera_alignment"] = camera_alignment
     write_content_hashed_json(path, payload, hash_field=HASH_FIELD)
     return load_candidate_inspection_view(path)

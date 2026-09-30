@@ -1,13 +1,12 @@
 """Publish a current head-centering advisory without admitting angle or motion.
 
 The observer stages the measured head only after the ordinary crop and identity
-gates. A successful stationary frame update is a separate prerequisite. The
-advisory is consumed by its immediate status publication and never survives a
-new sensor tuple or a motion epoch reset.
+gates. Centering is reviewed after stationary frame admission and before precise
+axis accumulation. The advisory is consumed by its immediate status publication
+and never survives a new sensor tuple or a motion epoch reset.
 """
 
 from dataclasses import dataclass
-import time
 
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256, real_robot_profile_sha256,
@@ -15,11 +14,8 @@ from scripts.aufgabe04.real_robot.configuration.profile import (
 from scripts.aufgabe04.real_robot.observer.candidate_centering import (
     build_camera_centering_advisory,
 )
-from scripts.aufgabe04.real_robot.observer.qr_observation_pose import (
-    qr_observation_grace_pending,
-)
 from scripts.aufgabe04.real_robot.observer.inspection_framing import (
-    ProductiveViewHold, review_centering_destination,
+    review_centering_destination,
 )
 
 
@@ -71,25 +67,18 @@ def candidate_centering_status(adapter):
     return result
 
 
-def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_sec):
+def review_candidate_centering(adapter, *, snapshot, image_stamp_sec,
+        observed_at_sec, motion_epoch_reset=False):
+    """Review an admitted current head without waiting for an axis sample."""
     adapter._candidate_centering_ready = None
     if not centering_observation_requested(adapter.args):
         return
     current = getattr(adapter, "_pending_candidate_centering", None)
     if current is None or current.image_stamp_sec != image_stamp_sec:
         return
-    snapshot = update.snapshot
-    if (not update.frame_accepted or snapshot.poisoned or update.motion_epoch_reset
+    if (snapshot.poisoned or motion_epoch_reset
             or current.target_key != snapshot.target_key):
         return
-    hold = getattr(adapter, "_productive_view_hold", None)
-    if hold is None:
-        hold = adapter._productive_view_hold = ProductiveViewHold()
-    now = time.monotonic()
-    hold_pending = hold.observe(context=(snapshot.target_key, snapshot.motion_epoch,
-        adapter.stand_model_profile.sha256, current.intrinsics, current.scan_from_camera,
-        current.base_from_camera), now_sec=now, axis_sample_accepted=update.axis_sample_accepted)
-    current.metadata["productive_view_opportunity"] = hold.metadata(now)
     try:
         advisory = build_camera_centering_advisory(
             association=current.association, intrinsics=current.intrinsics,
@@ -122,9 +111,6 @@ def record_candidate_centering(adapter, *, update, image_stamp_sec, observed_at_
     if getattr(adapter.args, "candidate_centering_json", None) is None:
         diagnostic.update(state="blocked", reason="centering_motion_disabled_for_capture")
         return
-    if hold_pending:
-        diagnostic.update(state="deferred", reason="preserve_productive_geometry_view")
-        return
     framing = review_centering_destination(advisory,
         search_association=current.association.lidar_association.search_association)
     current.metadata["centering_framing"] = framing.metadata()
@@ -141,8 +127,7 @@ def commit_candidate_centering(adapter):
     ready = getattr(adapter, "_candidate_centering_ready", None)
     adapter._candidate_centering_ready = None
     output = getattr(adapter.args, "candidate_centering_json", None)
-    if (ready is None or output is None or getattr(adapter, "completed", False)
-            or qr_observation_grace_pending(adapter)):
+    if ready is None or output is None or getattr(adapter, "completed", False):
         return None
     current, advisory = ready
     payload = advisory.metadata()

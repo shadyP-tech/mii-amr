@@ -16,6 +16,10 @@ from pathlib import Path
 import time
 from typing import Callable, Mapping
 
+from scripts.aufgabe04.perception.stand_axis.model_profile import StandModelProfile
+from scripts.aufgabe04.real_robot.configuration.profile import CameraCalibrationProfile
+from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import CandidateLidarCaptureRequest, CandidateLidarView
+
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     INSPECTION_VIEW_BEARING_MODE, load_candidate_inspection_view, write_candidate_inspection_view,
 )
@@ -247,6 +251,10 @@ class CandidateApproachConfig:
     calibration_profile_sha256: str | None = None
     robot_profile_sha256: str | None = None
     stop_after_camera_candidates: int | None = None
+    camera_calibration: CameraCalibrationProfile | None = None
+    lidar_scan_frame: str | None = None
+    lidar_scan_topic: str | None = None
+    measured_stand_model: StandModelProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -359,6 +367,7 @@ class _CandidateObservationFrame:
     decision_binding: CameraCandidateFrameBinding | None
     observation_pose: Pose2D | None = None
     retained_backside_axis_path: Path | None = None
+    localization_evidence_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -986,6 +995,11 @@ def _select_initial_preapproach(
         survey_root=config.survey_root, plan=config.plan, snapshot=config.snapshot,
         registry=request.source_registry, planning_frame=request.planning_frame,
     )
+    from scripts.aufgabe04.navigation.approach.lidar_head_observability import lidar_head_model_admission
+    model_review = lidar_head_model_admission(config.measured_stand_model)
+    hint_diagnostics = {**hint_diagnostics, "model_admission": model_review}
+    if not model_review["accepted"]:
+        hints = {}
     planned = plan_and_select_camera_candidate(
         map_yaml=config.map_yaml,
         semantic_map_id=config.semantic_map_id,
@@ -1006,6 +1020,8 @@ def _select_initial_preapproach(
         route_uncertainty_context=request.route_uncertainty_context,
         lidar_inspection_hints=hints,
         lidar_hint_diagnostics=hint_diagnostics,
+        camera_calibration=config.camera_calibration,
+        camera_alignment_uncertainty=_camera_alignment_uncertainty(request.route_uncertainty_context),
     )
     return CameraCandidateInitialSelection(
         candidate_uid=planned.selected_candidate_uid,
@@ -1089,6 +1105,18 @@ class CandidateApproachEffects:
     event_sink: Callable[[Path, Mapping[str, object]], None] = _append_jsonl
     clock: Callable[[], float] = time.time
     run_centering_turn: Callable[..., object] | None = None
+    capture_lidar_view: Callable[[CandidateLidarCaptureRequest], CandidateLidarView] | None = None
+
+
+def _camera_alignment_uncertainty(context):
+    if context is None:
+        return None
+    from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import radial_sigma_m
+    policy = context.admission_config
+    return {
+        "localization_position_m": policy.localization_sigma_multiplier * radial_sigma_m(context.covariance),
+        "localization_yaw_rad": policy.localization_sigma_multiplier * policy.heading_sigma_rad,
+    }
 
 
 def _read_finite_pose2d(
@@ -1545,6 +1573,7 @@ def _execute_candidate_motion(
         source_root: Path,
         fresh_start_pose: Pose2D,
         fresh_planning_frame: CandidatePlanningFrame | None,
+        fresh_localization_evidence_path: Path,
     ) -> tuple[CandidateApproachConfig, CandidatePreapproachRequest]:
         replacement_config = config
         replacement_output_dir = source_root
@@ -1611,12 +1640,50 @@ def _execute_candidate_motion(
                     raise RuntimeError("inspection recovery lacks source planning frame")
                 normal += (fresh_planning_frame.map_from_odom.yaw_rad
                            - plan_planning_frame.map_from_odom.yaw_rad)
+            alignment = old_view.get("camera_alignment")
+            if alignment is not None:
+                from scripts.aufgabe04.navigation.approach.camera_head_alignment import reproject_camera_alignment
+                loader = effects.load_route_uncertainty_readiness
+                if loader is None:
+                    raise RuntimeError("camera alignment recovery lacks fresh uncertainty readiness")
+                # Use the exact stopped-localization artifact admitted for this
+                # replacement, including same-frame reseals. Old route bounds
+                # cannot establish the uncertainty of a newly admitted epoch.
+                if fresh_planning_frame is not None:
+                    odom_frame = fresh_planning_frame.odom_frame
+                elif plan_planning_frame is not None:
+                    odom_frame = plan_planning_frame.odom_frame
+                else:
+                    fresh_payload = json.loads(Path(fresh_localization_evidence_path).read_text())
+                    odom_frame = fresh_payload.get("runtime_config", {}).get("odom_frame")
+                    if not isinstance(odom_frame, str) or not odom_frame:
+                        raise RuntimeError("camera alignment recovery lacks fresh odom frame binding")
+                context = loader(CandidateRouteUncertaintyReadinessRequest(
+                    preflight_json=fresh_localization_evidence_path,
+                    expected_start=fresh_start_pose,
+                    planning_frame=replacement_config.planning_frame,
+                    odom_frame=odom_frame,
+                    robot_radius_m=replacement_config.robot_radius_m,
+                    sigma_multiplier=replacement_config.uncertainty_sigma_multiplier,
+                ))
+                if not isinstance(context, CandidateRouteUncertaintyContext):
+                    raise TypeError("camera alignment recovery requires fresh CandidateRouteUncertaintyContext")
+                alignment = reproject_camera_alignment(
+                    alignment, snapshot=replacement_snapshot,
+                    candidate_uid=plan_request.candidate_uid,
+                    source_map_from_odom=(None if fresh_planning_frame is None else plan_planning_frame.map_from_odom),
+                    target_map_from_odom=(None if fresh_planning_frame is None else fresh_planning_frame.map_from_odom),
+                    uncertainty=_camera_alignment_uncertainty(context),
+                )
+                alignment["localization_source_evidence"] = dict(context.source_evidence)
+                normal = alignment["view_normal_rad"]
             replacement_view_path = source_root / "inspection_view_frame_projection.json"
             write_candidate_inspection_view(
                 replacement_view_path, snapshot=replacement_snapshot,
                 candidate_uid=plan_request.candidate_uid, start=fresh_start_pose,
                 view_normal_rad=normal, purpose=str(old_view["purpose"]),
                 view_index=int(old_view["view_index"]), source_view_path=inspection_view_path,
+                camera_alignment=alignment,
             )
             inspection_view_path = replacement_view_path
         return replacement_config, replace(
@@ -1639,6 +1706,7 @@ def _execute_candidate_motion(
             source_root=attempt.source_root,
             fresh_start_pose=attempt.fresh_start_pose,
             fresh_planning_frame=startup_planning_frame,
+            fresh_localization_evidence_path=attempt.fresh_localization_evidence_path,
         )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
         return _motion_request(
@@ -1685,6 +1753,7 @@ def _execute_candidate_motion(
             source_root=attempt.source_root,
             fresh_start_pose=attempt.fresh_start_pose,
             fresh_planning_frame=runtime_planning_frame,
+            fresh_localization_evidence_path=attempt.fresh_localization_evidence_path,
         )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
         return _motion_request(
@@ -2439,6 +2508,7 @@ def execute_candidate_approach_phase(
                 view_normal_rad=selection.prepared_plan.approach_bearing_rad - math.pi,
                 purpose="lidar_axis_hint", view_index=0,
                 source_observation_path=hint_evidence_path,
+                camera_alignment=selection.prepared_plan.camera_alignment,
             )
         preapproach_plan_request = CandidatePreapproachRequest(
             map_yaml=planning_config.map_yaml,

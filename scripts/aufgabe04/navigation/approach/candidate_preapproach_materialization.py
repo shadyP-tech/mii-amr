@@ -16,6 +16,9 @@ from pathlib import Path
 import shutil
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.camera_head_alignment import (
+    requested_camera_base_pose, camera_alignment_endpoint,
+)
 from scripts.aufgabe04.navigation.approach.candidate_inspection_view import (
     INSPECTION_VIEW_BEARING_MODE,
     load_candidate_inspection_view,
@@ -119,6 +122,11 @@ def materialize_candidate_preapproach_plan(
             candidate_uid=prepared.candidate_uid, start=prepared.start,
             view_normal_rad=normalize_angle(prepared.approach_bearing_rad - math.pi),
         )
+    if prepared.camera_alignment != (None if inspection_view is None else inspection_view.get("camera_alignment")):
+        raise ValueError("prepared camera alignment differs from inspection view")
+    if prepared.camera_alignment is not None:
+        if not camera_alignment_endpoint(prepared.camera_alignment, prepared.selected_approach_pose)["accepted"]:
+            raise ValueError("prepared camera alignment exceeds angular budget")
     expected_mode = INSPECTION_VIEW_BEARING_MODE if inspection_view else (
         ROBOT_TO_STAND_BEARING_MODE
         if approach_normal_rad is None
@@ -259,6 +267,12 @@ def materialize_candidate_preapproach_plan(
             },
         }
     )
+    metadata["head_alignment_verified"] = False
+    metadata["arrival_verification_required"] = True
+    if prepared.camera_alignment is not None:
+        metadata["camera_alignment"] = prepared.camera_alignment
+        metadata["camera_alignment_endpoint"] = camera_alignment_endpoint(
+            prepared.camera_alignment, prepared.selected_approach_pose)
     if selection_evidence is not None:
         metadata["camera_candidate_selection"] = dict(selection_evidence)
     if estimate is not None:
@@ -366,6 +380,7 @@ def plan_candidate_preapproach(
         physical_clearance=physical_clearance,
         approach_normal_rad=approach_normal_rad,
         validated_target_center=estimate,
+        camera_alignment=None if inspection_view is None else inspection_view.get("camera_alignment"),
         inspection_view_normal_rad=(None if inspection_view is None else float(
             inspection_view["view_normal_rad"]
         )),
@@ -515,6 +530,8 @@ def _validate_goal_cell_policy_binding(
         * math.sin(prepared.approach_bearing_rad),
         prepared.approach_bearing_rad,
     )
+    if prepared.camera_alignment is not None:
+        expected_requested_goal = requested_camera_base_pose(prepared.camera_alignment)
     validate_goal_cell_selection_binding(
         evidence,
         base_costmap=prepared.dry_run.base_costmap,

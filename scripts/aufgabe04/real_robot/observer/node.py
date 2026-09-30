@@ -169,7 +169,7 @@ from scripts.aufgabe04.real_robot.observer.qr_observation_pose import (
     qr_observation_grace_pending,
 )
 from scripts.aufgabe04.real_robot.observer.candidate_centering_receipt import (
-    prepare_candidate_centering, record_candidate_centering, commit_candidate_centering,
+    prepare_candidate_centering, review_candidate_centering, commit_candidate_centering,
     centering_observation_requested, candidate_centering_status,
 )
 from scripts.aufgabe04.artifacts.backside_axis_observation import MINIMUM_BACKSIDE_AXIS_CONFIDENCE
@@ -829,7 +829,6 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._qr_observation_pose_ready = None
         self._pending_candidate_centering = None
         self._candidate_centering_ready = None
-        self._productive_view_hold = None
         self._reset_scan_witnesses()
         self._scan_target_persistence = None
         self._qr_scan_target_persistence = None
@@ -965,6 +964,26 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 return AxisWindowReview(False, MEASURED_HEAD_SOURCES,
                                         "current_head_window_input_unavailable")
 
+        # Reacquire and frame the current physical target before collecting its
+        # orientation. This callback runs only after the common association,
+        # freshness, stationary-epoch and QR-conflict gates have admitted pixels.
+        # A map-only target can never supply a centering advisory here.
+        self._candidate_centering_ready = None
+        if centering_observation_requested(self.args):
+            geometry_review = review_axis
+            previous_epoch = evidence.snapshot().motion_epoch
+
+            def review_axis(snapshot):
+                review_candidate_centering(self, snapshot=snapshot,
+                    image_stamp_sec=image_stamp_sec, observed_at_sec=observed_at_sec,
+                    motion_epoch_reset=snapshot.motion_epoch != previous_epoch)
+                if self._candidate_centering_ready is not None:
+                    return AxisWindowReview(False,
+                        tuple(snapshot.current_axis_sample_count_by_source),
+                        "current_target_requires_centering_before_inspection")
+                return (geometry_review(snapshot) if geometry_review is not None
+                        else AxisWindowReview(True))
+
         update = evidence.record_frame(
             target_key=self._target_evidence_key(),
             pose=self._evidence_pose(robot_pose),
@@ -982,7 +1001,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
             axis_window_review=review_axis,
         )
-        pending = getattr(self, "_pending_head_confidence", None)
+        centering_pending = self._candidate_centering_ready is not None
+        pending = None if centering_pending else getattr(self, "_pending_head_confidence", None)
         if pending is not None and pending[0].frame_stamp_sec == image_stamp_sec:
             if getattr(self, "_head_observation_confidence", None) is None:
                 self._head_observation_confidence = HeadObservationConfidence(
@@ -993,14 +1013,27 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 angle_temporally_consistent=(self._head_window_decision is not None
                                             and self._head_window_decision.current_sample_accepted))
             pending[1]["observation_confidence"] = self._head_confidence_metadata
-        record_qr_observation_pose(self, update=update, image_stamp_sec=image_stamp_sec,
+        if centering_pending:
+            # Precision results from this pre-turn view cannot bypass the
+            # handoff, even if publication expires and another image arrives.
+            # Keep the common QR identity/conflict history; no motion has yet
+            # occurred. The parent starts a fresh capture after a stopped turn.
+            self._immediate_front_ready = None
+            self._immediate_front_admission = None
+            self._bounded_head_ready = None
+            self._bounded_head_window = None
+            self._head_window_consistency = None
+            self._head_observation_confidence = None
+            self._head_confidence_metadata = None
+            self._qr_observation_pose_ready = None
+            self._qr_observation_pose_fallback = None
+        else:
+            record_qr_observation_pose(self, update=update, image_stamp_sec=image_stamp_sec,
+                                       observed_at_sec=observed_at_sec)
+            record_immediate_front(self, update=update, image_stamp_sec=image_stamp_sec,
                                    observed_at_sec=observed_at_sec)
-        record_immediate_front(self, update=update, image_stamp_sec=image_stamp_sec,
-                               observed_at_sec=observed_at_sec)
-        record_bounded_head(self, update=update, image_stamp_sec=image_stamp_sec,
-                            observed_at_sec=observed_at_sec)
-        record_candidate_centering(self, update=update, image_stamp_sec=image_stamp_sec,
-                                   observed_at_sec=observed_at_sec)
+            record_bounded_head(self, update=update, image_stamp_sec=image_stamp_sec,
+                                observed_at_sec=observed_at_sec)
         self._last_observation_update = update
         self._head_qr_tracking_stamp_sec = (
             image_stamp_sec
@@ -3233,12 +3266,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
     def _write_status(self, state: str, **details) -> None:
         if getattr(self,'_qr_binding_diagnostic',None) is not None:
             details['qr_binding_diagnostic'] = self._qr_binding_diagnostic
-        # Keep usable geometry and its fixed acquisition opportunity. Once a
-        # bounded current-head correction is ready, QR-only completion must not
-        # bypass it; the post-turn capture must independently reacquire identity.
-        committed = (commit_immediate_front(self) or commit_bounded_head(self)
-                     or (None if qr_observation_grace_pending(self) or backside_center_grace_pending(self) else commit_candidate_centering(self))
-                     or commit_qr_observation_pose(self))
+        # A current, safely executable framing correction owns this tuple.
+        # Expired publication also consumes it; never fall back to a precision
+        # receipt from the same pre-turn frame. Geometry/QR grace cannot delay
+        # target acquisition, while scan-boundary vetoes remain in the review.
+        centering_pending = getattr(self, "_candidate_centering_ready", None) is not None
+        committed = (commit_candidate_centering(self) if centering_pending else
+                     (commit_immediate_front(self) or commit_bounded_head(self)
+                      or commit_qr_observation_pose(self)))
         if committed is not None:
             state, committed_details = committed
             details = {**details, **committed_details}
@@ -3250,7 +3285,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 # invitation to wait forever or publish a legacy point angle.
                 state = "evidence_not_committable"
                 details = {**details, "reason": rejection}
-        if qr_observation_grace_pending(self) or backside_center_grace_pending(self):
+        if centering_pending or qr_observation_grace_pending(self) or backside_center_grace_pending(self):
             # Consume this tuple even while deferring movement advice; a later
             # TF or sensor status must never reuse its progress evidence.
             self._inspection_frame = None

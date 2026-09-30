@@ -7,6 +7,9 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from scripts.aufgabe04.navigation.approach.camera_head_alignment import (
+    make_camera_alignment, camera_alignment_endpoint,
+)
 from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateRouteOption,
     CameraCandidateSelection,
@@ -98,6 +101,8 @@ def plan_and_select_camera_candidate(
     route_uncertainty_context: CandidateRouteUncertaintyContext | None = None,
     lidar_inspection_hints: Mapping[str, LidarInspectionHint] | None = None,
     lidar_hint_diagnostics: Mapping[str, object] | None = None,
+    camera_calibration=None,
+    camera_alignment_uncertainty: Mapping[str, float] | None = None,
 ) -> PlannedCameraCandidateSelection:
     """Preview all unresolved routes, admit/rank them, and retain the winner.
 
@@ -168,9 +173,14 @@ def plan_and_select_camera_candidate(
                 prepared, view_evidence[candidate.candidate_uid] = _preview_lidar_views(
                     hint=hint, compute_kwargs=compute_kwargs, candidate=candidate,
                     support_class=support_class, selection_config=selection_config,
-                    uncertainty=route_uncertainty_context,
+                    uncertainty=route_uncertainty_context, camera_calibration=camera_calibration,
+                    camera_alignment_uncertainty=camera_alignment_uncertainty,
                 )
             if prepared is None:
+                view_evidence.setdefault(candidate.candidate_uid, {
+                    "fallback": True, "reason": "usable_lidar_fit_unavailable",
+                    "head_alignment_verified": False, "arrival_verification_required": True,
+                })
                 prepared = compute_candidate_preapproach_plan(**compute_kwargs)
         except CandidatePreapproachUnreachableError as exc:
             options.append(
@@ -252,18 +262,32 @@ def plan_and_select_camera_candidate(
 
 
 def _preview_lidar_views(*, hint, compute_kwargs, candidate, support_class,
-                         selection_config, uncertainty):
+                         selection_config, uncertainty, camera_calibration, camera_alignment_uncertainty):
     """Admit both perpendicular views before choosing one, then allow fallback."""
     normals = hint.normals(compute_kwargs["snapshot"], candidate.candidate_uid)
     evidence = {"hint": dict(hint.evidence), "views": [], "selected_normal_rad": None,
-                "fallback": True}
+                "fallback": True, "head_alignment_verified": False,
+                "arrival_verification_required": True}
     plans = []
+    # Missing support is an ordinary acquisition route, explicitly unverified.
+    try:
+        make_camera_alignment(hint=hint, snapshot=compute_kwargs["snapshot"],
+            candidate_uid=candidate.candidate_uid, normal_rad=normals[0],
+            standoff_m=compute_kwargs["approach_offset_m"], calibration=camera_calibration,
+            uncertainty=camera_alignment_uncertainty)
+    except (ValueError, TypeError, AttributeError) as exc:
+        evidence["reason"] = str(exc)
+        return None, evidence
     for index, normal in enumerate(normals):
         row = {"view_index": index, "normal_rad": normal, "accepted": False}
         evidence["views"].append(row)
+        alignment = make_camera_alignment(hint=hint, snapshot=compute_kwargs["snapshot"],
+            candidate_uid=candidate.candidate_uid, normal_rad=normal,
+            standoff_m=compute_kwargs["approach_offset_m"], calibration=camera_calibration,
+            uncertainty=camera_alignment_uncertainty)
         try:
             prepared = compute_candidate_preapproach_plan(
-                **compute_kwargs, inspection_view_normal_rad=normal,
+                **compute_kwargs, inspection_view_normal_rad=normal, camera_alignment=alignment,
             )
         except CandidatePreapproachUnreachableError as exc:
             row["reason"] = exc.reason
@@ -274,18 +298,10 @@ def _preview_lidar_views(*, hint, compute_kwargs, candidate, support_class,
             if not time_budget["accepted"]:
                 row["reason"] = time_budget["failure_reason"]
                 continue
-        # Quantization must not silently turn a perpendicular request into an
-        # oblique view. This is a viewing-quality gate, separate from safety.
-        pose = prepared.selected_approach_pose
-        actual = math.atan2(pose.y_m - candidate.geometry.y_m, pose.x_m - candidate.geometry.x_m)
-        target_error = math.hypot(
-            pose.x_m - candidate.geometry.x_m - prepared.approach_offset_m * math.cos(normal),
-            pose.y_m - candidate.geometry.y_m - prepared.approach_offset_m * math.sin(normal),
-        )
-        # Match the existing sealed inspection-route endpoint contract too.
-        if (abs(math.remainder(actual - normal, 2 * math.pi)) > math.radians(10)
-                or target_error > .06):
-            row["reason"] = "snapped_view_deviates_from_hint"
+        endpoint = camera_alignment_endpoint(alignment, prepared.selected_approach_pose)
+        row["camera_alignment_endpoint"] = endpoint
+        if not endpoint["accepted"]:
+            row["reason"] = "camera_alignment_uncertainty_budget_exceeded"
             continue
         option = CameraCandidateRouteOption(
             candidate_uid=candidate.candidate_uid, feasible=True, failure_reason=None,

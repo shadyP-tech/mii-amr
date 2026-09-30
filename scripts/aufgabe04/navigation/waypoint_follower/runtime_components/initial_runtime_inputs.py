@@ -69,8 +69,8 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             state.executor_health = dict(health)
             failure = sensor_failure or failure
             if not sensor_failure and failure:
-                # A stale first global sample may consume only the remaining
-                # cold-acquisition budget. Its already-acquired execution edge
+                # A stale first sample may consume only the remaining
+                # cold-acquisition budget. Its already-acquired peer edge
                 # must still be fresh after the failed lookup and live probes.
                 failure = _recheck_ready_edge_ages(node, state) or failure
         if not failure:
@@ -165,7 +165,13 @@ def _sample_initial_edges(node, state: InitialTfAcquisition) -> str:
         samples.append(("global_consistency", context.map_frame, context.odom_frame, node._map_from_odom_lookup()))
     samples = [(role, target, source, refresh_tf_sample_age(node, lookup))
                for role, target, source, lookup in samples]
-    for role, target, source, lookup in samples:
+    # Record fresh peers and losses of established peers before first samples.
+    # First-stale classification must see this iteration's peer, including a
+    # peer that just failed, regardless of which required edge arrived late.
+    for role, target, source, lookup in sorted(samples, key=lambda row: (
+        row[3].pose is None,
+        state.edges.get(row[0], {}).get("successful_sample_count", 0) == 0,
+    )):
         details = dict(lookup.details or {})
         if lookup.stamp_sec is not None:
             details["stamp_sec"] = lookup.stamp_sec

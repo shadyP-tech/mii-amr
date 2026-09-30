@@ -1,0 +1,355 @@
+{
+  "candidate_frame_projection_sha256": "4c8440d7aed1a1eb7d2801861ce6bded8351ffe9b26bc11ae8a14b254172ccd6",
+  "candidate_reprojections": {
+    "survey_candidate_0001": {
+      "canonical_odom_point": {
+        "x_m": 1.5521804536339356,
+        "y_m": 1.1751338614373767
+      },
+      "current_map_from_odom": {
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172
+      },
+      "current_map_point": {
+        "x_m": -1.1448545287155338,
+        "y_m": -0.3347413037866631
+      },
+      "diagnostics": {
+        "candidate_map_displacement_m": 0.11872203455931474,
+        "candidate_map_displacement_x_m": -0.023484804359723332,
+        "candidate_map_displacement_y_m": 0.11637605189251199,
+        "map_from_odom_absolute_yaw_drift_rad": 0.11815573599411,
+        "map_from_odom_translation_drift_m": 0.3439055961280002
+      },
+      "provenance": {
+        "canonical_odom_point": {
+          "x_m": 1.5521804536339356,
+          "y_m": 1.1751338614373767
+        },
+        "frozen_map_from_odom": {
+          "x_m": -3.060445082070722,
+          "y_m": -0.2773631901384357,
+          "yaw_rad": -0.73738868312309
+        },
+        "frozen_map_point": {
+          "x_m": -1.1213697243558105,
+          "y_m": -0.4511173556791751
+        },
+        "map_frame": "map",
+        "odom_frame": "odom",
+        "schema_version": 1,
+        "source_evidence_id": "7e5bf556950b9d4a565310a111e26a0f1f8a7b1ab9ea0d581d70735b940f8ec9"
+      },
+      "schema_version": 1
+    },
+    "survey_candidate_0002": {
+      "canonical_odom_point": {
+        "x_m": 1.5704577108747184,
+        "y_m": 2.552349045335482
+      },
+      "current_map_from_odom": {
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172
+      },
+      "current_map_point": {
+        "x_m": -0.09316977432829665,
+        "y_m": 0.5546488795868632
+      },
+      "diagnostics": {
+        "candidate_map_displacement_m": 0.16375518277656406,
+        "candidate_map_displacement_x_m": 0.1512087128203966,
+        "candidate_map_displacement_y_m": -0.06286242958544264,
+        "map_from_odom_absolute_yaw_drift_rad": 0.17155694853998,
+        "map_from_odom_translation_drift_m": 0.43542463160500666
+      },
+      "provenance": {
+        "canonical_odom_point": {
+          "x_m": 1.5704577108747184,
+          "y_m": 2.552349045335482
+        },
+        "frozen_map_from_odom": {
+          "x_m": -3.074376439088142,
+          "y_m": -0.36835615803073174,
+          "yaw_rad": -0.68398747057722
+        },
+        "frozen_map_point": {
+          "x_m": -0.24437848714869326,
+          "y_m": 0.6175113091723058
+        },
+        "map_frame": "map",
+        "odom_frame": "odom",
+        "schema_version": 1,
+        "source_evidence_id": "64a230a9ba655ba4c397b916b5b29e897c579b9a823379b4adbfaf18e43ed64d"
+      },
+      "schema_version": 1
+    },
+    "survey_candidate_0003": {
+      "canonical_odom_point": {
+        "x_m": 2.6707757755291675,
+        "y_m": 1.763768935462691
+      },
+      "current_map_from_odom": {
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172
+      },
+      "current_map_point": {
+        "x_m": 0.03310593130712691,
+        "y_m": -0.7931689416553738
+      },
+      "diagnostics": {
+        "candidate_map_displacement_m": 0.07391573919328097,
+        "candidate_map_displacement_x_m": -0.06931165387238192,
+        "candidate_map_displacement_y_m": -0.025679391308289556,
+        "map_from_odom_absolute_yaw_drift_rad": 0.11815573599411,
+        "map_from_odom_translation_drift_m": 0.3439055961280002
+      },
+      "provenance": {
+        "canonical_odom_point": {
+          "x_m": 2.6707757755291675,
+          "y_m": 1.763768935462691
+        },
+        "frozen_map_from_odom": {
+          "x_m": -3.060445082070722,
+          "y_m": -0.2773631901384357,
+          "yaw_rad": -0.73738868312309
+        },
+        "frozen_map_point": {
+          "x_m": 0.10241758517950883,
+          "y_m": -0.7674895503470842
+        },
+        "map_frame": "map",
+        "odom_frame": "odom",
+        "schema_version": 1,
+        "source_evidence_id": "ef1cebb09a6b62438675427e175531f17001df4dc0ca221d0126897c8fd8d7f4"
+      },
+      "schema_version": 1
+    },
+    "survey_candidate_0004": {
+      "canonical_odom_point": {
+        "x_m": 3.094364069248096,
+        "y_m": 3.8374516638976415
+      },
+      "current_map_from_odom": {
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172
+      },
+      "current_map_point": {
+        "x_m": 1.8763796414816158,
+        "y_m": 0.24698928196481607
+      },
+      "diagnostics": {
+        "candidate_map_displacement_m": 0.423303035074755,
+        "candidate_map_displacement_x_m": 0.12759875950212884,
+        "candidate_map_displacement_y_m": -0.4036136965924436,
+        "map_from_odom_absolute_yaw_drift_rad": 0.17155694853998,
+        "map_from_odom_translation_drift_m": 0.43542463160500666
+      },
+      "provenance": {
+        "canonical_odom_point": {
+          "x_m": 3.094364069248096,
+          "y_m": 3.8374516638976415
+        },
+        "frozen_map_from_odom": {
+          "x_m": -3.074376439088142,
+          "y_m": -0.36835615803073174,
+          "yaw_rad": -0.68398747057722
+        },
+        "frozen_map_point": {
+          "x_m": 1.748780881979487,
+          "y_m": 0.6506029785572597
+        },
+        "map_frame": "map",
+        "odom_frame": "odom",
+        "schema_version": 1,
+        "source_evidence_id": "64a230a9ba655ba4c397b916b5b29e897c579b9a823379b4adbfaf18e43ed64d"
+      },
+      "schema_version": 1
+    },
+    "survey_candidate_0005": {
+      "canonical_odom_point": {
+        "x_m": 2.3824860472646314,
+        "y_m": 3.6342226798424364
+      },
+      "current_map_from_odom": {
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172
+      },
+      "current_map_point": {
+        "x_m": 1.256101354387798,
+        "y_m": 0.651126863368922
+      },
+      "diagnostics": {
+        "candidate_map_displacement_m": 0.1936815993529435,
+        "candidate_map_displacement_x_m": 0.10947044145956597,
+        "candidate_map_displacement_y_m": -0.15977729617990744,
+        "map_from_odom_absolute_yaw_drift_rad": 0.11815573599411,
+        "map_from_odom_translation_drift_m": 0.3439055961280002
+      },
+      "provenance": {
+        "canonical_odom_point": {
+          "x_m": 2.3824860472646314,
+          "y_m": 3.6342226798424364
+        },
+        "frozen_map_from_odom": {
+          "x_m": -3.060445082070722,
+          "y_m": -0.2773631901384357,
+          "yaw_rad": -0.73738868312309
+        },
+        "frozen_map_point": {
+          "x_m": 1.146630912928232,
+          "y_m": 0.8109041595488294
+        },
+        "map_frame": "map",
+        "odom_frame": "odom",
+        "schema_version": 1,
+        "source_evidence_id": "aa824d39f7b559d955c971ea8c2f979094ab6b55f495531974d6d980fccabd38"
+      },
+      "schema_version": 1
+    },
+    "survey_candidate_0006": {
+      "canonical_odom_point": {
+        "x_m": 3.2976253720259376,
+        "y_m": 3.07676319555573
+      },
+      "current_map_from_odom": {
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172
+      },
+      "current_map_point": {
+        "x_m": 1.435414879257531,
+        "y_m": -0.4053236655933059
+      },
+      "diagnostics": {
+        "candidate_map_displacement_m": 0.18878695249343228,
+        "candidate_map_displacement_x_m": -0.013814784419555304,
+        "candidate_map_displacement_y_m": -0.18828081464450558,
+        "map_from_odom_absolute_yaw_drift_rad": 0.11815573599411,
+        "map_from_odom_translation_drift_m": 0.3439055961280002
+      },
+      "provenance": {
+        "canonical_odom_point": {
+          "x_m": 3.2976253720259376,
+          "y_m": 3.07676319555573
+        },
+        "frozen_map_from_odom": {
+          "x_m": -3.060445082070722,
+          "y_m": -0.2773631901384357,
+          "yaw_rad": -0.73738868312309
+        },
+        "frozen_map_point": {
+          "x_m": 1.4492296636770863,
+          "y_m": -0.21704285094880033
+        },
+        "map_frame": "map",
+        "odom_frame": "odom",
+        "schema_version": 1,
+        "source_evidence_id": "aa824d39f7b559d955c971ea8c2f979094ab6b55f495531974d6d980fccabd38"
+      },
+      "schema_version": 1
+    }
+  },
+  "motion_authorized": false,
+  "planning_frame_admission": {
+    "current_pose": {
+      "x_m": -0.6197293119817138,
+      "y_m": -0.3479459611613229,
+      "yaw_rad": -3.10425111567222
+    },
+    "map_frame": "map",
+    "map_from_odom": {
+      "x_m": -3.049927810635961,
+      "y_m": 0.06638154953000308,
+      "yaw_rad": -0.8555444191172
+    },
+    "odom_frame": "odom",
+    "pose_provenance": {
+      "chained_to_authoritative_translation_delta_m": 0.003635037471790583,
+      "chained_to_authoritative_yaw_delta_rad": 0.0006409652847381153,
+      "diagnostic_chained_map_capture": {
+        "age_sec": 0.051134313,
+        "available": true,
+        "capture_time_sec": 1790695797.6277792,
+        "max_future_sec": 0.25,
+        "observed_source_frame": "base_footprint",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 1.0,
+          "w": -0.018349256475905743,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.9998316382205463
+        },
+        "source_frame": "base_footprint",
+        "stamp_sec": 1790695797.576645,
+        "target_frame": "map",
+        "x_m": -0.6232850057709305,
+        "y_m": -0.34719062077537277,
+        "yaw_rad": -3.104892080956958
+      },
+      "diagnostic_chained_map_pose": {
+        "x_m": -0.6232850057709305,
+        "y_m": -0.34719062077537277,
+        "yaw_rad": -3.104892080956958
+      },
+      "map_from_odom_capture": {
+        "age_sec": -0.89584099,
+        "available": true,
+        "capture_time_sec": 1790695797.6281753,
+        "max_future_sec": 1.1,
+        "minimum_stamp_sec": 1790695798.5240164,
+        "observed_source_frame": "odom",
+        "observed_target_frame": "map",
+        "quaternion": {
+          "norm": 1.0,
+          "w": 0.9098921940752244,
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.41484478442060013
+        },
+        "source_frame": "odom",
+        "stamp_sec": 1790695798.5240164,
+        "stationary_window_reacquisition_count": 0,
+        "stationary_window_wait_sec": 8.952408097684383e-05,
+        "stationary_window_wait_timed_out": false,
+        "target_frame": "map",
+        "x_m": -3.049927810635961,
+        "y_m": 0.06638154953000308,
+        "yaw_rad": -0.8555444191172015
+      },
+      "odom_pose_capture": {
+        "age_sec": 0.051348064,
+        "available": true,
+        "capture_time_sec": 1790695797.627993,
+        "max_future_sec": 0.25,
+        "observed_source_frame": "base_footprint",
+        "observed_target_frame": "odom",
+        "quaternion": {
+          "norm": 1.0,
+          "w": -0.4317598795018265,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.9019885844358388
+        },
+        "source_frame": "base_footprint",
+        "stamp_sec": 1790695797.576645,
+        "target_frame": "odom",
+        "x_m": 1.9065301332056026,
+        "y_m": 1.5629059089260795,
+        "yaw_rad": -2.2487066965550184
+      },
+      "pose_basis": "direct_map_from_odom_times_observed_odom_pose"
+    }
+  },
+  "projected_candidate_snapshot_path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260929T152359Z/candidates/001_survey_candidate_0001/arrival_frame_projection/candidate_snapshot.json",
+  "projected_candidate_snapshot_sha256": "380a75135494dad7aa1c80edbb67d3ad55520227e31e03e9c49006e6f6b30f69",
+  "schema_version": 1,
+  "source_candidate_snapshot_path": "results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260929T152359Z/candidate_snapshot.json",
+  "source_candidate_snapshot_sha256": "1665fcf7ad0f869bf3abfc4132a4bc80daeae48b79af25ab1bbb7717fe7eaf1b",
+  "source_registry_sha256": "9ab38f80d1f4a60834fa0608eb47a8689d93ca5b3bca3817d1f0cce747a662c5"
+}

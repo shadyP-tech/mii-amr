@@ -104,7 +104,9 @@ def execute_local_candidate_inspection(
             candidate_uid=candidate_uid, candidate_root=root,
         )
         return frame_type(config, candidate, planning,
-                          None if artifacts is None else artifacts.camera_decision_binding(), pose)
+                          None if artifacts is None else artifacts.camera_decision_binding(), pose,
+                          localization_evidence_path=(None if planning is None else
+                              root / "opposite_face_planning_localization.json"))
 
     def yaw(frame) -> float:
         return 0.0 if frame.planning_frame is None else frame.planning_frame.map_from_odom.yaw_rad
@@ -126,10 +128,12 @@ def execute_local_candidate_inspection(
         return value
 
     def plan_and_move(frame, canonical_normal, root, index, source_path,
-                      *, purpose="diverse_inspection", offset=None, camera_recovery=None):
+                      *, purpose="diverse_inspection", offset=None, camera_recovery=None,
+                      prepared_plan=None, selection_evidence=None):
         nonlocal motion_serial
         source_frame = frame
-        frame = retain_orientation_after_arrival(source_frame, fresh_frame(root / "planning"), root / "planning")
+        if prepared_plan is None:
+            frame = retain_orientation_after_arrival(source_frame, fresh_frame(root / "planning"), root / "planning")
         current = pose(frame)
         if current is None:
             raise RuntimeError("inspection route lacks a fresh finite start pose")
@@ -139,6 +143,7 @@ def execute_local_candidate_inspection(
             view_path, snapshot=frame.config.snapshot, candidate_uid=candidate_uid,
             start=current, view_normal_rad=map_normal, purpose=purpose,
             view_index=index, source_observation_path=source_path,
+            camera_alignment=None if prepared_plan is None else prepared_plan.camera_alignment,
         )
         request = request_type(
             map_yaml=frame.config.map_yaml, semantic_map_id=frame.config.semantic_map_id,
@@ -150,6 +155,7 @@ def execute_local_candidate_inspection(
             candidate_transit_radius_m=frame.config.candidate_transit_radius_m,
             physical_clearance=frame.config.physical_clearance,
             inspection_view_path=view_path,
+            prepared_plan=prepared_plan, selection_evidence=selection_evidence,
         )
         try:
             sealed = effects.plan_preapproach(request)
@@ -446,8 +452,42 @@ def execute_local_candidate_inspection(
             capture=capture, turn=turn,
         )
 
+    lidar_arrival_verified = False
+    if (effects.capture_lidar_view is not None and source_config.camera_calibration is not None
+            and source_registry is not None and effects.admit_planning_frame is not None
+            and effects.load_route_uncertainty_readiness is not None):
+        from scripts.aufgabe04.real_robot.candidate.lidar_acquisition import prepare_lidar_camera_arrival
+        from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import CandidateRouteUncertaintyReadinessRequest
+
+        def load_alignment_uncertainty(frame):
+            return effects.load_route_uncertainty_readiness(CandidateRouteUncertaintyReadinessRequest(
+                preflight_json=frame.localization_evidence_path,
+                expected_start=frame.planning_frame.current_pose,
+                planning_frame=frame.planning_frame.map_frame, odom_frame=frame.planning_frame.odom_frame,
+                robot_radius_m=source_config.robot_radius_m,
+                sigma_multiplier=source_config.uncertainty_sigma_multiplier,
+            ))
+
+        observation_frame, lidar_review, _ = prepare_lidar_camera_arrival(
+            initial_frame=observation_frame, source_config=source_config,
+            source_registry=source_registry, effects=effects, candidate_root=candidate_root,
+            fresh_frame=fresh_frame, plan_and_move=plan_and_move,
+            load_uncertainty=load_alignment_uncertainty,
+        )
+        lidar_arrival_verified = lidar_review["head_alignment_verified"]
+        if lidar_arrival_verified:
+            write_content_hashed_json(candidate_root / "candidate_arrival_admission.json", {
+                **lidar_review, "accepted": True,
+                "admission_kind": "fresh_lidar_calibrated_camera_alignment",
+                "requires_live_target_association": True,
+                "camera_centered": lidar_review["camera_centered_verified"],
+                "motion_authorized": False,
+            }, hash_field="candidate_arrival_admission_sha256")
+
     try:
-        initial = admit_corrected(candidate_root, observation_frame, 0)
+        # The fresh scan cohort has already checked actual camera alignment and
+        # physical range. A base-to-old-centroid yaw gate would undo that pose.
+        initial = observation_frame if lidar_arrival_verified else admit_corrected(candidate_root, observation_frame, 0)
     except CandidateInspectionRouteUnavailableError as exc:
         raise CandidateObservationUnavailableError(
             candidate_uid=candidate_uid, observation_attempt_index=0,

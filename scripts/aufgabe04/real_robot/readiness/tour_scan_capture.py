@@ -30,9 +30,10 @@ class TourScanCaptureError(RuntimeError):
 
 
 class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
-    def __init__(self, profile, tour_id):
+    def __init__(self, profile, tour_id, observation_not_before_sec=None):
         super().__init__("stored_pose_tour_scan_capture", namespace=profile.namespace)
         self.profile, self.tour_id = profile, tour_id
+        self.observation_not_before_sec = observation_not_before_sec
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.pending = deque(maxlen=12)
@@ -51,6 +52,9 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
             message, receipt = self.pending[0]
             try:
                 stamp = stamp_seconds(message.header.stamp)
+                if self.observation_not_before_sec is not None and stamp < self.observation_not_before_sec:
+                    self.pending.popleft()
+                    continue
                 if time.time()-stamp > MAX_SCAN_AGE_SEC:
                     raise ValueError("source scan expired before exact-time TF")
                 query = Time.from_msg(message.header.stamp)
@@ -85,7 +89,7 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
 
 
 def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
-                      timeout_sec: float = 3.0) -> Path:
+                      timeout_sec: float = 3.0, observation_not_before_sec: float | None = None) -> Path:
     """Capture exact-time odom scan evidence without any velocity publisher.
 
     The caller owns exclusive-motion preflight and the stopped state. This node
@@ -93,6 +97,8 @@ def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
     observes. A timeout or invalid cohort never produces an accepted artifact.
     """
     timeout = finite(timeout_sec, "timeout_sec")
+    if observation_not_before_sec is not None:
+        observation_not_before_sec = finite(observation_not_before_sec, "observation_not_before_sec")
     if not 0 < timeout <= 30:
         raise ValueError("capture timeout must be positive and at most 30 seconds")
     if rclpy is None:
@@ -105,7 +111,7 @@ def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
     try:
         if owns_context:
             rclpy.init(args=None)
-        node = _TourScanNode(profile, tour_id)
+        node = _TourScanNode(profile, tour_id, observation_not_before_sec)
         deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=min(.02, max(0., deadline-time.monotonic())))

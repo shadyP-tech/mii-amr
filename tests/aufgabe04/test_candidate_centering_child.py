@@ -174,10 +174,13 @@ def test_successful_turn_persists_revisions_and_requires_new_sensor_epoch(tmp_pa
         capture_with_centering(**args)
 
 
-def test_qr_and_advice_require_turn_and_a_new_observation(tmp_path):
-    initial=SimpleNamespace(recommendation_path=None,qr_observation_pose_path='old-qr',
+@pytest.mark.parametrize('completion_field',['recommendation_path','qr_observation_pose_path'])
+def test_completion_and_advice_require_turn_and_a_new_observation(tmp_path,completion_field):
+    initial=SimpleNamespace(recommendation_path=None,qr_observation_pose_path=None,
                             centering_advisory_path='advice')
-    fresh=SimpleNamespace(recommendation_path=None,qr_observation_pose_path='fresh-qr')
+    fresh=SimpleNamespace(recommendation_path=None,qr_observation_pose_path=None)
+    setattr(initial,completion_field,'old-observation')
+    setattr(fresh,completion_field,'fresh-observation')
     capture=Mock(side_effect=[initial,fresh])
     turn=Mock(return_value=('after',SimpleNamespace(
         result={'actual_angular_travel_rad':.09,'stopped_at_sec':12.},

@@ -10,6 +10,8 @@ import math
 from itertools import combinations
 from typing import Mapping, Sequence
 
+from scripts.aufgabe04.real_robot.configuration.geometry import rotate_vector
+
 
 MAX_SCAN_AGE_SEC = .25
 MAX_WINDOW_SEC = .50
@@ -113,6 +115,39 @@ def _validate_scan_record(scan: Mapping[str, object]) -> None:
         any_valid = True
     if not any_valid:
         raise ValueError("capture scan contains no valid finite returns")
+    if "head_plane_mount" in scan:
+        mount = scan["head_plane_mount"]
+        fields = {"ground_frame", "scan_height_above_ground_m", "scan_vertical_direction_x",
+                  "scan_vertical_direction_y", "scan_vertical_direction_z", "exact_transform_stamp_sec"}
+        if not isinstance(mount, Mapping) or set(mount) != fields:
+            raise ValueError("invalid scan head-plane mount metadata")
+        if not isinstance(mount["ground_frame"], str) or not mount["ground_frame"]:
+            raise ValueError("scan mount ground frame is unavailable")
+        for field in fields - {"ground_frame"}:
+            finite(mount[field], field)
+        if mount["exact_transform_stamp_sec"] != scan["stamp_sec"]:
+            raise ValueError("scan mount transform timestamp mismatch")
+        norm = sum(mount[f"scan_vertical_direction_{axis}"] ** 2 for axis in "xyz")
+        if abs(norm - 1.) > 1e-6:
+            raise ValueError("scan mount vertical direction must be normalized")
+
+
+def _head_plane_mount(scan_transform, base_transform, *, base_frame, stamp_sec):
+    """Retain exact 3-D mounting evidence only for a declared ground frame."""
+    if base_frame.lstrip("/").split("/")[-1] != "base_footprint":
+        return None
+    scan = scan_transform.transform
+    base = base_transform.transform
+    sq = tuple(getattr(scan.rotation, k) for k in "xyzw")
+    bq = tuple(getattr(base.rotation, k) for k in "xyzw")
+    inverse_base = (-bq[0], -bq[1], -bq[2], bq[3])
+    difference = tuple(getattr(scan.translation, k) - getattr(base.translation, k) for k in "xyz")
+    height = rotate_vector(difference, inverse_base)[2]
+    directions = [rotate_vector(rotate_vector(axis, sq), inverse_base)[2]
+                  for axis in ((1., 0., 0.), (0., 1., 0.), (0., 0., 1.))]
+    return {"ground_frame": base_frame, "scan_height_above_ground_m": height,
+            "scan_vertical_direction_x": directions[0], "scan_vertical_direction_y": directions[1],
+            "scan_vertical_direction_z": directions[2], "exact_transform_stamp_sec": stamp_sec}
 
 
 def scan_evidence(message: object, *, received_at_unix_sec: float,
@@ -124,12 +159,16 @@ def scan_evidence(message: object, *, received_at_unix_sec: float,
     receipt = finite(received_at_unix_sec, "received_at_unix_sec")
     if not -FUTURE_TOLERANCE_SEC <= receipt-stamp <= MAX_SCAN_AGE_SEC:
         raise ValueError("scan is stale or future-dated at receipt")
-    return {"stamp_sec": stamp, "received_at_unix_sec": receipt,
+    evidence = {"stamp_sec": stamp, "received_at_unix_sec": receipt,
             "scan_pose_stamp_sec": stamp, "base_pose_stamp_sec": stamp,
             "scan_pose_odom": exact_transform_pose(scan_transform, target_frame=odom_frame,
                 source_frame=scan_frame, stamp_sec=stamp),
             "base_pose_odom": exact_transform_pose(base_transform, target_frame=odom_frame,
                 source_frame=base_frame, stamp_sec=stamp), **scan_geometry(message)}
+    mount = _head_plane_mount(scan_transform, base_transform, base_frame=base_frame, stamp_sec=stamp)
+    if mount is not None:
+        evidence["head_plane_mount"] = mount
+    return evidence
 
 
 def capture_payload(scans: Sequence[Mapping[str, object]], *, tour_id: str,
@@ -152,6 +191,8 @@ def capture_payload(scans: Sequence[Mapping[str, object]], *, tour_id: str,
         raise ValueError("latest capture scan is stale or future-dated")
     for scan, stamp, receipt in zip(scans, stamps, receipts):
         _validate_scan_record(scan)
+        if "head_plane_mount" in scan and scan["head_plane_mount"]["ground_frame"] != base_frame:
+            raise ValueError("scan mount ground frame differs from capture base frame")
         if stamp <= 0:
             raise ValueError("capture source timestamp must be positive")
         if not -FUTURE_TOLERANCE_SEC <= receipt-stamp <= MAX_SCAN_AGE_SEC:

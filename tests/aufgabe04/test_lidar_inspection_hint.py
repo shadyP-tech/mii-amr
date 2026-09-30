@@ -4,7 +4,9 @@ import unittest
 
 from scripts.aufgabe04.navigation.approach.candidate_frame_projection import CandidatePlanningFrame
 from scripts.aufgabe04.navigation.approach.candidate_frame_reprojection import CandidateFrameProvenance, CandidatePoint2D
-from scripts.aufgabe04.navigation.approach.lidar_inspection_hint import derive_lidar_inspection_hints
+from scripts.aufgabe04.navigation.approach.lidar_inspection_hint import (
+    LidarInspectionHint, derive_lidar_inspection_hints, fit_current_lidar_view,
+)
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     StandSurveyRegistry, SurveyCandidate, STAND_SURVEY_REGISTRY_SCHEMA_VERSION,
     STATUS_PENDING_CAMERA, stand_survey_registry_sha256,
@@ -39,9 +41,9 @@ def hint_fixture(transform=PlanarTransform2D(0., 0., 0.)):
 
 
 def line_receipts(view=1, *, tangent=math.pi / 2, bearing=None, increment=.028,
-                  circle=False, frozen=PlanarTransform2D(0., 0., 0.)):
+                  circle=False, frozen=PlanarTransform2D(0., 0., 0.), distance=.6):
     bearing = (math.pi if view == 1 else math.radians(210)) if bearing is None else bearing
-    pose = Pose2D(.6 * math.cos(bearing), .6 * math.sin(bearing), math.remainder(bearing + math.pi, 2*math.pi))
+    pose = Pose2D(distance * math.cos(bearing), distance * math.sin(bearing), math.remainder(bearing + math.pi, 2*math.pi))
     ranges = []
     normal = (-math.sin(tangent), math.cos(tangent))
     for i in range(31):
@@ -88,6 +90,78 @@ class LidarInspectionHintTest(unittest.TestCase):
         self.assertFalse(hint.evidence["head_alignment_verified"])
         self.assertFalse(hint.evidence["stand_axis_authorized"])
         self.assertEqual(evidence["candidate_1"]["scan_count_by_view"], {"vp1": 4, "vp2": 4})
+        geometry = hint.fit_geometry(fixture[0], "candidate_1")
+        self.assertLess(math.hypot(geometry["center_x_m"] - .3, geometry["center_y_m"] + .2),
+                        geometry["center_uncertainty_m"])
+        self.assertGreater(geometry["angle_uncertainty_rad"], 0.)
+        self.assertFalse(hint.evidence["head_endpoints_observed"])
+        self.assertFalse(hint.evidence["angle_accuracy_calibrated"])
+
+    def test_legacy_hints_supply_no_bounded_center(self):
+        snapshot, _, _ = hint_fixture()
+        hint = self.derive(line_receipts() + line_receipts(2))[0]["candidate_1"]
+        legacy = LidarInspectionHint(hint.candidate_uid, hint.snapshot_sha256, hint.tangent_rad, {})
+        self.assertIsNone(legacy.fit_geometry(snapshot, "candidate_1"))
+
+    def test_additional_stopped_views_must_be_explicitly_admitted(self):
+        snapshot, registry, frame = hint_fixture()
+        scans = line_receipts() + tuple(replace(r, viewpoint_id="local_1") for r in line_receipts(2))
+        self.assertFalse(self.derive(scans)[0])
+        hints, _ = derive_lidar_inspection_hints(snapshot=snapshot, registry=registry,
+            planning_frame=frame, receipts=scans, additional_viewpoint_ids=("local_1",))
+        self.assertIn("candidate_1", hints)
+
+    def test_candidate_subset_keeps_full_snapshot_binding_and_rejects_unknown_ids(self):
+        snapshot, registry, frame = hint_fixture()
+        candidate = snapshot.candidates[0]
+        other = replace(candidate, candidate_uid="candidate_2",
+                        geometry=replace(candidate.geometry, x_m=2.),
+                        source=replace(candidate.source, observation_ids=("other_obs",)))
+        snapshot = replace(snapshot, candidates=(candidate, other))
+        receipts = line_receipts() + line_receipts(2)
+        arguments = dict(snapshot=snapshot, registry=registry, planning_frame=frame, receipts=receipts)
+        hints, diagnostics = derive_lidar_inspection_hints(**arguments, candidate_uids=("candidate_1",))
+        self.assertEqual(set(diagnostics), {"candidate_1"})
+        self.assertIsNotNone(hints["candidate_1"].fit_geometry(snapshot, "candidate_1"))
+        with self.assertRaises(ValueError):
+            hints["candidate_1"].fit_geometry(replace(snapshot, candidates=(candidate,)), "candidate_1")
+        for uids in (("unknown",), ("candidate_1", "candidate_1")):
+            with self.assertRaises(ValueError):
+                derive_lidar_inspection_hints(**arguments, candidate_uids=uids)
+
+    def test_current_view_can_verify_but_cannot_establish_independent_views(self):
+        snapshot, registry, frame = hint_fixture()
+        receipts = line_receipts()
+        fit = fit_current_lidar_view(snapshot=snapshot, registry=registry, planning_frame=frame,
+                                    candidate_uid="candidate_1", receipts=receipts)
+        self.assertIsNotNone(fit)
+        self.assertFalse(fit.evidence["independent_view_requirement_met"])
+        self.assertEqual(fit.evidence["examined_receipt_sha256s"], [r.receipt_sha256 for r in receipts])
+        self.assertFalse(self.derive(receipts)[0])
+        for bad in (receipts[:2], (receipts[0],) * 4, receipts + line_receipts(2),
+                    tuple(replace(r, survey_id="other") for r in receipts)):
+            self.assertIsNone(fit_current_lidar_view(snapshot=snapshot, registry=registry,
+                planning_frame=frame, candidate_uid="candidate_1", receipts=bad))
+
+    def test_current_view_retains_failed_scan_support_fraction(self):
+        snapshot, registry, frame = hint_fixture()
+        receipts = line_receipts()
+        bad = replace(receipts[-1], ranges_m=(None,) * len(receipts[-1].ranges_m))
+        fit = fit_current_lidar_view(snapshot=snapshot, registry=registry, planning_frame=frame,
+                                    candidate_uid="candidate_1", receipts=receipts[:-1] + (bad,))
+        self.assertEqual(fit.evidence["scan_count"], 3)
+        self.assertEqual(len(fit.evidence["examined_receipt_sha256s"]), 4)
+
+    def test_edge_on_acquisition_needs_larger_change_than_thirty_five_degrees(self):
+        args = dict(tangent=0., distance=.55, increment=math.radians(1.67478))
+        edge = line_receipts(bearing=math.pi, **args)
+        narrow = line_receipts(2, bearing=math.pi + math.radians(35), **args)
+        self.assertFalse(self.derive(edge + narrow)[0])
+        wider = line_receipts(bearing=math.pi + math.radians(60), **args)
+        near_normal = line_receipts(2, bearing=math.pi + math.radians(90), **args)
+        hints = self.derive(wider + near_normal)[0]
+        self.assertIn("candidate_1", hints)
+        self.assertLess(axial_difference_rad(hints["candidate_1"].tangent_rad, 0.), 1e-8)
 
     def test_single_view_repetition_never_supplies_independent_views(self):
         hints, evidence = self.derive(line_receipts() * 20)

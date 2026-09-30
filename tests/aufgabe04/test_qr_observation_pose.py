@@ -181,14 +181,16 @@ class QrObservationPoseTests(unittest.TestCase):
         with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=100.5):
             self.assertTrue(qr_observation_grace_pending(self.adapter))
 
-    def test_centering_advisory_cannot_end_geometry_grace(self):
+    def test_geometry_grace_does_not_create_centering_without_current_advice(self):
         with patch("scripts.aufgabe04.real_robot.observer.node.commit_candidate_centering") as centering:
             self.frame(100.)
             centering.assert_not_called()
         with patch("scripts.aufgabe04.real_robot.observer.node.commit_candidate_centering",
                    return_value=None) as centering:
             self.frame(102., decode=False)
-            centering.assert_called_once_with(self.adapter)
+            centering.assert_not_called()
+        self.assertIsNone(self.result())
+        self.assertFalse(self.adapter.completed)
 
     def test_geometry_can_complete_on_first_frame_inside_grace(self):
         self.frame(100., publish=False)
