@@ -2514,7 +2514,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 scan_from_camera=scan_from_camera_geometry,
                 base_from_camera=RigidTransform(
                     self.profile.base_frame, self.profile.camera_optical_frame,
-                    *_transform_values(base_from_camera)), metadata=model_metadata)
+                    *_transform_values(base_from_camera)), metadata=model_metadata,
+                qr_observation=self._pending_qr_observation_pose)
         framing = unresolved_front_framing_hint(
             registration, target_key=self.args.stand_id,
             source_image_stamp_sec=image.stamp_sec,

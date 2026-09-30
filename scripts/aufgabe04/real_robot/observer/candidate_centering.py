@@ -1,4 +1,4 @@
-"""Calibrated, motion-neutral centering advice from one admitted current head.
+"""Calibrated, motion-neutral advice from a current head or reconciled QR.
 
 The scan surface range is a depth proxy. Every turn needs a new stopped image;
 this solver neither estimates the stand angle nor authorizes robot motion.
@@ -17,7 +17,10 @@ from scripts.aufgabe04.perception.stand_axis_handoff.models import RigidTransfor
 from scripts.aufgabe04.real_robot.configuration.geometry import CameraIntrinsics, validate_intrinsics
 from scripts.aufgabe04.real_robot.observer.evidence import EvidencePose
 from scripts.aufgabe04.real_robot.observer.opposite_target_support import (
-    OppositeTargetSupport, validate_target_support, POLICY as QR_SUPPORT_SOURCE,
+    OppositeTargetSupport, validate_target_support,
+)
+from scripts.aufgabe04.real_robot.observer.qr_target_support import (
+    QrTargetSupport, validate_qr_target_support, POLICY as DECODED_QR_SUPPORT_SOURCE,
 )
 
 from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import (
@@ -30,6 +33,12 @@ MAX_CENTERING_TURNS = 2
 CENTERING_DEADBAND_RAD = math.radians(1.)
 _HASH_KEY = "camera_centering_advisory_sha256"
 _SOURCE = "current_measured_head_unique_lidar_cluster"
+
+
+def _validate_support(value):
+    if value.get("policy") == DECODED_QR_SUPPORT_SOURCE:
+        return validate_qr_target_support(value)
+    return validate_target_support(value)
 
 
 def _finite(values):
@@ -169,7 +178,7 @@ class CameraCenteringAdvisory:
         return self.intrinsics.fx_px*math.tan(CENTERING_DEADBAND_RAD)
 
     def metadata(self):
-        payload = {**asdict(self), "schema_version": 1, "association_source": (_SOURCE if self.target_support is None else QR_SUPPORT_SOURCE),
+        payload = {**asdict(self), "schema_version": 1, "association_source": (_SOURCE if self.target_support is None else self.target_support['policy']),
             "eligible_cluster_count": 1, "image_width_px": self.intrinsics.width_px,
             "target_u_px": self.intrinsics.width_px/2., "deadband_px": self.deadband_px,
             "remaining_rotation_budget_rad": self.maximum_travel_rad-self.consumed_rotation_rad,
@@ -187,7 +196,7 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
         image_stamp_sec, now_sec, robot_profile_sha256, calibration_profile_sha256,
         stand_model_profile_sha256, max_age_sec=.5, max_image_scan_skew_sec=.1,
         consumed_rotation_rad=0., completed_turn_count=0, diagnostics=None):
-    """Prepare advice only from an already admitted, uniquely associated head.
+    """Prepare advice only from admitted head or independently bound QR support.
 
     The observer must additionally commit it only after the same frame passes
     its stationary-epoch and identity gates. This helper does not replace them.
@@ -199,9 +208,9 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
     try:
         lidar = association.lidar_association
         search = lidar.search_association if lidar is not None else None
-        qr_support = isinstance(association, OppositeTargetSupport)
+        qr_support = isinstance(association, (OppositeTargetSupport, QrTargetSupport))
         if qr_support:
-            validate_target_support(association.metadata())
+            _validate_support(association.metadata())
         if (not association.accepted or not (qr_support or association.head_admission.accepted
                 or association.head_orientation_bounds is not None)
                 or lidar is None or not lidar.associated or search is None
@@ -238,7 +247,9 @@ def build_camera_centering_advisory(*, association, intrinsics, scan_from_camera
         if not required:
             if diagnostics is not None:
                 diagnostics.update(state="centered", camera_centered=True,
-                    reason="fresh_current_head_inside_centering_deadband")
+                    reason=("fresh_reconciled_qr_inside_centering_deadband"
+                            if isinstance(association, QrTargetSupport)
+                            else "fresh_current_head_inside_centering_deadband"))
             return None
         advisory = CameraCenteringAdvisory(candidate_uid, target_key, stream_id, planning_frame,
             motion_epoch, anchor_pose, anchor_odom_pose, odom_stamp_sec, image_stamp_sec,
@@ -327,7 +338,7 @@ def validate_camera_centering_advisory(payload: Mapping, *, candidate_uid=None,
                 or abs(result.image_stamp_sec-result.odom_stamp_sec) > .1):
             raise ValueError("centering sensor tuple or travel budget is invalid")
         if result.target_support is not None:
-            proof = validate_target_support(result.target_support)
+            proof = _validate_support(result.target_support)
             cluster = proof['lidar_association']['search_association']
             if (tuple(proof['center_px']) != result.measured_center_px
                     or proof['image_stamp_sec'] != result.image_stamp_sec
@@ -337,6 +348,12 @@ def validate_camera_centering_advisory(payload: Mapping, *, candidate_uid=None,
                     or proof['lidar_association']['distance_m'] != result.associated_range_m
                     or cluster['selected_cluster_sample_count'] != result.selected_cluster_sample_count):
                 raise ValueError('centering QR support differs from current observation')
+            if proof['policy'] == DECODED_QR_SUPPORT_SOURCE:
+                geometry = proof['finite_bearing']
+                if (geometry['intrinsics'] != asdict(result.intrinsics)
+                        or _digest(geometry['scan_from_camera']) != _digest(asdict(result.scan_from_camera))
+                        or _digest(proof['target_reconciliation']) != _digest(result.target_reconciliation)):
+                    raise ValueError('centering QR support differs from calibrated reconciliation')
         if result.target_reconciliation is not None:
             from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
             from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing

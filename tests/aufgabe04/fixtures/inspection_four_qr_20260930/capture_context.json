@@ -1,0 +1,152 @@
+{
+  "capture_index": 27,
+  "tf_samples": [
+    {
+      "query_kind": "exact_sensor_time",
+      "query_stamp_sec": 1790777484.7523017,
+      "returned_source_frame": "base_footprint",
+      "returned_stamp_sec": 1790777484.7523017,
+      "returned_target_frame": "map",
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.04054224632637781,
+        0.9991778251456601
+      ],
+      "source_frame": "base_footprint",
+      "target_frame": "map",
+      "translation_xyz_m": [
+        -1.576304692444158,
+        -0.3240535157304174,
+        0.0
+      ]
+    },
+    {
+      "query_kind": "exact_sensor_time",
+      "query_stamp_sec": 1790777484.7523017,
+      "returned_source_frame": "camera",
+      "returned_stamp_sec": 1790777484.7523017,
+      "returned_target_frame": "map",
+      "rotation_xyzw": [
+        -0.4863171993355535,
+        0.4638061812604069,
+        -0.5027379240356445,
+        0.5437223442083219
+      ],
+      "source_frame": "camera",
+      "target_frame": "map",
+      "translation_xyz_m": [
+        -1.5305143794251264,
+        -0.32531915186532345,
+        0.12574663531904087
+      ]
+    },
+    {
+      "query_kind": "exact_sensor_time",
+      "query_stamp_sec": 1790777484.7523017,
+      "returned_source_frame": "map",
+      "returned_stamp_sec": 1790777484.7523017,
+      "returned_target_frame": "camera",
+      "rotation_xyzw": [
+        0.4863171993355535,
+        -0.4638061812604069,
+        0.5027379240356445,
+        0.5437223442083219
+      ],
+      "source_frame": "map",
+      "target_frame": "camera",
+      "translation_xyz_m": [
+        -0.22429685983800535,
+        0.2784316320623583,
+        1.5284913403174425
+      ]
+    },
+    {
+      "query_kind": "exact_sensor_time",
+      "query_stamp_sec": 1790777484.7599072,
+      "returned_source_frame": "map",
+      "returned_stamp_sec": 1790777484.7599072,
+      "returned_target_frame": "base_scan",
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        -0.04054211277490587,
+        0.9991778305645831
+      ],
+      "source_frame": "map",
+      "target_frame": "base_scan",
+      "translation_xyz_m": [
+        1.6293768906751676,
+        0.1952798853329516,
+        -0.18200000000000008
+      ]
+    },
+    {
+      "query_kind": "time_invariant_camera_extrinsic",
+      "query_stamp_sec": null,
+      "returned_source_frame": "camera",
+      "returned_stamp_sec": 0.0,
+      "returned_target_frame": "base_footprint",
+      "rotation_xyzw": [
+        -0.46711361711467086,
+        0.4831412431691034,
+        -0.5243683107682289,
+        0.5228931846153061
+      ],
+      "source_frame": "camera",
+      "target_frame": "base_footprint",
+      "translation_xyz_m": [
+        0.04553724525972719,
+        -0.004971307208605384,
+        0.12574663531904093
+      ]
+    },
+    {
+      "query_kind": "time_invariant_camera_extrinsic",
+      "query_stamp_sec": null,
+      "returned_source_frame": "camera",
+      "returned_stamp_sec": 0.0,
+      "returned_target_frame": "base_scan",
+      "rotation_xyzw": [
+        -0.46711361711467086,
+        0.4831412431691034,
+        -0.5243683107682289,
+        0.5228931846153061
+      ],
+      "source_frame": "camera",
+      "target_frame": "base_scan",
+      "translation_xyz_m": [
+        0.07753724525972719,
+        -0.004971307208605384,
+        -0.05625336468095905
+      ]
+    },
+    {
+      "query_kind": "exact_sensor_time",
+      "query_stamp_sec": 1790777484.7523017,
+      "returned_source_frame": "base_footprint",
+      "returned_stamp_sec": 1790777484.7523017,
+      "returned_target_frame": "odom",
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.14506007179603664,
+        0.9894228497313616
+      ],
+      "source_frame": "base_footprint",
+      "target_frame": "odom",
+      "translation_xyz_m": [
+        0.045317863244906005,
+        -0.12653699248298303,
+        0.0
+      ]
+    }
+  ],
+  "image_stamp_sec": 1790777484.7523017,
+  "scan_stamp_sec": 1790777484.7599072,
+  "source_sha256": {
+    "candidate_snapshot.json": "302b425cda1069a251f9dd72871e4575c6acace110e88ecb357ea77377bccfa3",
+    "candidate_frame_projection.json": "559381b2576042b30aaf9d1d21dcb6a7ca259648e7d71da03659afc718eda3c9",
+    "qr_observation_pose.json": "53d7ae9364ba284a971302eda948f25e3666a6af502fba1c4194052490d2e677"
+  }
+}

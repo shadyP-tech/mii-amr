@@ -35,6 +35,7 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_planning import
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_selection import (
     plan_and_select_camera_candidate,
 )
+from scripts.aufgabe04.navigation.approach.candidate_target_admission import NoEligibleCameraTargetError
 from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     CoverageSurveyConfig,
     CoverageSurveyPlan,
@@ -72,6 +73,7 @@ from scripts.aufgabe04.stations.candidate_snapshot import (
     write_candidate_snapshot,
 )
 from tests.aufgabe04.test_detected_station_exploration import write_free_map
+from tests.aufgabe04.test_stand_candidate_static_map_admission import costmap_from_rows
 from tests.aufgabe04.backside_axis_fixture import (
     backside_axis_payload,
     write_candidate_frame_projection_fixture,
@@ -1117,7 +1119,7 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
 
             self.assertFalse(output_dir.exists())
 
-    def test_all_candidate_specific_route_failures_are_aggregated(self):
+    def test_all_incompatible_camera_targets_are_excluded_before_routes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             map_yaml = write_free_map(root)
@@ -1135,7 +1137,7 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
                 candidates=(outside,),
             )
 
-            with self.assertRaises(NoFeasibleCameraCandidateError) as raised:
+            with self.assertRaises(NoEligibleCameraTargetError) as raised:
                 plan_and_select_camera_candidate(
                     map_yaml=map_yaml,
                     semantic_map_id="arena",
@@ -1156,8 +1158,8 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
             evidence = raised.exception.to_evidence()
             self.assertFalse(evidence["motion_authorized"])
             self.assertEqual(
-                evidence["rejected_candidates"][0]["candidate_uid"],
-                outside.candidate_uid,
+                evidence["candidate_target_admission"]["excluded_candidate_uids"],
+                [outside.candidate_uid],
             )
 
     def test_selection_builds_shared_costmaps_once_for_all_candidates(self):
@@ -1232,6 +1234,7 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
                 )
             return SimpleNamespace(
                 candidate_uid=candidate_uid,
+                camera_alignment=None,
                 route_length_m=(
                     0.25 if candidate_uid == "candidate_a" else 1.50
                 ),
@@ -1260,7 +1263,10 @@ class CandidatePreapproachPlanningTest(unittest.TestCase):
             "candidate_preapproach_selection"
         )
         with (
-            patch(f"{module}.load_candidate_planning_context", return_value=object()),
+            patch(f"{module}.load_candidate_planning_context", return_value=SimpleNamespace(
+                costmaps=SimpleNamespace(base_costmap=costmap_from_rows(
+                    [[0] * 60 for _ in range(40)], origin=(-2.0, -2.0, 0.0))),
+            )),
             patch(f"{module}.compute_candidate_preapproach_plan", side_effect=preview),
         ):
             first = plan_and_select_camera_candidate(

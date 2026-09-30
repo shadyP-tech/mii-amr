@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 from pathlib import Path
 from typing import Mapping
@@ -14,7 +14,12 @@ from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateRouteOption,
     CameraCandidateSelection,
     CameraCandidateSelectionConfig,
+    NoFeasibleCameraCandidateError,
     select_camera_candidate,
+)
+from scripts.aufgabe04.navigation.approach.candidate_target_admission import (
+    NoEligibleCameraTargetError, UNRESOLVED_MORPHOLOGY_CONFLICT,
+    candidate_target_admission_evidence, evaluate_candidate_target_admission,
 )
 from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
     CandidateRouteUncertaintyContext,
@@ -136,6 +141,39 @@ def plan_and_select_camera_candidate(
         candidate_transit_radius_m=candidate_transit_radius_m,
         physical_clearance=physical_clearance,
     )
+    decisions = {}
+    for candidate in snapshot.candidates:
+        if candidate.candidate_uid not in unresolved_uids:
+            continue
+        decision = evaluate_candidate_target_admission(candidate, context.costmaps.base_costmap)
+        hint = (lidar_inspection_hints or {}).get(candidate.candidate_uid)
+        if (not decision.accepted and UNRESOLVED_MORPHOLOGY_CONFLICT not in decision.reasons
+                and hint is not None):
+            # Only a fully validated fitted target may replace the raw point.
+            # The mere presence of a hint cannot bypass target admission.
+            try:
+                normal = hint.normals(snapshot, candidate.candidate_uid)[0]
+                alignment = make_camera_alignment(hint=hint, snapshot=snapshot,
+                    candidate_uid=candidate.candidate_uid, normal_rad=normal,
+                    standoff_m=approach_offset_m, calibration=camera_calibration,
+                    uncertainty=camera_alignment_uncertainty)
+                geometry = candidate.geometry
+                if math.hypot(alignment["center_x_m"]-geometry.x_m,
+                              alignment["center_y_m"]-geometry.y_m) > geometry.radius_m+geometry.uncertainty_m:
+                    raise ValueError("fitted head center outside candidate envelope")
+                fitted = replace(geometry, x_m=alignment["center_x_m"],
+                    y_m=alignment["center_y_m"], uncertainty_m=alignment["center_uncertainty_m"])
+                fitted_decision = evaluate_candidate_target_admission(
+                    candidate, context.costmaps.base_costmap, target_geometry=fitted,
+                )
+                if fitted_decision.accepted:
+                    decision = fitted_decision
+            except (ValueError, TypeError, AttributeError):
+                pass
+        decisions[candidate.candidate_uid] = decision
+    eligible_uids = frozenset(uid for uid, decision in decisions.items() if decision.accepted)
+    if not eligible_uids:
+        raise NoEligibleCameraTargetError(decisions.values())
     route_by_uid: dict[str, CandidatePreapproachPlan] = {}
     options: list[CameraCandidateRouteOption] = []
     view_evidence: dict[str, object] = {}
@@ -143,7 +181,7 @@ def plan_and_select_camera_candidate(
         (
             candidate
             for candidate in snapshot.candidates
-            if candidate.candidate_uid in unresolved_uids
+            if candidate.candidate_uid in eligible_uids
         ),
         key=lambda candidate: candidate.candidate_uid,
     )
@@ -205,6 +243,15 @@ def plan_and_select_camera_candidate(
                 )
             )
             continue
+        selected_geometry = candidate.geometry
+        if prepared.camera_alignment is not None:
+            alignment = prepared.camera_alignment
+            selected_geometry = replace(selected_geometry,
+                x_m=alignment["center_x_m"], y_m=alignment["center_y_m"],
+                uncertainty_m=alignment["center_uncertainty_m"])
+        decisions[candidate.candidate_uid] = evaluate_candidate_target_admission(
+            candidate, context.costmaps.base_costmap, target_geometry=selected_geometry,
+        )
         time_budget = _route_time_budget_evidence(prepared, selection_config)
         failure_reason = (
             str(time_budget["failure_reason"])
@@ -231,21 +278,27 @@ def plan_and_select_camera_candidate(
             )
         )
 
-    if route_uncertainty_context is None:
-        selection = select_camera_candidate(options, selection_config)
-        selected_plan = route_by_uid.get(selection.selected_candidate_uid)
-        evidence = selection.to_evidence()
-    else:
-        admitted = select_uncertainty_admitted_camera_candidate(
-            base_costmap=context.costmaps.base_costmap,
-            options=tuple(options),
-            plans_by_uid=route_by_uid,
-            selection_config=selection_config,
-            uncertainty=route_uncertainty_context,
-        )
-        selection = admitted.selection
-        selected_plan = admitted.selected_plan
-        evidence = admitted.to_evidence()
+    target_evidence = candidate_target_admission_evidence(decisions.values())
+    try:
+        if route_uncertainty_context is None:
+            selection = select_camera_candidate(options, selection_config)
+            selected_plan = route_by_uid.get(selection.selected_candidate_uid)
+            evidence = selection.to_evidence()
+        else:
+            admitted = select_uncertainty_admitted_camera_candidate(
+                base_costmap=context.costmaps.base_costmap,
+                options=tuple(options),
+                plans_by_uid=route_by_uid,
+                selection_config=selection_config,
+                uncertainty=route_uncertainty_context,
+            )
+            selection = admitted.selection
+            selected_plan = admitted.selected_plan
+            evidence = admitted.to_evidence()
+    except (NoFeasibleCameraCandidateError, NoUncertaintyAdmittedCameraCandidateError) as exc:
+        exc.target_admission_evidence = target_evidence
+        raise
+    evidence = {**evidence, "candidate_target_admission": target_evidence}
     if selected_plan is None:
         raise RuntimeError("selected camera candidate has no reusable route plan")
     if lidar_inspection_hints is not None or lidar_hint_diagnostics is not None:

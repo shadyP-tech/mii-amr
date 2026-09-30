@@ -32,6 +32,7 @@ from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
     CandidateArrivalAdmissionConfig, evaluate_candidate_arrival_admission,
 )
 from scripts.aufgabe04.real_robot.candidate.centering_execution import capture_with_centering
+from scripts.aufgabe04.real_robot.candidate.target_admission import require_frame_target
 from scripts.aufgabe04.real_robot.candidate.retained_orientation import retain_orientation_after_arrival
 from scripts.aufgabe04.navigation.planning.map_io import read_map_metadata
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
@@ -291,6 +292,10 @@ def execute_local_candidate_inspection(
                 source_config=source_config, effects=effects, source_registry=source_registry,
                 candidate_uid=candidate_uid, candidate_root=root, observation_attempt_index=0,
                 allow_centering_acquisition=effects.run_centering_turn is not None,
+                **({"target_source_frame": fallback_frame}
+                   if (getattr(fallback_frame, "camera_alignment", None) is not None
+                       or getattr(fallback_frame, "camera_target_geometry", None) is not None)
+                   else {}),
                 **({"retained_backside_axis_path": fallback_frame.retained_backside_axis_path}
                    if fallback_frame.retained_backside_axis_path is not None else {}),
             )
@@ -446,6 +451,8 @@ def execute_local_candidate_inspection(
     def capture_frame(frame, output, index):
         nonlocal active_view_index
         active_view_index = index
+        require_frame_target(frame, evidence_path=output.with_name(output.name + "_target_admission.json"),
+                             attempt_index=index)
         retained = getattr(frame, "retained_backside_axis_path", None)
         if retained is not None:
             return capture_observation(observation_request_type(
@@ -464,6 +471,9 @@ def execute_local_candidate_inspection(
         nonlocal active_view_index
         active_view_index = index
         def capture(current, destination, view, enabled, timeout, not_before):
+            require_frame_target(current,
+                evidence_path=destination.with_name(destination.name + "_target_admission.json"),
+                attempt_index=view)
             return capture_observation(observation_request_type(
                 current.candidate, destination, view, allow_centering=enabled,
                 timeout_sec=timeout, observation_not_before_sec=not_before,
@@ -484,9 +494,10 @@ def execute_local_candidate_inspection(
             # odometry. Reproject localization/candidate geometry afresh; old
             # map-facing yaw is not an admission criterion for this new view.
             updated = retain_orientation_after_arrival(current, fresh_frame(root / "arrival"), root / "arrival")
+            target_geometry = getattr(updated, "camera_target_geometry", None) or updated.candidate.geometry
             decision = evaluate_candidate_arrival_admission(
-                pose(updated), target_x_m=updated.candidate.geometry.x_m,
-                target_y_m=updated.candidate.geometry.y_m,
+                pose(updated), target_x_m=target_geometry.x_m,
+                target_y_m=target_geometry.y_m,
                 config=CandidateArrivalAdmissionConfig(
                     min_range_m=source_config.physical_clearance["minimum_active_standoff_m"],
                     max_range_m=source_config.approach_offset_m + source_config.camera_arrival_range_slack_m,

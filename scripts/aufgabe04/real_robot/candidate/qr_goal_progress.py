@@ -142,7 +142,7 @@ class CandidateQrGoalProgress:
                          evidence: Mapping[str, object]) -> None:
         if disposition not in {
             "inspection_exhausted", "no_feasible_route", "route_admission_deferred",
-            "route_admission_exhausted",
+            "route_admission_exhausted", "target_reconciliation_required",
         }:
             raise ValueError("unsupported candidate unavailability disposition")
         record = self._record(uid)
@@ -332,7 +332,8 @@ def validate_candidate_qr_goal_completion(
         raise ValueError("candidate goal dispositions do not retain the full hypothesis pool")
     allowed = {"confirmed_unique_qr", "inspection_exhausted", "no_feasible_route",
                "route_admission_deferred", "route_admission_exhausted",
-               "ambiguous_duplicate_qr", "not_visited_goal_reached"}
+               "ambiguous_duplicate_qr", "not_visited_goal_reached",
+               "target_reconciliation_required"}
     claims: dict[str, list[str]] = {}
     facing_uids: list[str] = []
     qr_only_uids: list[str] = []

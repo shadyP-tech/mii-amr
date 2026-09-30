@@ -128,7 +128,19 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         )
 
     def _config(self, root: Path, candidates) -> CandidateApproachConfig:
-        map_sha256 = "c" * 64
+        map_yaml = root / "map.yaml"
+        arena_bounds = ArenaBounds()
+        if not map_yaml.exists():
+            # These state-machine fixtures use deliberate frame translations
+            # beyond the measured arena. Bind them to a real, generous test
+            # map so always-on target admission can run without fake hashes.
+            map_yaml = write_free_map(root, width=100, height=100)
+            map_yaml.write_text(map_yaml.read_text().replace(
+                "origin: [-1.0, -1.0, 0.0]", "origin: [-5.0, -5.0, 0.0]"))
+            arena_bounds = ArenaBounds(length_m=10.0, width_m=10.0)
+        _, map_bundle = load_occupancy_grid_with_bundle(
+            map_yaml, semantic_map_id="arena", planning_frame="map")
+        map_sha256 = map_bundle.bundle_sha256
         snapshot = new_candidate_snapshot(
             snapshot_id="candidate_snapshot",
             created_unix_sec=3.0,
@@ -142,7 +154,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             survey_id="survey",
             planning_frame="map",
             map_bundle_sha256=map_sha256,
-            arena_bounds=ArenaBounds(),
+            arena_bounds=arena_bounds,
             config=CoverageSurveyConfig(expected_stand_count=len(snapshot.candidates)),
             viewpoints=(
                 SurveyViewpoint(
@@ -163,7 +175,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             expected_stand_count=len(snapshot.candidates),
             semantic_map_id="arena",
             planning_frame="map",
-            map_yaml=root / "map.yaml",
+            map_yaml=map_yaml,
             plan=plan,
             snapshot=snapshot,
             snapshot_path=root / "candidate_snapshot.json",
@@ -1830,8 +1842,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
-            config = self._config(root, (candidate,))
             write_free_map(root, resolution=0.05)
+            config = self._config(root, (candidate,))
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -1919,8 +1931,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
-            config = self._config(root, (candidate,))
             write_free_map(root, resolution=0.05)
+            config = self._config(root, (candidate,))
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -2121,8 +2133,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
-            config = self._config(root, (candidate,))
             write_free_map(root, resolution=0.05)
+            config = self._config(root, (candidate,))
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(
@@ -2955,8 +2967,8 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = self._candidate("candidate_1", 0.2, 0.0)
-            config = self._config(root, (candidate,))
             write_free_map(root, resolution=0.05)
+            config = self._config(root, (candidate,))
             axis_path = root / "axis.json"
             axis_path.write_text(
                 json.dumps(

@@ -113,6 +113,11 @@ def execute_candidate_inspection(
             progress = {"classification": "unobservable", **exc.status_evidence}
             state.record(outcome="observation_unavailable", normal=normal, reason=str(exc),
                          observation={"classification": "unobservable", **exc.to_event_fields()})
+            if exc.reason == "candidate_target_ineligible":
+                # Invalid target geometry cannot authorize more blind viewpoints.
+                state.termination_reason = "target_reconciliation_required"
+                persist()
+                raise
         except BaseException as exc:
             # Capture/validation was attempted at this actual view. Record its
             # terminal outcome without converting it into local retry authority.

@@ -1,7 +1,8 @@
-"""Publish a current head-centering advisory without admitting angle or motion.
+"""Publish current target framing advice without admitting angle or motion.
 
 The observer stages the measured head only after the ordinary crop and identity
-gates. Centering is reviewed after stationary frame admission and before precise
+gates. A reconciled decoded QR also supports framing when the head is clipped.
+Centering is reviewed after stationary frame admission and before precise
 axis accumulation. The advisory is consumed by its immediate status publication
 and never survives a new sensor tuple or a motion epoch reset.
 """
@@ -16,6 +17,9 @@ from scripts.aufgabe04.real_robot.observer.candidate_centering import (
 )
 from scripts.aufgabe04.real_robot.observer.inspection_framing import (
     review_centering_destination,
+)
+from scripts.aufgabe04.real_robot.observer.qr_target_support import (
+    prepare_qr_target_support, QrTargetSupport,
 )
 
 
@@ -36,10 +40,21 @@ class CandidateCenteringFrame:
 
 def prepare_candidate_centering(*, crop, association, image_stamp_sec,
         scan_stamp_sec, target_key, robot_pose, odom_pose, intrinsics,
-        scan_from_camera, base_from_camera, metadata, allow_advisory=True):
-    if (not crop.accepted or association is None or not association.accepted
-            or odom_pose is None):
+        scan_from_camera, base_from_camera, metadata, allow_advisory=True,
+        qr_observation=None):
+    if odom_pose is None:
         return None
+    if not crop.accepted or association is None or not association.accepted:
+        # A complete, independently bound QR can locate a clipped head. It
+        # supplies framing only; the head and angle admission stay unchanged.
+        if (qr_observation is None or qr_observation.stamp_sec != image_stamp_sec
+                or qr_observation.scan_stamp_sec != scan_stamp_sec
+                or qr_observation.target_key != target_key
+                or qr_observation.robot_pose != robot_pose):
+            return None
+        association = prepare_qr_target_support(qr_observation)
+        if association is None:
+            return None
     return CandidateCenteringFrame(image_stamp_sec, scan_stamp_sec, target_key,
         robot_pose, odom_pose, association, intrinsics, scan_from_camera,
         base_from_camera, metadata, allow_advisory)
@@ -69,7 +84,7 @@ def candidate_centering_status(adapter):
 
 def review_candidate_centering(adapter, *, snapshot, image_stamp_sec,
         observed_at_sec, motion_epoch_reset=False):
-    """Review an admitted current head without waiting for an axis sample."""
+    """Review admitted current framing without waiting for an axis sample."""
     adapter._candidate_centering_ready = None
     if not centering_observation_requested(adapter.args):
         return
@@ -105,6 +120,7 @@ def review_candidate_centering(adapter, *, snapshot, image_stamp_sec,
     if advisory is None:
         return
     diagnostic = current.metadata["candidate_centering"]
+    qr_support = isinstance(current.association, QrTargetSupport)
     if not current.allow_advisory:
         diagnostic.update(state="deferred", reason="preserve_retained_geometry_qr_completion")
         return
@@ -119,7 +135,8 @@ def review_candidate_centering(adapter, *, snapshot, image_stamp_sec,
         return
     current.metadata["candidate_centering"] = {**advisory.metadata(),
         "state": "correction_required", "ready": True, "camera_centered": False,
-        "reason": "fresh_current_head_off_center"}
+        "reason": ("fresh_reconciled_qr_off_center" if qr_support
+                   else "fresh_current_head_off_center")}
     adapter._candidate_centering_ready = current, advisory
 
 

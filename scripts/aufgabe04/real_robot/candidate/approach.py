@@ -87,6 +87,8 @@ from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     CameraCandidateSelectionConfig,
     NoFeasibleCameraCandidateError,
 )
+from scripts.aufgabe04.navigation.approach.candidate_target_admission import NoEligibleCameraTargetError
+from scripts.aufgabe04.real_robot.candidate.target_admission import evaluate_target, require_target
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     exact_two_camera_handoff_sha256,
     load_exact_two_camera_handoff,
@@ -152,6 +154,7 @@ from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
+    CandidateGeometry,
     CandidateSnapshot,
     FrozenCandidate,
     candidate_snapshot_sha256,
@@ -368,6 +371,9 @@ class _CandidateObservationFrame:
     observation_pose: Pose2D | None = None
     retained_backside_axis_path: Path | None = None
     localization_evidence_path: Path | None = None
+    camera_target_geometry: CandidateGeometry | None = None
+    camera_alignment: Mapping[str, object] | None = None
+    camera_target_geometry_evidence_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1303,7 @@ def _admit_camera_arrival_geometry(
     observation_attempt_index: int,
     allow_centering_acquisition: bool = False,
     retained_backside_axis_path: Path | None = None,
+    target_source_frame: _CandidateObservationFrame | None = None,
 ) -> _CandidateObservationFrame:
     """Reproject once more while stopped and gate camera startup geometry."""
 
@@ -1307,6 +1314,9 @@ def _admit_camera_arrival_geometry(
         candidate = source_config.snapshot.candidate_for(candidate_uid)
         if candidate is None:
             raise RuntimeError("arrival candidate disappeared from snapshot")
+        require_target(source_config, candidate,
+                       evidence_path=candidate_root / "candidate_target_admission.json",
+                       attempt_index=observation_attempt_index)
         return _CandidateObservationFrame(
             config=source_config,
             candidate=candidate,
@@ -1344,6 +1354,11 @@ def _admit_camera_arrival_geometry(
     )
     current_target = None
     arrival_axis_path = None
+    target_frame = _CandidateObservationFrame(
+        config=artifacts.config, candidate=candidate, planning_frame=planning_frame,
+        decision_binding=artifacts.camera_decision_binding(),
+        observation_pose=planning_frame.current_pose, localization_evidence_path=preflight_path,
+    )
     if retained_backside_axis_path is not None:
         from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
         arrival_axis_path = arrival_path.with_name('arrival_backside_orientation.json')
@@ -1356,7 +1371,30 @@ def _admit_camera_arrival_geometry(
         current_target = load_backside_axis_planning_observation(arrival_axis_path).validated_target_center
         target_geometry = planning_target_geometry(candidate,current_target)
     else:
-        target_geometry = candidate.geometry
+        if target_source_frame is not None:
+            from scripts.aufgabe04.real_robot.candidate.target_admission import retain_camera_target_geometry
+            uncertainty = None
+            if (target_source_frame.camera_target_geometry is None
+                    and target_source_frame.camera_alignment is not None):
+                loader = effects.load_route_uncertainty_readiness
+                if loader is None:
+                    raise RuntimeError("camera target arrival requires fresh uncertainty readiness")
+                context = loader(CandidateRouteUncertaintyReadinessRequest(
+                    preflight_json=preflight_path, expected_start=planning_frame.current_pose,
+                    planning_frame=planning_frame.map_frame, odom_frame=planning_frame.odom_frame,
+                    robot_radius_m=source_config.robot_radius_m,
+                    sigma_multiplier=source_config.uncertainty_sigma_multiplier,
+                ))
+                if not isinstance(context, CandidateRouteUncertaintyContext):
+                    raise TypeError("camera target arrival requires fresh CandidateRouteUncertaintyContext")
+                uncertainty = _camera_alignment_uncertainty(context)
+            target_frame = retain_camera_target_geometry(
+                target_source_frame, target_frame,
+                evidence_path=arrival_path.with_name("camera_target_geometry_projection.json"),
+                alignment_uncertainty=uncertainty,
+            )
+        target_geometry = target_frame.camera_target_geometry or candidate.geometry
+    target_admission = evaluate_target(artifacts.config, candidate, target_geometry=target_geometry)
     decision, calibrated_evidence = _camera_arrival_decision(
         robot_pose=planning_frame.current_pose,
         target_x_m=target_geometry.x_m,
@@ -1390,10 +1428,17 @@ def _admit_camera_arrival_geometry(
                 strict_decision.config.max_bearing_error_rad, MAX_CENTERING_STEP_RAD,
             )),
         )
+    if not target_admission.accepted:
+        decision = replace(decision, accepted=False, decision="arrival_geometry_rejected",
+                           reasons=decision.reasons + target_admission.reasons)
     arrival_evidence = {
         **decision.to_evidence_dict(),
         **calibrated_evidence,
         "validated_target_center": current_target,
+        "candidate_target_admission": target_admission.to_evidence(),
+        "camera_target_geometry_projection_path": (
+            None if target_frame.camera_target_geometry_evidence_path is None
+            else str(target_frame.camera_target_geometry_evidence_path)),
         "head_alignment_verified": False,
         "retained_backside_axis_path": None if arrival_axis_path is None else str(arrival_axis_path),
         "strict_arrival": strict_decision.to_evidence_dict(),
@@ -1421,7 +1466,8 @@ def _admit_camera_arrival_geometry(
         raise CandidateObservationUnavailableError(
             candidate_uid=candidate_uid,
             observation_attempt_index=observation_attempt_index,
-            reason="candidate_arrival_geometry_rejected",
+            reason=("candidate_arrival_geometry_rejected" if target_admission.accepted
+                    else "candidate_target_ineligible"),
             process_evidence={
                 "candidate_arrival_admission_path": str(arrival_path),
                 "candidate_arrival_admission_sha256": arrival_sha256,
@@ -1430,12 +1476,10 @@ def _admit_camera_arrival_geometry(
             },
             status_evidence=arrival_evidence,
         )
-    return _CandidateObservationFrame(
-        config=artifacts.config,
-        candidate=candidate,
-        planning_frame=planning_frame,
-        decision_binding=artifacts.camera_decision_binding(),
+    return replace(
+        target_frame,
         retained_backside_axis_path=arrival_axis_path,
+        camera_target_geometry=target_geometry,
     )
 
 
@@ -2353,6 +2397,7 @@ def _select_initial_candidate_with_localization_refresh(
         except NoUncertaintyAdmittedCameraCandidateError as exc:
             failure_evidence = {
                 **exc.to_evidence(),
+                "candidate_target_admission": getattr(exc, "target_admission_evidence", None),
                 "selection_localization_epoch": epoch,
                 "selection_planning_frame_evidence_path": (
                     None if planning_frame_evidence_path is None
@@ -2466,6 +2511,27 @@ def execute_candidate_approach_phase(
     )
     selection_log_path = config.session_root / "candidate_selection.jsonl"
 
+    def defer_ineligible_targets(admission, considered):
+        if admission is None:
+            return set()
+        excluded = set(admission["excluded_candidate_uids"])
+        if not excluded.issubset(considered):
+            raise ValueError("target admission excluded a candidate outside selection")
+        for uid in sorted(excluded):
+            evidence = admission["candidate_decisions"][uid]
+            if evidence["accepted"] is not False or evidence["candidate_uid"] != uid:
+                raise ValueError("target deferral requires a bound rejected admission")
+            goal.mark_unavailable(uid, disposition="target_reconciliation_required", evidence=evidence)
+            effects.event_sink(selection_log_path, {
+                "event": "camera_candidate_target_deferred", "candidate_uid": uid,
+                "timestamp_unix_sec": effects.clock(), "candidate_target_admission": evidence,
+                "motion_authorized": False, "keepouts_changed": False,
+            })
+        unresolved.difference_update(excluded)
+        if excluded:
+            goal_store.write(goal)
+        return excluded
+
     while unresolved and not goal.complete:
         observation_state = observation_ledger.selection_state()
         observation_eligible = set(observation_state.eligible_candidate_uids) & unresolved
@@ -2504,16 +2570,26 @@ def execute_candidate_approach_phase(
                 candidate_index=candidate_index, eligible=eligible,
                 exact_two_support_by_uid=exact_two_support_by_uid,
             )
+        except NoEligibleCameraTargetError as exc:
+            defer_ineligible_targets(exc.to_evidence()["candidate_target_admission"], eligible)
+            if unresolved:
+                candidate_index += 1
+                continue
+            raise CandidateQrGoalIncompleteError(
+                goal, attempt_evidence=observation_ledger.attempts
+            ) from exc
         except (
             NoFeasibleCameraCandidateError,
             NoUncertaintyAdmittedCameraCandidateError,
         ) as exc:
+            admission = getattr(exc, "target_admission_evidence", None) or exc.to_evidence().get("candidate_target_admission")
+            excluded = defer_ineligible_targets(admission, eligible)
             disposition = (
                 "route_admission_exhausted"
                 if isinstance(exc, NoUncertaintyAdmittedCameraCandidateError)
                 else "no_feasible_route"
             )
-            for uid in eligible:
+            for uid in eligible - excluded:
                 goal.mark_unavailable(uid, disposition=disposition, evidence=exc.to_evidence())
             goal_store.write(goal)
             effects.event_sink(
@@ -2533,6 +2609,8 @@ def execute_candidate_approach_phase(
                 candidate_index += 1
                 continue
             raise
+        excluded = defer_ineligible_targets(selection.evidence.get("candidate_target_admission"), eligible)
+        eligible.difference_update(excluded)
         _validate_initial_selection(
             selection,
             unresolved=eligible,
@@ -2715,6 +2793,8 @@ def execute_candidate_approach_phase(
                 config=planning_config, candidate=candidate,
                 planning_frame=selection_planning_frame,
                 decision_binding=None, observation_pose=current,
+                camera_alignment=(None if selection.prepared_plan is None
+                                  else selection.prepared_plan.camera_alignment),
             )
             observation, observation_frame = (
                 _capture_candidate_camera_result(
@@ -2745,7 +2825,10 @@ def execute_candidate_approach_phase(
                 },
             )
             goal.mark_unavailable(
-                candidate.candidate_uid, disposition="inspection_exhausted", evidence=exc.to_event_fields(),
+                candidate.candidate_uid,
+                disposition=("target_reconciliation_required" if exc.reason == "candidate_target_ineligible"
+                             else "inspection_exhausted"),
+                evidence=exc.to_event_fields(),
             )
             goal_store.write(goal)
             unresolved.discard(candidate.candidate_uid)

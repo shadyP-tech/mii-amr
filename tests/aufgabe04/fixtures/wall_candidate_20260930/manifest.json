@@ -1,0 +1,64 @@
+{
+  "arena_bounds": {
+    "center_x_m": 0.0,
+    "center_y_m": 0.0,
+    "length_m": 3.9,
+    "margin_m": 0.0,
+    "width_m": 1.898,
+    "yaw_deg": 0.0
+  },
+  "arena_bounds_source": {
+    "json_pointer": "/arena_bounds",
+    "sha256": "eb3cfcd7a94bfdead360fd644330f17523b83320fbe8ad7269ac5de1ba157891",
+    "source_run_relative_path": "coverage/coverage_plan.json"
+  },
+  "executed_commit": "06b8bdad6e40b2905e4a4751277baeacb281b662",
+  "expected_uid_count": 6,
+  "expected_wall_clearance_m": {
+    "arrival": 0.0,
+    "frozen": 0.06861894414464423,
+    "selection": 0.0
+  },
+  "files": {
+    "arrival_projection.json": {
+      "bytes": 12197,
+      "sha256": "47db6cb47d746156d1257565e22081f56a7e288a731bd6bb5ab0146d17780990",
+      "source_run_relative_path": "candidates/003_survey_candidate_0004/arrival_frame_projection/candidate_frame_projection.json"
+    },
+    "camera_source_stand_registry.json": {
+      "bytes": 75520,
+      "sha256": "f66ca089c8153537eed2f743cf32d8d196b27da34e37023262cf0114def17a78",
+      "source_run_relative_path": "camera_source_stand_registry.json"
+    },
+    "candidate_snapshot.json": {
+      "bytes": 76767,
+      "sha256": "7d9b935f71375cfc6a4a94a676ff55c406a24a4ed418c2195018093721f78842",
+      "source_run_relative_path": "candidate_snapshot.json"
+    },
+    "selection_projection.json": {
+      "bytes": 12175,
+      "sha256": "663f9325fad619c2c1f990cf8d3ed0fd9a9d56c4fae9b7abd99312d224b70818",
+      "source_run_relative_path": "candidate_frame_projections/selection_003/candidate_frame_projection.json"
+    }
+  },
+  "map_bundle_sha256": "a0dc0d4c73e96f113ec262640bcdece2bfc2e1f68e8394701ecafd5e569ae17a",
+  "repository_map_files": {
+    "maps/aufgabe03/arena_1p898x3p9_auto.pgm": {
+      "bytes": 8037,
+      "sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1"
+    },
+    "maps/aufgabe03/arena_1p898x3p9_auto.yaml": {
+      "bytes": 138,
+      "sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d"
+    }
+  },
+  "run_id": "stand_explore_exact2_camera_all5_20260930T141147Z",
+  "schema_version": 1,
+  "static_costmap": {
+    "arena_bounds_overlay": true,
+    "block_unknown": true,
+    "expected_blocked_cell_count": 5109,
+    "inflation_radius_m": 0.0
+  },
+  "wall_candidate_uid": "survey_candidate_0004"
+}

@@ -9,6 +9,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import stand_survey_registry_sha256
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.real_robot.candidate.approach import CandidateObservation, _CandidateObservationFrame
 from scripts.aufgabe04.real_robot.candidate.inspection_adapters import (
     execute_local_candidate_inspection, lidar_support_goal_is_useful,
@@ -17,6 +19,8 @@ from scripts.aufgabe04.real_robot.candidate.inspection_route_search import Candi
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import CandidateObservationUnavailableError
 from tests.aufgabe04.test_lidar_alignment_arrival import calibration
 from tests.aufgabe04.test_lidar_inspection_hint import hint_fixture
+from tests.aufgabe04 import test_candidate_preapproach_planning as planning_fixtures
+from tests.aufgabe04.test_detected_station_exploration import write_free_map
 
 
 class CandidateLidarHandoffTest(unittest.TestCase):
@@ -25,10 +29,18 @@ class CandidateLidarHandoffTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         snapshot, self.registry, planning = hint_fixture()
+        map_yaml = write_free_map(self.root)
+        _, bundle = load_occupancy_grid_with_bundle(map_yaml, semantic_map_id="arena", planning_frame="map")
+        self.registry = replace(self.registry, map_bundle_sha256=bundle.bundle_sha256)
+        candidate = replace(snapshot.candidates[0], source=replace(snapshot.candidates[0].source,
+            source_artifact_sha256=stand_survey_registry_sha256(self.registry)))
+        snapshot = replace(snapshot, map_bundle_sha256=bundle.bundle_sha256, candidates=(candidate,))
         self.source = SimpleNamespace(
             snapshot=snapshot, camera_calibration=calibration(), camera_timeout_sec=90.,
             max_candidate_inspection_views=4, approach_offset_m=.55,
             camera_arrival_range_slack_m=.20,
+            map_yaml=map_yaml, semantic_map_id="arena", planning_frame="map",
+            plan=planning_fixtures.CandidatePreapproachPlanningTest._plan(bundle.bundle_sha256),
         )
         self.initial = _CandidateObservationFrame(self.source, snapshot.candidates[0], planning, None)
         self.fresh = replace(self.initial, observation_pose=planning.current_pose)
@@ -122,6 +134,54 @@ class CandidateLidarHandoffTest(unittest.TestCase):
         self.assertTrue(evidence["requires_live_target_association"])
         self.assertFalse(evidence["motion_authorized"])
         self.assertEqual(evidence["admission_kind"], "fresh_lidar_calibrated_camera_alignment")
+
+    def test_verified_recovery_camera_checks_corrected_target_without_old_centroid_bypass(self):
+        self.capture.side_effect = lambda request: self.unavailable(request) if request.attempt_index == 0 else self.resolved(request)
+        original = self.initial.candidate
+        displaced = replace(original, geometry=replace(original.geometry, x_m=3.))
+        snapshot = replace(self.source.snapshot, candidates=(displaced,))
+        config = SimpleNamespace(**{**vars(self.source), "snapshot": snapshot})
+        corrected = replace(self.fresh, config=config, candidate=displaced,
+                            camera_target_geometry=original.geometry)
+        self.recovery.side_effect = None
+        self.recovery.return_value = (corrected, {
+            "motion_completed": True, "head_alignment_verified": True,
+            "camera_centered_verified": True,
+        }, object())
+        result, frame = self.execute()
+        self.assertEqual(result.qr_id, "QR_A")
+        self.assertIs(frame, corrected)
+        self.assertEqual(self.capture.call_count, 2)
+        admissions = [json.loads(path.read_text()) for path in self.root.glob("*_target_admission.json")]
+        corrected_admission = next(row for row in admissions
+            if row["candidate_geometry_sha256"] != row["target_geometry_sha256"])
+        self.assertTrue(corrected_admission["accepted"])
+        self.assertEqual(corrected_admission["static_map_evidence"]["pose"], {"x_m": 0., "y_m": 0.})
+        self.assertFalse(corrected_admission["motion_authorized"])
+        self.admit.assert_called_once()
+        self.motion.assert_not_called()
+
+    def test_direct_camera_capture_rejects_invalid_target_before_observer_or_centering(self):
+        displaced = replace(self.initial.candidate,
+                            geometry=replace(self.initial.candidate.geometry, x_m=3.))
+        self.source.snapshot = replace(self.source.snapshot, candidates=(displaced,))
+        self.initial = replace(self.initial, candidate=displaced)
+        self.admit.return_value = self.initial
+        for centered in (False, True):
+            with self.subTest(centered=centered):
+                self.root = self.root / ("centered" if centered else "plain")
+                self.effects.run_centering_turn = Mock() if centered else None
+                with self.assertRaises(CandidateObservationUnavailableError) as raised:
+                    self.execute()
+                self.assertEqual(raised.exception.reason, "candidate_target_ineligible")
+                self.assertIn("target_static_map_incompatible", raised.exception.status_evidence["reasons"])
+                self.capture.assert_not_called()
+                self.recovery.assert_not_called()
+                self.motion.assert_not_called()
+                if centered:
+                    self.effects.run_centering_turn.assert_not_called()
+                progress = json.loads((self.root / "inspection_progress.json").read_text())
+                self.assertEqual(progress["termination_reason"], "target_reconciliation_required")
 
     def test_head_alignment_without_centering_still_requires_passive_admission(self):
         self.capture.side_effect = lambda r: self.unavailable(r) if r.attempt_index == 0 else self.resolved(r)

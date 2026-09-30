@@ -2,12 +2,14 @@
 from dataclasses import replace
 
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import write_backside_axis_frame_projection
+from scripts.aufgabe04.real_robot.candidate.target_admission import retain_camera_target_geometry
 
 
 def retain_orientation_after_arrival(source, arrival, root):
     evidence = getattr(source, 'retained_backside_axis_path', None)
     if evidence is None:
-        return arrival
+        return retain_camera_target_geometry(source, arrival,
+            evidence_path=root / 'retained_camera_target_geometry.json')
     binding = arrival.decision_binding
     if binding is None:
         raise ValueError('retained orientation requires an admitted arrival candidate frame')

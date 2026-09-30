@@ -9,16 +9,22 @@ from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
+from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.perception.stand_axis.model_profile import load_measured_physical_stand_model
 from scripts.aufgabe04.real_robot.candidate.approach import _CandidateObservationFrame
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
+from scripts.aufgabe04.real_robot.candidate.observation_deferral import CandidateObservationUnavailableError
 from scripts.aufgabe04.real_robot.candidate.lidar_acquisition import (
     create_lidar_camera_recovery, create_bounded_lidar_recovery,
 )
-from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import CandidateLidarView
+from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import (
+    CandidateLidarView, CandidateLidarCaptureUnavailableError,
+)
 from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import TourScanCaptureError
 from tests.aufgabe04.test_lidar_alignment_arrival import calibration
 from tests.aufgabe04.test_lidar_inspection_hint import hint_fixture, line_receipts
+from tests.aufgabe04 import test_candidate_preapproach_planning as planning_fixtures
+from tests.aufgabe04.test_detected_station_exploration import write_free_map
 
 
 def frame_fixture():
@@ -30,9 +36,10 @@ def frame_fixture():
 
 class BoundedLidarAcquisitionTest(unittest.TestCase):
     def controller(self, *, hint=None, current_fit=None, verified=False, centered=True,
-                   unavailable=False, motion_error=None, budget_sec=120.):
+                   unavailable=False, retryable=False, motion_error=None, budget_sec=120.):
         frame, _ = frame_fixture()
         state = dict(hint=hint, verified=verified, centered=centered, unavailable=unavailable,
+                     retryable=retryable,
                      now=0., observation_cost=0., motion_cost=0., preflight_cost=0.)
         calls, revisions = [], []
 
@@ -43,6 +50,7 @@ class BoundedLidarAcquisitionTest(unittest.TestCase):
                 "head_alignment_verified": state["verified"],
                 "camera_centered_verified": state["centered"] and state["verified"],
                 "acquisition_unavailable": state["unavailable"],
+                "acquisition_retryable": state["retryable"],
             }
 
         def move(kind, current, target, serial, checkpoint):
@@ -125,6 +133,36 @@ class BoundedLidarAcquisitionTest(unittest.TestCase):
         self.assertFalse(report["head_alignment_verified"])
         self.assertEqual(len([c for c in calls if c[0] == "probe"]), 1)
         self.assertFalse(any(c[0] == "aligned" for c in calls))
+
+    def test_retryable_acquisition_yields_without_motion_or_resetting_time_budget(self):
+        recover, frame, state, calls, _ = self.controller(
+            hint=object(), retryable=True, budget_sec=3.)
+        state["observation_cost"] = 1.
+        for _ in range(3):
+            _, report, hint = recover(frame)
+            self.assertFalse(report["motion_completed"])
+            self.assertFalse(report["recovery_complete"])
+            self.assertIsNone(hint)
+        _, report, _ = recover(frame)
+        self.assertEqual(report["reason"], "lidar_recovery_time_budget_exhausted")
+        self.assertTrue(report["recovery_complete"])
+        self.assertEqual(calls, [("observe", 0), ("observe", 1), ("observe", 2)])
+
+    def test_invalid_post_motion_observation_remains_terminal_on_later_call(self):
+        frame, _ = frame_fixture()
+        observe = Mock(side_effect=[(frame, None, None, {}), (frame, None, None, {
+            "acquisition_unavailable": True, "reason": "invalid_mount"})])
+        move = Mock(return_value=frame)
+        recover = create_bounded_lidar_recovery(observe=observe, move_probe=move,
+            move_aligned=move, persist=lambda _: None)
+        _, first, _ = recover(frame)
+        _, second, _ = recover(frame)
+        self.assertTrue(first["motion_completed"])
+        self.assertTrue(first["recovery_complete"])
+        self.assertTrue(second["recovery_complete"])
+        self.assertEqual(second["reason"], "invalid_mount")
+        self.assertEqual(observe.call_count, 2)
+        move.assert_called_once()
 
     def test_active_time_accumulates_but_camera_time_between_calls_is_excluded(self):
         recover, frame, state, calls, _ = self.controller(budget_sec=20.)
@@ -226,11 +264,11 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
                    "scan_vertical_direction_y": 0., "scan_vertical_direction_z": 1.,
                    "exact_transform_stamp_sec": r.scan_stamp_sec} for r in receipts))
 
-    def make_adapter(self):
+    def make_adapter(self, **kwargs):
         return create_lidar_camera_recovery(source_config=self.source,
             source_registry=self.registry, effects=self.effects, candidate_root=self.root,
             fresh_frame=self.fresh, plan_and_move=self.move,
-            load_uncertainty=lambda _: self.uncertainty)
+            load_uncertainty=lambda _: self.uncertainty, **kwargs)
 
     def run_adapter(self, *, survey=None):
         survey = (line_receipts(increment=.01) + line_receipts(2, increment=.01)) if survey is None else survey
@@ -259,13 +297,20 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
         self.assertIn("camera_calibration_sha256", current)
         self.assertEqual(len(current["source_receipt_sha256s"]), 3)
         self.assertEqual(returned.observation_pose, returned.planning_frame.current_pose)
+        self.assertIsNotNone(returned.camera_target_geometry)
+        # The fixture face is x=0; the fitted solid center is half its depth behind it.
+        self.assertAlmostEqual(returned.camera_target_geometry.x_m,
+                               self.source.measured_stand_model.head_depth_m / 2., places=6)
+        self.assertAlmostEqual(returned.camera_target_geometry.y_m, 0., places=6)
+        self.assertEqual(returned.candidate, self.frame.candidate)
 
     def test_single_supported_view_rejects_redundant_probe_then_bounds_other_routes(self):
         self.capture_distance = .58
         self.move.side_effect = CandidateInspectionRouteUnavailableError("unsafe static route")
-        _, report, hint = self.run_adapter(survey=())
+        returned, report, hint = self.run_adapter(survey=())
         self.assertIsNone(hint)
         self.assertFalse(report["head_alignment_verified"])
+        self.assertIsNone(returned.camera_target_geometry)
         self.assertEqual(report["probe_moves_attempted"], 3)
         self.assertEqual(self.move.call_count, 6)  # .58→.55 m cannot add 5 cm of range support.
         self.assertEqual([c.kwargs["offset"] for c in self.move.call_args_list], [.55, .60, .65] * 2)
@@ -393,6 +438,113 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
         self.assertIsNone(hint)
         self.assertFalse(report["head_alignment_verified"])
         self.assertEqual(report["history"][-1]["reason"], "fresh_scan_cohort_unavailable")
+        self.assertFalse(report["recovery_complete"])
+        self.assertTrue(report["history"][-1]["acquisition_retryable"])
+        self.assertEqual(self.effects.capture_lidar_view.call_count, 3)
+        self.assertEqual(len(report["history"][-1]["capture_failures"]), 3)
+        self.move.assert_not_called()
+
+    def test_timeout_and_stale_capture_retry_with_fresh_floor_and_same_viewpoint(self):
+        for error in (TourScanCaptureError("exact-time TF unavailable",
+                      diagnostics={"rejection_attempt_counts": {"exact_time_transform_unavailable": 4}}),
+                      CandidateLidarCaptureUnavailableError("stale cohort")):
+            with self.subTest(error=type(error).__name__):
+                self.root = self.root / type(error).__name__
+                self.now = 30.
+                self.capture_requests = []
+                def capture(request):
+                    if self.effects.capture_lidar_view.call_count == 1:
+                        self.now += 3.
+                        raise error
+                    return self.capture(request)
+                self.effects.capture_lidar_view = Mock(side_effect=capture)
+                _, report, hint = self.run_adapter()
+                self.assertTrue(report["head_alignment_verified"])
+                self.assertIsNotNone(hint)
+                first, second = [c.args[0] for c in self.effects.capture_lidar_view.call_args_list]
+                self.assertEqual(first.viewpoint_id, second.viewpoint_id)
+                self.assertNotEqual(first.output_dir, second.output_dir)
+                self.assertEqual(second.observation_not_before_sec-first.observation_not_before_sec, 3.)
+                event = report["history"][-1]
+                self.assertEqual(len(event["capture_failures"]), 1)
+                self.assertEqual(event["capture_failures"][0]["diagnostics"], getattr(error, "diagnostics", {}))
+                self.move.assert_not_called()
+
+    def test_exhausted_passive_cohorts_do_not_disable_later_camera_view(self):
+        attempts = 0
+        def capture(request):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 3:
+                self.now += 3.
+                raise TourScanCaptureError("exact-time TF unavailable")
+            return self.capture(request)
+        self.effects.capture_lidar_view = capture
+        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.load_camera_lidar_receipts",
+                   return_value=(line_receipts(increment=.01)+line_receipts(2, increment=.01), {})):
+            recover = self.make_adapter()
+            frame, first, _ = recover(self.frame)
+            _, second, hint = recover(frame)
+        self.assertFalse(first["recovery_complete"])
+        self.assertTrue(second["head_alignment_verified"])
+        self.assertIsNotNone(hint)
+        self.assertEqual(attempts, 4)
+        self.assertEqual(second["probe_moves_attempted"], 0)
+        self.move.assert_not_called()
+
+    def test_failure_after_valid_cohort_does_not_probe_using_older_support(self):
+        attempts = 0
+        def capture(request):
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                raise TourScanCaptureError("no fresh cohort")
+            result = self.capture(request)
+            bad = replace(result.receipts[-1], ranges_m=(None,) * len(result.receipts[-1].ranges_m))
+            return replace(result, receipts=result.receipts[:-1]+(bad,))
+        self.effects.capture_lidar_view = capture
+        _, report, hint = self.run_adapter(survey=line_receipts(2, increment=.01))
+        self.assertIsNone(hint)
+        self.assertEqual(report["probe_moves_attempted"], 0)
+        self.assertTrue(report["history"][-1]["acquisition_retryable"])
+        self.assertEqual(report["history"][-1]["examined_scan_count"], 3)
+        self.move.assert_not_called()
+
+    def test_nonretryable_capture_error_terminates_and_is_not_retried(self):
+        self.effects.capture_lidar_view = Mock(side_effect=TourScanCaptureError(
+            "ROS2 unavailable", retryable=False, reason_code="scan_capture_dependencies_unavailable"))
+        recover = self.make_adapter()
+        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.load_camera_lidar_receipts",
+                   return_value=((), {})):
+            _, first, _ = recover(self.frame)
+            _, second, _ = recover(self.frame)
+        self.assertTrue(first["recovery_complete"])
+        self.assertTrue(second["recovery_complete"])
+        self.assertEqual(second["reason"], "scan_capture_dependencies_unavailable")
+        self.effects.capture_lidar_view.assert_called_once()
+        self.move.assert_not_called()
+
+    def test_retryable_capture_attempts_stop_when_cumulative_active_budget_expires(self):
+        attempts = 0
+        def capture(request):
+            nonlocal attempts
+            attempts += 1
+            self.now += 3.
+            raise TourScanCaptureError("no fresh cohort")
+        self.effects.capture_lidar_view = capture
+        recover = self.make_adapter(monotonic=lambda: self.now, budget_sec=10.)
+        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.load_camera_lidar_receipts",
+                   return_value=((), {})):
+            _, first, _ = recover(self.frame)
+            self.now += 60.  # Camera time remains outside the LiDAR budget.
+            _, second, _ = recover(self.frame)
+            _, third, _ = recover(self.frame)
+        self.assertFalse(first["recovery_complete"])
+        self.assertEqual(first["active_elapsed_sec"], 9.)
+        self.assertEqual(second["active_elapsed_sec"], 12.)
+        self.assertEqual(second["reason"], "lidar_recovery_time_budget_exhausted")
+        self.assertTrue(third["recovery_complete"])
+        self.assertEqual(attempts, 4)
         self.move.assert_not_called()
 
     def test_missing_mount_proof_never_sends_probe_motion(self):
@@ -425,6 +577,44 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "capture evidence corrupt"):
             self.run_adapter()
         self.move.assert_not_called()
+
+    def test_direct_sampling_turn_rechecks_target_before_any_motion_dispatch(self):
+        map_yaml = write_free_map(self.root)
+        _, bundle = load_occupancy_grid_with_bundle(map_yaml, semantic_map_id="arena", planning_frame="map")
+        candidate = replace(self.frame.candidate,
+                            geometry=replace(self.frame.candidate.geometry, x_m=3.))
+        snapshot = replace(self.frame.config.snapshot, map_bundle_sha256=bundle.bundle_sha256,
+                           candidates=(candidate,))
+        config = SimpleNamespace(snapshot=snapshot, map_yaml=map_yaml, semantic_map_id="arena",
+            plan=planning_fixtures.CandidatePreapproachPlanningTest._plan(bundle.bundle_sha256))
+        frame = replace(self.frame, config=config, candidate=candidate)
+        self.effects.run_lidar_sampling_turn = Mock(side_effect=AssertionError("invalid target must not turn"))
+        checkpoint = Mock()
+
+        # Call the adapter's production sampling callback directly: even if an
+        # upstream observation/controller gate were bypassed, dispatch is guarded.
+        def bind_sampling(**callbacks):
+            return lambda current: callbacks["move_sampling"](current, {}, 1, checkpoint)
+
+        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.create_bounded_lidar_recovery",
+                   side_effect=bind_sampling):
+            recovery = self.make_adapter()
+            with self.assertRaises(CandidateObservationUnavailableError) as raised:
+                recovery(frame)
+        self.assertEqual(raised.exception.reason, "candidate_target_ineligible")
+        self.assertEqual(raised.exception.status_evidence["reasons"], ["target_static_map_incompatible"])
+        self.assertFalse(raised.exception.process_evidence["observer_started"])
+        self.effects.run_lidar_sampling_turn.assert_not_called()
+        self.move.assert_not_called()
+        self.fresh.assert_not_called()
+        self.assertEqual(self.capture_requests, [])
+        checkpoint.assert_called_once_with("sampling_turn_preflight", sampling_index=1)
+        evidence = load_content_hashed_json(
+            self.root / "lidar_head_acquisition/sampling_01_target_admission.json",
+            hash_field="candidate_target_admission_sha256")
+        self.assertFalse(evidence["accepted"])
+        self.assertFalse(evidence["motion_authorized"])
+        self.assertFalse(evidence["keepouts_changed"])
 
 
 if __name__ == "__main__":

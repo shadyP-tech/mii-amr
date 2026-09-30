@@ -31,6 +31,11 @@ from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePreapproachPlan,
     CandidatePreapproachUnreachableError,
 )
+from scripts.aufgabe04.navigation.approach.candidate_target_admission import (
+    evaluate_candidate_target_admission,
+    require_candidate_target_admission,
+    validate_candidate_target_bindings,
+)
 from scripts.aufgabe04.navigation.approach.detected_stand_preapproach import (
     CAMERA_AXIS_FACE_BEARING_MODE,
     ROBOT_TO_STAND_BEARING_MODE,
@@ -79,6 +84,7 @@ def load_candidate_planning_context(
 ) -> CandidatePlanningContext:
     """Load immutable map inputs once and validate every evidence binding."""
 
+    validate_candidate_target_bindings(plan=plan, snapshot=snapshot)
     minimum_active, minimum_transit, minimum_inflation = (
         validate_physical_clearance(
             physical_clearance,
@@ -156,6 +162,7 @@ def compute_candidate_preapproach_plan(
 ) -> CandidatePreapproachPlan:
     """Compute the exact route used for both candidate scoring and sealing."""
 
+    validate_candidate_target_bindings(plan=plan, snapshot=snapshot)
     _validate_finite_pose(start)
     for name, value, allow_zero in (
         ("approach_offset_m", approach_offset_m, False),
@@ -229,6 +236,11 @@ def compute_candidate_preapproach_plan(
         inflation_radius_m=inflation_radius_m,
         candidate_transit_radius_m=candidate_transit_radius_m,
     )
+    target_admission = evaluate_candidate_target_admission(
+        candidate, context.costmaps.base_costmap,
+        target_geometry=alignment_target or geometry,
+    )
+    require_candidate_target_admission(target_admission)
     validate_approach_outside_transit_keepout(
         approach_offset_m=approach_offset_m,
         candidate_transit_radius_m=candidate_transit_radius_m,
@@ -310,6 +322,7 @@ def compute_candidate_preapproach_plan(
         map_bundle=context.map_bundle,
     )
     metadata["inflation_radius_m"] = inflation_radius_m
+    metadata["candidate_target_admission"] = target_admission.to_evidence()
     metadata["line_of_sight_route_optimization"] = {
         "enabled": dry_run_smoothing.enabled,
         "legs": [dry_run_smoothing.to_metadata()],

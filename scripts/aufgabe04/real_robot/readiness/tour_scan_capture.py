@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 import time
 
@@ -28,6 +28,13 @@ except ImportError:  # pragma: no cover
 class TourScanCaptureError(RuntimeError):
     """No complete fresh stationary cohort was collected; motion stays stopped."""
 
+    def __init__(self, message, *, retryable=True,
+                 reason_code="stationary_scan_capture_timeout", diagnostics=None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.reason_code = reason_code
+        self.diagnostics = {} if diagnostics is None else dict(diagnostics)
+
 
 class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
     sample_count = 3
@@ -44,6 +51,8 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
         self.samples = deque(maxlen=self.sample_count)
         self.payload = None
         self.last_error = "no fresh scans received"
+        self.rejection_counts = Counter()
+        self.accepted_scan_count = 0
         self.subscription = self.create_subscription(
             LaserScan, profile.resolved_runtime().scan_topic,
             self._scan, qos_profile_sensor_data)
@@ -51,12 +60,25 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
     def _scan(self, message):
         self.pending.append((message, time.time()))
 
+    def _rejected(self, reason, detail=None):
+        # Counts describe validation attempts. Pending scans may be checked for
+        # exact-time TF repeatedly; they are not distinct source-frame counts.
+        self.rejection_counts[reason] += 1
+        self.last_error = detail or reason
+
+    def capture_diagnostics(self):
+        return {"rejection_attempt_counts": dict(self.rejection_counts),
+                "accepted_scan_count": self.accepted_scan_count,
+                "pending_scan_count": len(self.pending),
+                "cohort_sample_count": len(self.samples), "last_error": self.last_error}
+
     def poll(self):
         while self.pending:
             message, receipt = self.pending[0]
             try:
                 stamp = stamp_seconds(message.header.stamp)
                 if self.observation_not_before_sec is not None and stamp < self.observation_not_before_sec:
+                    self._rejected("scan_before_observation_floor")
                     self.pending.popleft()
                     continue
                 if time.time()-stamp > MAX_SCAN_AGE_SEC:
@@ -76,17 +98,20 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
                     metadata.validate(sample["ranges"])
                     sample["scan_metadata"] = metadata.to_mapping()
             except TransformException as exc:
-                self.last_error = f"exact scan-time transform unavailable: {exc}"
+                self._rejected("exact_time_transform_unavailable",
+                               f"exact scan-time transform unavailable: {exc}")
                 return
             except (AttributeError, TypeError, ValueError) as exc:
-                self.last_error = str(exc)
+                self._rejected(str(exc))
                 self.pending.popleft()
                 self.samples.clear()
                 continue
             self.pending.popleft()
             if self.samples and stamp-float(self.samples[-1]["stamp_sec"]) < MIN_SAMPLE_SEPARATION_SEC-1e-6:
+                self._rejected("scan_source_stamps_not_distinct_or_separated")
                 continue
             self.samples.append(sample)
+            self.accepted_scan_count += 1
             if len(self.samples) == self.sample_count:
                 try:
                     self.payload = self.payload_builder(tuple(self.samples), tour_id=self.tour_id,
@@ -94,7 +119,7 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
                         scan_frame=self.profile.scan_frame, captured_at_unix_sec=time.time())
                     return
                 except ValueError as exc:
-                    self.last_error = str(exc)
+                    self._rejected(str(exc))
 
 
 def _capture_stationary_scan(profile, *, tour_id: str, output_path: Path, node_factory,
@@ -112,7 +137,8 @@ def _capture_stationary_scan(profile, *, tour_id: str, output_path: Path, node_f
     if not 0 < timeout <= 30:
         raise ValueError("capture timeout must be positive and at most 30 seconds")
     if rclpy is None:
-        raise TourScanCaptureError("ROS2 scan capture dependencies are unavailable")
+        raise TourScanCaptureError("ROS2 scan capture dependencies are unavailable",
+            retryable=False, reason_code="scan_capture_dependencies_unavailable")
     path = Path(output_path)
     if path.exists() or path.is_symlink():
         raise ValueError("tour scan capture output must be fresh")
@@ -129,7 +155,10 @@ def _capture_stationary_scan(profile, *, tour_id: str, output_path: Path, node_f
             if node.payload is not None:
                 write_content_hashed_json(path, node.payload, hash_field=hash_field)
                 return path
-        raise TourScanCaptureError(f"stationary tour scan capture failed: {node.last_error}")
+        diagnostics = (node.capture_diagnostics() if hasattr(node, "capture_diagnostics")
+                       else {"last_error": node.last_error})
+        raise TourScanCaptureError(f"stationary tour scan capture failed: {node.last_error}",
+                                   diagnostics=diagnostics)
     finally:
         if node is not None:
             node.destroy_node()

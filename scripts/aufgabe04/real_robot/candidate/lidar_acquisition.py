@@ -23,6 +23,7 @@ from scripts.aufgabe04.navigation.approach.lidar_head_observability import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
+from scripts.aufgabe04.real_robot.candidate.target_admission import require_frame_target
 from scripts.aufgabe04.real_robot.candidate.lidar_inspection_hints import load_camera_lidar_receipts
 from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256
 
@@ -104,6 +105,12 @@ def create_bounded_lidar_recovery(*, observe, move_probe, move_aligned, persist,
                 if review.get("acquisition_unavailable"):
                     terminal_reason = review.get("reason", "acquisition_unavailable")
                     break
+                if review.get("acquisition_retryable"):
+                    # Passive cohort exhaustion yields to the camera. It does
+                    # not authorize a probe from older support or permanently
+                    # disable acquisition at a later stopped observation.
+                    hint = current_fit = None
+                    break
                 if review.get("head_alignment_verified") and review.get("camera_centered_verified"):
                     break
                 if (hint is None and move_sampling is not None and sampling_moves == 0
@@ -161,6 +168,10 @@ def create_bounded_lidar_recovery(*, observe, move_probe, move_aligned, persist,
                 history.append({"event": "motion_returned", "kind": kind})
                 persist(report())
                 observation()
+                if review.get("acquisition_unavailable"):
+                    terminal_reason = review.get("reason", "acquisition_unavailable")
+                if review.get("acquisition_retryable"):
+                    hint = current_fit = None
                 break  # Never dispatch a second successful move in this call.
         except _RecoveryBudgetExpired:
             terminal_reason = "lidar_recovery_time_budget_exhausted"
@@ -246,9 +257,11 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
         uncertainty = _camera_alignment_uncertainty(route_context)
         stopped_receipts = ()
         capture_paths = []
+        capture_failures = []
         support_fit = current_fit = hint = None
         review = {"head_alignment_verified": False, "camera_centered_verified": False,
-                  "reason": "insufficient_head_geometry"}
+                  "reason": "insufficient_head_geometry", "capture_failures": capture_failures,
+                  "cohort_limit": MAX_COHORTS_PER_STOPPED_VIEW}
         # Repeat passive measurements only at this stopped view. All scans,
         # including failures, remain in its support denominator. Another cohort
         # is not an independent viewpoint and does not relax any fit threshold.
@@ -266,9 +279,24 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
             try:
                 captured = effects.capture_lidar_view(request)
             except (TourScanCaptureError, CandidateLidarCaptureUnavailableError) as exc:
-                return frame, None, None, {**review, "reason": "fresh_scan_cohort_unavailable",
-                    "detail": str(exc), "acquisition_unavailable": True,
-                    "capture_evidence_paths": capture_paths}
+                retryable = isinstance(exc, CandidateLidarCaptureUnavailableError) or exc.retryable
+                failure = {"cohort_index": cohort_index, "exception_type": type(exc).__name__,
+                    "reason": getattr(exc, "reason_code", "stale_scan_cohort"),
+                    "detail": str(exc), "retryable": retryable,
+                    "capture_output_dir": str(request.output_dir),
+                    "diagnostics": getattr(exc, "diagnostics", {})}
+                capture_failures.append(failure)
+                checkpoint("scan_capture_rejected", observation_index=serial, **failure)
+                if not retryable or cohort_index + 1 == MAX_COHORTS_PER_STOPPED_VIEW:
+                    # Even a valid earlier cohort is not a fresh replacement
+                    # for the failed latest capture. No motion may use it.
+                    return frame, None, None, {**review,
+                        "reason": "fresh_scan_cohort_unavailable" if retryable else failure["reason"],
+                        "detail": str(exc), "acquisition_unavailable": not retryable,
+                        "acquisition_retryable": retryable, "cohort_count": cohort_index+1,
+                        "capture_evidence_paths": list(capture_paths),
+                        "examined_scan_count": len(stopped_receipts)}
+                continue
             if (captured.candidate_uid != uid or captured.candidate_snapshot_sha256 != request.candidate_snapshot_sha256
                     or captured.viewpoint_id != request.viewpoint_id):
                 raise ValueError("local LiDAR capture candidate binding mismatch")
@@ -353,11 +381,19 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
                 review.update(head_alignment_verified=False, accepted=False,
                               reason="fitted_head_arrival_range_rejected")
         last_fit = support_fit
+        if review.get("head_alignment_verified") and review.get("camera_centered_verified"):
+            # The current, verified fit is the actual acquisition target.
+            # Reproject it through each fresh frame before camera admission.
+            frame = replace(frame, camera_target_geometry=replace(frame.candidate.geometry,
+                x_m=current_fit.center_x_m, y_m=current_fit.center_y_m,
+                uncertainty_m=current_fit.center_uncertainty_m))
         return frame, hint, support_fit, review
 
     def move_sampling(frame, review, serial, checkpoint):
         from scripts.aufgabe04.real_robot.candidate.lidar_sampling import MAX_TOTAL_TRAVEL_RAD
         checkpoint("sampling_turn_preflight", sampling_index=serial)
+        require_frame_target(frame, evidence_path=root / f"sampling_{serial:02d}_target_admission.json",
+                             attempt_index=serial)
         outcome = effects.run_lidar_sampling_turn(
             candidate=frame.candidate, source_view_path=last_capture.evidence_path,
             snapshot_path=frame.config.snapshot_path, output_dir=root / f"sampling_{serial:02d}",

@@ -12,6 +12,7 @@ from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 import shutil
 from typing import Mapping
@@ -41,6 +42,9 @@ from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import
 from scripts.aufgabe04.navigation.approach.candidate_preapproach_models import (
     CandidatePreapproachPlan,
 )
+from scripts.aufgabe04.navigation.approach.candidate_target_admission import (
+    evaluate_candidate_target_admission, require_candidate_target_admission,
+)
 from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
     validate_candidate_route_uncertainty_selection_binding,
 )
@@ -61,6 +65,7 @@ from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_route_csv,
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.planning.costmap import Costmap
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot,
     candidate_snapshot_sha256,
@@ -163,6 +168,25 @@ def materialize_candidate_preapproach_plan(
     if prepared.validated_target_center != estimate:
         raise ValueError('prepared current target differs from certified observation')
     geometry = planning_target_geometry(candidate, estimate)
+    if prepared.dry_run.metadata.get("arena_bounds") != prepared.dry_run.arena_bounds.to_metadata():
+        raise ValueError("prepared target arena differs from bound route metadata")
+    target_geometry = geometry
+    if prepared.camera_alignment is not None:
+        alignment = prepared.camera_alignment
+        if (alignment["candidate_uid"] != candidate.candidate_uid
+                or alignment["candidate_snapshot_sha256"] != snapshot_sha256
+                or math.hypot(alignment["center_x_m"]-geometry.x_m,
+                              alignment["center_y_m"]-geometry.y_m) > geometry.radius_m+geometry.uncertainty_m):
+            raise ValueError("prepared fitted head differs from candidate binding")
+        target_geometry = replace(geometry, x_m=alignment["center_x_m"],
+            y_m=alignment["center_y_m"], uncertainty_m=alignment["center_uncertainty_m"])
+    static_costmap = Costmap.from_occupancy_grid(prepared.dry_run.grid).with_arena_bounds(
+        prepared.dry_run.arena_bounds,
+    )
+    target_admission = evaluate_candidate_target_admission(
+        candidate, static_costmap, target_geometry=target_geometry,
+    )
+    require_candidate_target_admission(target_admission)
     if inspection_view is None:
         _validate_approach_bearing_binding(
             prepared=prepared,
@@ -209,6 +233,7 @@ def materialize_candidate_preapproach_plan(
         final_yaw_by_leg={0: prepared.terminal_yaw_rad},
     )
     metadata = dict(prepared.dry_run.metadata)
+    metadata["candidate_target_admission"] = target_admission.to_evidence()
     planning_order = "candidate-local-inspection" if inspection_view else (
         "route-aware-camera-selection"
         if selection_evidence is not None
