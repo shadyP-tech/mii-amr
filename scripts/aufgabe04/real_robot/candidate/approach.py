@@ -1106,6 +1106,7 @@ class CandidateApproachEffects:
     clock: Callable[[], float] = time.time
     run_centering_turn: Callable[..., object] | None = None
     capture_lidar_view: Callable[[CandidateLidarCaptureRequest], CandidateLidarView] | None = None
+    run_lidar_sampling_turn: Callable[..., object] | None = None
 
 
 def _camera_alignment_uncertainty(context):
@@ -1235,6 +1236,57 @@ def _materialize_candidate_frame_projection(
     )
 
 
+def _camera_arrival_decision(
+    *, robot_pose: Pose2D, target_x_m: float, target_y_m: float,
+    config: CandidateArrivalAdmissionConfig,
+    calibration: CameraCalibrationProfile | None,
+):
+    """Keep physical base range while measuring bearing from the optical axis."""
+    from scripts.aufgabe04.real_robot.configuration.geometry import rotate_vector
+    from scripts.aufgabe04.real_robot.configuration.profile import camera_calibration_sha256
+
+    base = evaluate_candidate_arrival_admission(
+        robot_pose, target_x_m=target_x_m, target_y_m=target_y_m, config=config,
+    )
+    if calibration is None:
+        return base, {"bearing_reference": "base_pose"}
+    calibration_sha = camera_calibration_sha256(calibration)
+    # Runtime preflight binds the calibration parent to the robot profile's
+    # base frame, which is also used by the stationary planning-pose sampler.
+    forward = rotate_vector((0., 0., 1.), calibration.base_to_camera.rotation_xyzw)
+    if math.hypot(forward[0], forward[1]) < .5:
+        raise ValueError("camera arrival calibration optical planar projection insufficient")
+    tx, ty, _ = calibration.base_to_camera.translation_xyz_m
+    c, s = math.cos(robot_pose.yaw_rad), math.sin(robot_pose.yaw_rad)
+    optical_pose = Pose2D(
+        robot_pose.x_m + c*tx - s*ty,
+        robot_pose.y_m + s*tx + c*ty,
+        normalize_angle(robot_pose.yaw_rad + math.atan2(forward[1], forward[0])),
+    )
+    optical = evaluate_candidate_arrival_admission(
+        optical_pose, target_x_m=target_x_m, target_y_m=target_y_m, config=config,
+    )
+    reasons = tuple(reason for reason in base.reasons if reason != "bearing_error_above_maximum")
+    if not optical.bearing_within_limit:
+        reasons += ("bearing_error_above_maximum",)
+    return replace(
+        base, accepted=not reasons,
+        decision="arrival_geometry_rejected" if reasons else "arrival_geometry_admitted",
+        reasons=reasons, target_bearing_rad=optical.target_bearing_rad,
+        signed_bearing_error_rad=optical.signed_bearing_error_rad,
+        absolute_bearing_error_rad=optical.absolute_bearing_error_rad,
+        bearing_within_limit=optical.bearing_within_limit,
+    ), {
+        "bearing_reference": "calibrated_camera_optical_axis",
+        "range_reference": calibration.base_frame,
+        "camera_calibration_sha256": calibration_sha,
+        "camera_optical_frame": calibration.camera_optical_frame,
+        "camera_calibration_base_frame": calibration.base_frame,
+        "base_geometry": base.to_evidence_dict(),
+        "optical_geometry": optical.to_evidence_dict(),
+    }
+
+
 def _admit_camera_arrival_geometry(
     *,
     source_config: CandidateApproachConfig,
@@ -1250,6 +1302,8 @@ def _admit_camera_arrival_geometry(
 
     admit_planning_frame = effects.admit_planning_frame
     if admit_planning_frame is None:
+        if source_config.camera_calibration is not None:
+            raise RuntimeError("calibrated camera arrival requires a fresh base planning pose")
         candidate = source_config.snapshot.candidate_for(candidate_uid)
         if candidate is None:
             raise RuntimeError("arrival candidate disappeared from snapshot")
@@ -1303,10 +1357,11 @@ def _admit_camera_arrival_geometry(
         target_geometry = planning_target_geometry(candidate,current_target)
     else:
         target_geometry = candidate.geometry
-    decision = evaluate_candidate_arrival_admission(
-        planning_frame.current_pose,
+    decision, calibrated_evidence = _camera_arrival_decision(
+        robot_pose=planning_frame.current_pose,
         target_x_m=target_geometry.x_m,
         target_y_m=target_geometry.y_m,
+        calibration=source_config.camera_calibration,
         config=CandidateArrivalAdmissionConfig(
             min_range_m=minimum_range_m,
             max_range_m=(
@@ -1326,17 +1381,20 @@ def _admit_camera_arrival_geometry(
         # Admission to passive acquisition is distinct from being centered.
         # The observer must still associate a current head before proposing
         # a separately certified turn; no map-only correction is authorized.
-        decision = evaluate_candidate_arrival_admission(
-            planning_frame.current_pose,
+        decision, calibrated_evidence = _camera_arrival_decision(
+            robot_pose=planning_frame.current_pose,
             target_x_m=target_geometry.x_m,
             target_y_m=target_geometry.y_m,
+            calibration=source_config.camera_calibration,
             config=replace(strict_decision.config, max_bearing_error_rad=max(
                 strict_decision.config.max_bearing_error_rad, MAX_CENTERING_STEP_RAD,
             )),
         )
     arrival_evidence = {
         **decision.to_evidence_dict(),
+        **calibrated_evidence,
         "validated_target_center": current_target,
+        "head_alignment_verified": False,
         "retained_backside_axis_path": None if arrival_axis_path is None else str(arrival_axis_path),
         "strict_arrival": strict_decision.to_evidence_dict(),
         "acquisition_only": decision.accepted and not strict_decision.accepted,

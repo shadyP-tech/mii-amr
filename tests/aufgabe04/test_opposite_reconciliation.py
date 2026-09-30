@@ -202,7 +202,8 @@ def test_arrival_keeps_validated_center_instead_of_turning_back_to_survey(record
     target=Path(orientation['path']).with_name('target.json')
     digest=payload_sha256(load_content_hashed_json(target,hash_field='candidate_frame_projection_sha256'))
     config=SimpleNamespace(physical_clearance={'minimum_active_standoff_m':.33},approach_offset_m=.5,
-        camera_arrival_range_slack_m=.1,camera_arrival_max_bearing_error_rad=math.radians(3))
+        camera_arrival_range_slack_m=.1,camera_arrival_max_bearing_error_rad=math.radians(3),
+        camera_calibration=None)
     artifacts=SimpleNamespace(config=SimpleNamespace(snapshot=snapshot),evidence_path=target,evidence_sha256=digest,
         snapshot_path=Path(row['snapshot_path']),snapshot_sha256=recorded[4]['snapshot_sha256'],
         camera_decision_binding=lambda:SimpleNamespace(projection_path=target,projection_sha256=digest))

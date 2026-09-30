@@ -80,7 +80,7 @@ LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "association, calibrated camera bearing, and the same live motion checks "
     "are required; no stand angle or survey landmark is rewritten."
 )
-MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
     + " After exhausted no-motion opposite-face uncertainty admission, one "
     "separately sealed route prefix may stop at an existing waypoint for "
@@ -88,6 +88,15 @@ MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "same candidate and original backside geometry, and requires a new plan, "
     "passed dry run and single-use permit. Checkpoints cannot be chained; "
     "failure after checkpoint dispatch stops the attempt."
+)
+MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
+    LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE
+    + " Optional candidate LiDAR sampling may use one separately sealed "
+    "stationary turn of at most twenty-five degrees per candidate, with at "
+    "most twenty-six degrees of measured travel. It requires current "
+    "candidate-bound scans, original scan geometry, fresh odometry, exclusive "
+    "velocity ownership, live clearance checks and stopped-pose proof; it "
+    "does not verify camera centering or head alignment."
 )
 LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE = (
     "Authorize only this newly confirmed stored-pose tour session. Each visit "
@@ -752,6 +761,7 @@ def _validate_authorization(
         TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -768,6 +778,7 @@ def _validate_authorization(
         MissionLegKind.RETURN_TO_START in authorization.allowed_leg_kinds
         and authorization.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -1000,7 +1011,8 @@ def _validate_routine_route_scope(
         import json
         metadata = json.loads(Path(permit.diagnostics_path).read_text()).get("metadata", {})
         if metadata.get("approach_bearing_mode") == "opposite-localization-checkpoint":
-            if authorization.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+            if authorization.scope_text not in {MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+                    LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE}:
                 raise ValueError("opposite checkpoint requires the explicit checkpoint mission scope")
             if metadata.get("selected_candidate_stand_id") != permit.target_id:
                 raise ValueError("opposite checkpoint candidate differs from permit target")
@@ -1226,6 +1238,7 @@ __all__ = [
     "MISSION_LEG_MOTION_AUTHORIZATION_HASH_FIELD",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCHEMA_VERSION",
     "MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
+    "LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "LEGACY_TOUR_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE",
     "MISSION_LEG_MOTION_PERMIT_HASH_FIELD",

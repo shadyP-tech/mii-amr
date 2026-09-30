@@ -25,6 +25,7 @@ from scripts.aufgabe04.perception.lidar_visibility_evidence import (
     LidarVisibilityReceipt, lidar_visibility_receipt_from_scan, visibility_receipts_sha256,
 )
 from scripts.aufgabe04.perception.lidar_visibility_frames import LidarVisibilityFrameProvenance
+from scripts.aufgabe04.perception.lidar_scan_metadata import LidarScanMetadata
 from scripts.aufgabe04.real_robot.readiness.tour_scan_contract import (
     HASH_FIELD as COHORT_HASH_FIELD, MAX_SCAN_AGE_SEC, FUTURE_TOLERANCE_SEC,
     capture_payload, finite,
@@ -52,6 +53,7 @@ class CandidateLidarCaptureRequest:
     base_frame: str
     scan_frame: str
     scan_topic: str
+    scan_topology_profile: str = "linear"
 
 
 @dataclass(frozen=True)
@@ -85,10 +87,10 @@ def capture_candidate_lidar_view(
     capture_cohort: Callable[[CandidateLidarCaptureRequest], Path],
     clock: Callable[[], float] = time.time,
 ) -> CandidateLidarView:
-    """Revalidate all three source scans and bind them to one candidate.
+    """Revalidate the fixed source cohort and bind it to one candidate.
 
-    ``capture_cohort`` returns the hashed artifact from ``capture_tour_scan``.
-    Its tour-named format is reused with separate candidate-local lineage;
+    Production returns a fixed eight-scan ``capture_head_scan`` artifact.
+    Legacy three-scan tour artifacts remain readable for recorded evidence;
     no viewpoints are added to the frozen survey.
     """
     if not isinstance(request, CandidateLidarCaptureRequest):
@@ -118,20 +120,29 @@ def capture_candidate_lidar_view(
     now = finite(clock(), "capture end")
     if not 0 <= now - started <= 30.0:
         raise ValueError("candidate LiDAR capture exceeded the bounded epoch")
-    raw = load_content_hashed_json(capture_path, hash_field=COHORT_HASH_FIELD)
+    from scripts.aufgabe04.real_robot.candidate.lidar_head_capture import (
+        HASH_FIELD as HEAD_HASH_FIELD, head_capture_payload)
+    # Legacy stored evidence remains readable; production now captures eight.
+    import json
+    header = json.loads(capture_path.read_text())
+    head_capture = header.get("artifact_kind") == "candidate_head_scan_capture"
+    raw = load_content_hashed_json(capture_path, hash_field=HEAD_HASH_FIELD if head_capture else COHORT_HASH_FIELD)
     capture_hash = payload_sha256(raw)
     expected = {
-        "schema_version": 1, "artifact_kind": "stored_pose_tour_scan_capture",
-        "tour_id": request.viewpoint_id, "odom_frame": frame.odom_frame,
+        "schema_version": 1, "artifact_kind": ("candidate_head_scan_capture" if head_capture else "stored_pose_tour_scan_capture"),
+        ("viewpoint_id" if head_capture else "tour_id"): request.viewpoint_id, "odom_frame": frame.odom_frame,
         "base_frame": request.base_frame, "scan_frame": request.scan_frame,
     }
     if any(raw.get(key) != value for key, value in expected.items()):
         raise ValueError("candidate LiDAR cohort identity differs from request")
-    validated = capture_payload(raw["scans"], tour_id=request.viewpoint_id,
+    validated = (head_capture_payload if head_capture else capture_payload)(raw["scans"], tour_id=request.viewpoint_id,
         odom_frame=frame.odom_frame, base_frame=request.base_frame, scan_frame=request.scan_frame,
         captured_at_unix_sec=raw["captured_at_unix_sec"])
     if validated != raw:
         raise ValueError("candidate LiDAR cohort has unsupported fields")
+    if head_capture and any(scan["scan_metadata"]["scan_topology_profile"] != request.scan_topology_profile
+                            for scan in raw["scans"]):
+        raise ValueError("candidate LiDAR topology profile differs from request")
     scans = raw["scans"]
     captured = finite(raw["captured_at_unix_sec"], "capture timestamp")
     if captured > now + FUTURE_TOLERANCE_SEC or now-scans[-1]["stamp_sec"] < -FUTURE_TOLERANCE_SEC:
@@ -167,6 +178,7 @@ def capture_candidate_lidar_view(
             range_min_m=scan["range_min"], range_max_m=scan["range_max"], ranges_m=scan["ranges"],
             frame_provenance=LidarVisibilityFrameProvenance(
                 frame.map_frame, frame.odom_frame, transform, pose, capture_hash),
+            scan_metadata=(None if not head_capture else LidarScanMetadata.from_mapping(scan["scan_metadata"])),
         ))
     receipts = tuple(receipts)
     base_pose = Pose2D(**scans[-1]["base_pose_odom"])
@@ -189,7 +201,7 @@ def capture_candidate_lidar_view(
         "mount_evidence": list(mount_evidence),
         "scan_count": len(receipts), "motion_authorized": False, "stand_axis_authorized": False,
     }
-    if payload_sha256(load_content_hashed_json(capture_path, hash_field=COHORT_HASH_FIELD)) != capture_hash:
+    if payload_sha256(load_content_hashed_json(capture_path, hash_field=HEAD_HASH_FIELD if head_capture else COHORT_HASH_FIELD)) != capture_hash:
         raise ValueError("candidate LiDAR source changed during validation")
     digest = write_content_hashed_json(evidence_path, payload, hash_field=HASH_FIELD)
     return CandidateLidarView(request.candidate_uid, request.candidate_snapshot_sha256,

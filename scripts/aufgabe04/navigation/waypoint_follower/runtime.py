@@ -956,7 +956,7 @@ def run_candidate_centering_motion(permit):
         # commands linear motion or uses the route-driving smoother.
         command_smoothing=CommandSmoothingConfig(enabled=False))
     return _run_in_place_motion(runtime_config, follower_config,
-        controller_trace_path=Path(permit["controller_trace_path"]), route_kind="candidate_centering",
+        controller_trace_path=Path(permit["controller_trace_path"]), route_kind=permit["purpose"],
         stop_command_count=10, run_motion=lambda node: node.run_candidate_centering(permit))
 
 

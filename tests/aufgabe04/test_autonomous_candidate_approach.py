@@ -527,6 +527,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                       (candidate_root / "inspection_handoff_events.jsonl").read_text().splitlines()]
             self.assertEqual([(e["event"], e["state"]) for e in events], [
                 ("arrival_admission", "started"), ("arrival_admission", "failed"),
+                ("planning_frame_admission", "started"), ("planning_frame_admission", "returned"),
                 ("inspection_motion", "started"), ("inspection_motion", "returned"),
                 ("arrival_admission", "started"), ("arrival_admission", "returned"),
                 ("observer_capture", "started"), ("observer_capture", "returned"),
@@ -579,6 +580,159 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                     ("arrival_admission", "started"), ("arrival_admission", "returned"),
                     ("observer_capture", "started"), ("observer_capture", "returned"),
                 ])
+
+    def test_calibrated_optical_arrival_reaches_first_camera_without_base_yaw_correction(self):
+        from scripts.aufgabe04.real_robot.configuration.profile import camera_calibration_sha256
+        from tests.aufgabe04.test_lidar_alignment_arrival import calibration
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mount_yaw = math.radians(17.)
+            camera = replace(calibration(lateral=.04, yaw=mount_yaw), base_frame="base_footprint")
+            tx, ty, _ = camera.base_to_camera.translation_xyz_m
+            lateral = -math.sin(mount_yaw)*tx + math.cos(mount_yaw)*ty
+            base_yaw = -mount_yaw - math.asin(lateral/.7)
+            config = self._write_frame_registry(
+                replace(self._config(root, (self._candidate("candidate_a", 2., 0.),)),
+                        camera_calibration=camera),
+                frozen_map_from_odom=PlanarTransform2D(1., 0., 0.),
+            )
+            frames = iter(CandidatePlanningFrame(p, PlanarTransform2D(0., 0., 0.))
+                          for p in (Pose2D(0., 0., 0.), Pose2D(.30, 0., base_yaw)))
+            motion = Mock(side_effect=self._completed)
+            turn = Mock(side_effect=AssertionError("calibrated arrival requested a map-only turn"))
+            captures = []
+
+            def capture(request):
+                captures.append(request)
+                return CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None)
+
+            result = execute_candidate_approach_phase(config, CandidateApproachEffects(
+                read_current_pose=lambda: Pose2D(.30, 0., base_yaw),
+                admit_planning_frame=lambda _path: next(frames),
+                select_initial_preapproach=self._nearest_selection,
+                plan_preapproach=lambda _request: {"route_csv": "route.csv"},
+                run_motion_leg=motion, capture_observation=capture, run_centering_turn=turn,
+                validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                commit_decision=lambda _request: None,
+            ))
+            self.assertEqual(result.visit_order, ("candidate_a",))
+            self.assertEqual(motion.call_count, 1)
+            self.assertEqual(len(captures), 1)
+            self.assertEqual(captures[0].attempt_index, 0)
+            turn.assert_not_called()
+            receipt = json.loads((config.session_root / "candidates/000_candidate_a"
+                                  / "candidate_arrival_admission.json").read_text())
+            self.assertTrue(receipt["accepted"])
+            self.assertTrue(receipt["strict_arrival"]["accepted"])
+            self.assertFalse(receipt["base_geometry"]["accepted"])
+            self.assertEqual(receipt["bearing_reference"], "calibrated_camera_optical_axis")
+            self.assertEqual(receipt["range_reference"], "base_footprint")
+            self.assertEqual(receipt["camera_calibration_sha256"], camera_calibration_sha256(camera))
+            self.assertAlmostEqual(receipt["measurements"]["range_m"], .7)
+            self.assertAlmostEqual(receipt["measurements"]["absolute_bearing_error_rad"], 0.)
+            self.assertTrue(receipt["requires_live_target_association"])
+            self.assertIsNone(receipt["validated_target_center"])
+            self.assertFalse(receipt["head_alignment_verified"])
+            self.assertFalse(receipt["camera_centered"])
+            self.assertFalse(receipt["motion_authorized"])
+
+    def test_calibrated_arrival_preserves_base_range_and_optical_bearing_limits(self):
+        from scripts.aufgabe04.real_robot.candidate.approach import _admit_camera_arrival_geometry
+        from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import load_stand_survey_registry
+        from scripts.aufgabe04.real_robot.configuration.profile import RigidTransform
+        from tests.aufgabe04.test_lidar_alignment_arrival import calibration
+
+        for distance, tx, yaw, capable, accepted, reason in (
+            (.31, -.2, 0., True, False, "range_below_minimum"),
+            (.91, .3, 0., True, False, "range_above_maximum"),
+            (.7, .045, 6.01, True, False, "bearing_error_above_maximum"),
+            (.7, .045, 4., False, False, "bearing_error_above_maximum"),
+            (.7, .045, 4., True, True, None),
+        ):
+            with self.subTest(distance=distance, yaw=yaw, capable=capable), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                camera = replace(calibration(yaw=math.radians(yaw)), base_frame="base_footprint")
+                camera = replace(camera, base_to_camera=RigidTransform(
+                    (tx, 0., .125), camera.base_to_camera.rotation_xyzw))
+                config = self._write_frame_registry(
+                    replace(self._config(root, (self._candidate("candidate_a", 2., 0.),)),
+                            camera_calibration=camera),
+                    frozen_map_from_odom=PlanarTransform2D(1., 0., 0.),
+                )
+                effects = CandidateApproachEffects(
+                    read_current_pose=Mock(), plan_preapproach=Mock(), run_motion_leg=Mock(),
+                    capture_observation=Mock(), validate_facing=Mock(), commit_decision=Mock(),
+                    admit_planning_frame=lambda _path: CandidatePlanningFrame(
+                        Pose2D(1.-distance, 0., 0.), PlanarTransform2D(0., 0., 0.)),
+                    run_centering_turn=Mock() if capable else None,
+                )
+
+                def admit():
+                    return _admit_camera_arrival_geometry(
+                        source_config=config, effects=effects,
+                        source_registry=load_stand_survey_registry(config.survey_root / "stand_registry.json"),
+                        candidate_uid="candidate_a", candidate_root=root / "arrival",
+                        observation_attempt_index=0, allow_centering_acquisition=True,
+                    )
+
+                if accepted:
+                    admit()
+                else:
+                    with self.assertRaises(CandidateObservationUnavailableError):
+                        admit()
+                receipt = json.loads((root / "arrival/candidate_arrival_admission.json").read_text())
+                self.assertEqual(receipt["accepted"], accepted)
+                self.assertAlmostEqual(receipt["measurements"]["range_m"], distance)
+                if reason is not None:
+                    self.assertIn(reason, receipt["reasons"])
+                else:
+                    self.assertTrue(receipt["acquisition_only"])
+                    self.assertFalse(receipt["strict_arrival"]["accepted"])
+                effects.capture_observation.assert_not_called()
+                effects.run_motion_leg.assert_not_called()
+
+    def test_calibrated_arrival_rejects_invalid_or_vertical_optical_transform(self):
+        from scripts.aufgabe04.real_robot.candidate.approach import _camera_arrival_decision
+        from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import CandidateArrivalAdmissionConfig
+        from scripts.aufgabe04.real_robot.configuration.profile import RigidTransform
+        from tests.aufgabe04.test_lidar_alignment_arrival import calibration
+
+        valid = replace(calibration(), base_frame="base_footprint")
+        for invalid in (
+            replace(valid, base_to_camera=RigidTransform((.045, 0., .125), (0., 0., 0., 1.))),
+            replace(valid, base_to_camera=RigidTransform((float("nan"), 0., .125), (0., 0., 0., 1.))),
+            replace(valid, base_to_camera=RigidTransform((.045, 0., .125), (0., 0., 0., 0.))),
+        ):
+            with self.subTest(calibration=invalid), self.assertRaises(ValueError):
+                _camera_arrival_decision(
+                    robot_pose=Pose2D(.3, 0., 0.), target_x_m=1., target_y_m=0.,
+                    config=CandidateArrivalAdmissionConfig(.32, .9), calibration=invalid,
+                )
+
+        # A physically pitched camera still has a usable horizontal bearing;
+        # this admission does not claim vertical head visibility or alignment.
+        qx, qy, qz, qw = valid.base_to_camera.rotation_xyzw
+        c, s = math.cos(.15/2), math.sin(.15/2)
+        tilted = replace(valid, base_to_camera=RigidTransform(
+            valid.base_to_camera.translation_xyz_m,
+            (c*qx+s*qz, c*qy+s*qw, c*qz-s*qx, c*qw-s*qy),
+        ))
+        decision, _ = _camera_arrival_decision(
+            robot_pose=Pose2D(.3, 0., 0.), target_x_m=1., target_y_m=0.,
+            config=CandidateArrivalAdmissionConfig(.32, .9), calibration=tilted,
+        )
+        self.assertTrue(decision.accepted)
+
+        for base_frame in ("base_link", "robot1/base_footprint"):
+            with self.subTest(base_frame=base_frame):
+                decision, evidence = _camera_arrival_decision(
+                    robot_pose=Pose2D(.3, 0., 0.), target_x_m=1., target_y_m=0.,
+                    config=CandidateArrivalAdmissionConfig(.32, .9),
+                    calibration=replace(valid, base_frame=base_frame),
+                )
+                self.assertTrue(decision.accepted)
+                self.assertEqual(evidence["range_reference"], base_frame)
 
     def test_centering_acquisition_preserves_range_and_capability_gates(self):
         from scripts.aufgabe04.real_robot.candidate.approach import _admit_camera_arrival_geometry

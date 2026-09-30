@@ -2,6 +2,7 @@ import json
 import math
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -38,6 +39,7 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
                     move_opposite=lambda *args: self.fail("QR fallback requested backside movement"),
                     progress_evidence=lambda *args: self.fail("QR fallback became advisory"),
                     distance_recovery=lambda *args: self.fail("QR fallback requested recovery"),
+                    recover_lidar=lambda *args: self.fail("QR completion requested LiDAR recovery"),
                 ),
             )
             self.assertIs(result, observation)
@@ -69,6 +71,7 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
                     move_view=lambda *args: self.fail("resolved first view requested another local move"),
                     move_opposite=lambda *args: self.fail("resolved front requested an opposite view"),
                     progress_evidence=lambda *args: self.fail("resolved view became advisory"),
+                    recover_lidar=lambda *args: self.fail("joint completion requested LiDAR recovery"),
                 ),
             )
             self.assertIs(result, observation)
@@ -100,6 +103,7 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
                     move_opposite=lambda *args: self.fail("advisory was treated as backside"),
                     progress_evidence=lambda *args: {"classification": "oblique", "qr_id": "QR_001",
                                                      "camera_relative_yaw_rad": math.radians(51)},
+                    recover_lidar=lambda *args: self.fail("LiDAR replaced camera angle guidance"),
                 ),
             )
             self.assertEqual(captures, [0, 1])
@@ -127,6 +131,7 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
                     canonical_normal=lambda frame: frame,
                     move_view=lambda *args: self.fail("valid backside skipped opposite view"),
                     move_opposite=opposite, progress_evidence=lambda *args: {},
+                    recover_lidar=lambda *args: self.fail("LiDAR replaced certified opposite motion"),
                 ),
             )
             self.assertEqual(moved, [1])
@@ -201,8 +206,210 @@ class CandidateInspectionExecutionTest(unittest.TestCase):
                         move_view=lambda *args: self.fail("budget exceeded"),
                         move_opposite=lambda *args: self.fail("budget exceeded"),
                         progress_evidence=lambda *args: {},
+                        recover_lidar=lambda *args: self.fail("LiDAR exceeded camera view budget"),
                     ),
                 )
+
+    def test_lidar_recovery_alternates_with_camera_and_shares_camera_view_budget(self):
+        for resolve_last in (False, True):
+            with self.subTest(resolve_last=resolve_last), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                events = []
+
+                def capture(frame, output, index):
+                    events.append(("camera", index, frame))
+                    if resolve_last and index == 2:
+                        return CandidateObservation(output / "recommendation.json", "QR_A", None)
+                    raise CandidateObservationUnavailableError(
+                        candidate_uid="candidate", observation_attempt_index=index,
+                        reason="unobservable", process_evidence={}, status_evidence={},
+                    )
+
+                def recover(frame, output, index):
+                    # The previous camera attempt and recovery reservation must
+                    # both be durable before the adapter can command motion.
+                    progress = json.loads((root / "inspection_progress.json").read_text())
+                    self.assertEqual(progress["local_view_count"], index)
+                    receipt = progress["lidar_recovery_attempts"][-1]
+                    self.assertEqual(receipt["status"], "reserved")
+                    self.assertEqual(receipt["after_observer_attempt_index"], index - 1)
+                    self.assertEqual(receipt["output_dir"], str(output))
+                    events.append(("lidar", index, frame))
+                    return frame + 0.4
+
+                def run():
+                    return execute_candidate_inspection(
+                        candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=3,
+                        effects=CandidateInspectionEffects(
+                            capture=capture, canonical_normal=lambda frame: frame,
+                            move_view=lambda *args: self.fail("camera was skipped after LiDAR motion"),
+                            move_opposite=lambda *args: self.fail("unobservable authorized opposite motion"),
+                            progress_evidence=lambda *args: {}, recover_lidar=recover,
+                        ),
+                    )
+
+                if resolve_last:
+                    result, frame = run()
+                    self.assertEqual(result.qr_id, "QR_A")
+                    self.assertAlmostEqual(frame, 0.8)
+                else:
+                    with self.assertRaises(CandidateObservationUnavailableError):
+                        run()
+                self.assertEqual(events, [
+                    ("camera", 0, 0.), ("lidar", 1, 0.), ("camera", 1, 0.4),
+                    ("lidar", 2, 0.4), ("camera", 2, 0.8),
+                ])
+                progress = json.loads((root / "inspection_progress.json").read_text())
+                self.assertEqual(progress["local_view_count"], 3)
+                self.assertEqual(len(progress["lidar_recovery_attempts"]), 2)
+                self.assertEqual([r["status"] for r in progress["lidar_recovery_attempts"]],
+                                 ["move_completed", "move_completed"])
+
+    def test_lidar_no_motion_falls_through_to_camera_view_search(self):
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                events = []
+
+                def capture(frame, output, index):
+                    events.append(("camera", index))
+                    return (
+                        CandidateObservation(None, None, None, output / "inspection.json") if index == 0
+                        else CandidateObservation(output / "recommendation.json", "QR_A", None)
+                    )
+
+                def recover(frame, output, index):
+                    events.append(("lidar", index))
+                    if unavailable:
+                        raise CandidateInspectionRouteUnavailableError(
+                            "no certified route", reason_code="route_unavailable",
+                            evidence={"motion_published": False, "motion_permit_issued": False},
+                        )
+                    return None
+
+                def move(frame, normal, output, index, source):
+                    events.append(("view", index))
+                    return normal
+
+                execute_candidate_inspection(
+                    candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=2,
+                    effects=CandidateInspectionEffects(
+                        capture=capture, canonical_normal=lambda frame: frame, move_view=move,
+                        move_opposite=lambda *args: self.fail("unobservable authorized opposite motion"),
+                        progress_evidence=lambda *args: {"classification": "unobservable"},
+                        recover_lidar=recover,
+                    ),
+                )
+                self.assertEqual(events, [("camera", 0), ("lidar", 1), ("view", 1), ("camera", 1)])
+                progress = json.loads((root / "inspection_progress.json").read_text())
+                self.assertEqual(progress["lidar_recovery_attempts"][0]["status"],
+                                 "route_unavailable" if unavailable else "no_motion")
+                if unavailable:
+                    self.assertEqual(progress["route_failures"][0]["view_kind"], "lidar_recovery")
+
+    def test_distance_recovery_precedes_lidar_for_unobservable_camera(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            moved = []
+
+            def move(frame, recovery, output, index, source):
+                moved.append(index)
+                return frame + 0.2
+
+            execute_candidate_inspection(
+                candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=2,
+                effects=CandidateInspectionEffects(
+                    capture=lambda frame, output, index: (
+                        CandidateObservation(None, None, None, output / "inspection.json") if index == 0
+                        else CandidateObservation(output / "recommendation.json", "QR_A", None)),
+                    canonical_normal=lambda frame: frame,
+                    move_view=lambda *args: self.fail("camera distance recovery was skipped"),
+                    move_opposite=lambda *args: self.fail("unobservable authorized opposite motion"),
+                    progress_evidence=lambda *args: {"classification": "unobservable"},
+                    distance_recovery=lambda *args: object(), move_distance_recovery=move,
+                    recover_lidar=lambda *args: self.fail("LiDAR replaced camera distance recovery"),
+                ),
+            )
+            self.assertEqual(moved, [1])
+
+    def test_shared_route_exhaustion_during_lidar_recovery_stops_all_search(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def capture(*args):
+                raise CandidateObservationUnavailableError(
+                    candidate_uid="candidate", observation_attempt_index=0,
+                    reason="unobservable", process_evidence={}, status_evidence={})
+            def recover(*args):
+                raise CandidateInspectionRouteUnavailableError(
+                    "shared budget exhausted", reason_code="route_proposal_budget_exhausted")
+            with self.assertRaises(CandidateObservationUnavailableError):
+                execute_candidate_inspection(
+                    candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                    effects=CandidateInspectionEffects(
+                        capture=capture, canonical_normal=lambda frame: frame,
+                        move_view=lambda *args: self.fail("exhausted budget reached generic motion"),
+                        move_opposite=lambda *args: self.fail("unobservable view requested opposite"),
+                        progress_evidence=lambda *args: {}, recover_lidar=recover))
+            progress = json.loads((root / "inspection_progress.json").read_text())
+            self.assertEqual(progress["termination_reason"], "route_proposal_budget_exhausted")
+            self.assertEqual(progress["local_view_count"], 1)
+
+    def test_retained_backside_axis_prevents_lidar_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            initial_frame = SimpleNamespace(normal=0., retained_backside_axis_path=root / "axis.json")
+            moved = []
+
+            def move(frame, normal, output, index, source):
+                moved.append(index)
+                return SimpleNamespace(normal=normal, retained_backside_axis_path=frame.retained_backside_axis_path)
+
+            execute_candidate_inspection(
+                candidate_uid="candidate", candidate_root=root, initial_frame=initial_frame, max_views=2,
+                effects=CandidateInspectionEffects(
+                    capture=lambda frame, output, index: (
+                        CandidateObservation(None, None, None, output / "inspection.json") if index == 0
+                        else CandidateObservation(None, "QR_A", None, None, output / "qr_pose.json")),
+                    canonical_normal=lambda frame: frame.normal, move_view=move,
+                    move_opposite=lambda *args: self.fail("no new backside observation"),
+                    progress_evidence=lambda *args: {"classification": "unobservable"},
+                    recover_lidar=lambda *args: self.fail("LiDAR invalidated the retained backside axis"),
+                ),
+            )
+            self.assertEqual(moved, [1])
+
+    def test_terminal_lidar_failure_is_persisted_and_never_resumes_camera_or_motion(self):
+        for terminal in (RuntimeError("motion failed"), KeyboardInterrupt(), SystemExit(130)):
+            with self.subTest(error_type=type(terminal).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                captures = []
+
+                def capture(frame, output, index):
+                    captures.append(index)
+                    return CandidateObservation(None, None, None, output / "inspection.json")
+
+                def recover(*args):
+                    raise terminal
+
+                with self.assertRaises(type(terminal)) as caught:
+                    execute_candidate_inspection(
+                        candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=3,
+                        effects=CandidateInspectionEffects(
+                            capture=capture, canonical_normal=lambda frame: frame,
+                            move_view=lambda *args: self.fail("failed LiDAR recovery resumed motion"),
+                            move_opposite=lambda *args: self.fail("failed LiDAR recovery resumed motion"),
+                            progress_evidence=lambda *args: {"classification": "unobservable"},
+                            recover_lidar=recover,
+                        ),
+                    )
+                self.assertIs(caught.exception, terminal)
+                self.assertEqual(captures, [0])
+                progress = json.loads((root / "inspection_progress.json").read_text())
+                self.assertEqual(progress["local_view_count"], 1)
+                self.assertEqual(progress["termination_reason"], "lidar_recovery_terminal_failure")
+                failure = progress["lidar_recovery_attempts"][-1]
+                self.assertEqual(failure["status"], "terminal_failure")
+                self.assertEqual(failure["exception_type"], type(terminal).__name__)
 
     def test_third_view_terminal_failure_is_recorded_without_another_move(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -38,7 +38,9 @@ from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
     CandidateInspectionEffects, CandidateInspectionRouteUnavailableError,
     execute_candidate_inspection,
 )
-from scripts.aufgabe04.real_robot.candidate.inspection_policy import novel_view
+from scripts.aufgabe04.real_robot.candidate.inspection_policy import (
+    MINIMUM_VIEW_SEPARATION_RAD, novel_view,
+)
 from scripts.aufgabe04.real_robot.candidate.camera_distance_recovery import (
     distance_recovery_goal_is_useful, select_camera_distance_recovery,
 )
@@ -54,6 +56,20 @@ from scripts.aufgabe04.real_robot.candidate.route_admission_deferral import (
 )
 
 
+def lidar_support_goal_is_useful(*, start, goal, target_x_m, target_y_m):
+    """Require a separated view or a meaningful increase in spatial sampling.
+
+    A small same-bearing displacement cannot establish independent geometry.
+    This applies only to support probes, never a fitted camera-pose correction.
+    """
+    start_bearing = math.atan2(start.y_m - target_y_m, start.x_m - target_x_m)
+    goal_bearing = math.atan2(goal["y_m"] - target_y_m, goal["x_m"] - target_x_m)
+    separated = abs(math.remainder(goal_bearing - start_bearing, math.pi)) >= MINIMUM_VIEW_SEPARATION_RAD
+    range_gain = (math.hypot(start.x_m - target_x_m, start.y_m - target_y_m)
+                  - math.hypot(goal["x_m"] - target_x_m, goal["y_m"] - target_y_m))
+    return separated or range_gain >= .05
+
+
 def execute_local_candidate_inspection(
     *, observation_frame, source_config, effects, source_registry,
     candidate_root: Path, candidate_run_id: str, candidate_index: int,
@@ -63,6 +79,7 @@ def execute_local_candidate_inspection(
     candidate_uid = observation_frame.candidate.candidate_uid
     seen_normals: list[float] = []
     motion_serial = 0
+    active_view_index = 0
 
     @contextmanager
     def phase(name, root, index, **details):
@@ -99,10 +116,11 @@ def execute_local_candidate_inspection(
     )
 
     def fresh_frame(root: Path):
-        config, candidate, pose, planning, artifacts = admit_planning(
-            source_config=source_config, effects=effects, source_registry=source_registry,
-            candidate_uid=candidate_uid, candidate_root=root,
-        )
+        with phase("planning_frame_admission", root, active_view_index):
+            config, candidate, pose, planning, artifacts = admit_planning(
+                source_config=source_config, effects=effects, source_registry=source_registry,
+                candidate_uid=candidate_uid, candidate_root=root,
+            )
         return frame_type(config, candidate, planning,
                           None if artifacts is None else artifacts.camera_decision_binding(), pose,
                           localization_evidence_path=(None if planning is None else
@@ -129,8 +147,11 @@ def execute_local_candidate_inspection(
 
     def plan_and_move(frame, canonical_normal, root, index, source_path,
                       *, purpose="diverse_inspection", offset=None, camera_recovery=None,
-                      prepared_plan=None, selection_evidence=None):
+                      prepared_plan=None, selection_evidence=None, before_motion=None,
+                      lidar_support_hint=None):
         nonlocal motion_serial
+        if before_motion is not None:
+            before_motion()
         source_frame = frame
         if prepared_plan is None:
             frame = retain_orientation_after_arrival(source_frame, fresh_frame(root / "planning"), root / "planning")
@@ -186,6 +207,41 @@ def execute_local_candidate_inspection(
                     "quantized inspection goal repeats an observed viewing direction",
                     reason_code="quantized_view_already_observed",
                 )
+            if (purpose == "lidar_axis_hint" and prepared_plan is None
+                    and not lidar_support_goal_is_useful(
+                        start=current, goal=goal,
+                        target_x_m=frame.candidate.geometry.x_m,
+                        target_y_m=frame.candidate.geometry.y_m)):
+                raise CandidateInspectionRouteUnavailableError(
+                    "LiDAR support goal adds neither a separated view nor useful range improvement",
+                    reason_code="lidar_support_goal_not_useful",
+                    evidence={"motion_published": False, "selected_approach_pose": goal},
+                )
+            if lidar_support_hint is not None:
+                from scripts.aufgabe04.real_robot.candidate.lidar_sampling import predicted_head_support
+                hint, tf = lidar_support_hint, frame.planning_frame.map_from_odom
+                center = hint["center_odom"]
+                c, s = math.cos(tf.yaw_rad), math.sin(tf.yaw_rad)
+                cx, cy = tf.x_m+c*center["x_m"]-s*center["y_m"], tf.y_m+s*center["x_m"]+c*center["y_m"]
+                q = hint["scan_pose_robot"]
+                gc, gs = math.cos(goal["yaw_rad"]), math.sin(goal["yaw_rad"])
+                sx, sy = goal["x_m"]+gc*q["x_m"]-gs*q["y_m"], goal["y_m"]+gs*q["x_m"]+gc*q["y_m"]
+                normal = hint["tangent_odom_rad"]+tf.yaw_rad+math.pi/2
+                incident = abs(math.remainder(math.atan2(sy-cy, sx-cx)-normal, math.pi))
+                predicted = predicted_head_support(distance_m=math.hypot(sx-cx, sy-cy),
+                    incidence_rad=incident, angular_step_rad=hint["angular_step_rad"])
+                worst = predicted_head_support(distance_m=math.hypot(sx-cx, sy-cy),
+                    incidence_rad=incident+hint["angle_uncertainty_rad"], angular_step_rad=hint["angular_step_rad"])
+                review = {**predicted, "worst_case_expected_return_count": worst["expected_return_count"],
+                    "incidence_rad": incident, "source_hint": hint, "selected_approach_pose": goal,
+                    "accepted": predicted["minimum_phase_return_count"] >= 4,
+                    "head_alignment_verified": False, "motion_authorized": False}
+                write_content_hashed_json(root / "lidar_support_goal_review.json", review,
+                                         hash_field="lidar_support_goal_review_sha256")
+                if not review["accepted"]:
+                    raise CandidateInspectionRouteUnavailableError(
+                        "Quantized support view predicts fewer than four head returns",
+                        reason_code="lidar_support_goal_too_sparse", evidence=review)
             if camera_recovery is not None and not distance_recovery_goal_is_useful(
                 start_range_m=math.hypot(current.x_m - frame.candidate.geometry.x_m,
                                          current.y_m - frame.candidate.geometry.y_m),
@@ -201,6 +257,10 @@ def execute_local_candidate_inspection(
                 )
         elif frame.planning_frame is not None or camera_recovery is not None:
             raise RuntimeError("inspection route lacks materialized goal evidence")
+        # A slow preflight/plan cannot authorize another optional recovery move
+        # after its elapsed budget. An executing sealed leg keeps its own limits.
+        if before_motion is not None:
+            before_motion()
         motion_serial += 1
         run_id = f"{candidate_run_id}_inspection_{motion_serial:03d}"
         try:
@@ -384,6 +444,8 @@ def execute_local_candidate_inspection(
         return {**evidence, "inspection_observation_path": str(observation.inspection_observation_path)}
 
     def capture_frame(frame, output, index):
+        nonlocal active_view_index
+        active_view_index = index
         retained = getattr(frame, "retained_backside_axis_path", None)
         if retained is not None:
             return capture_observation(observation_request_type(
@@ -399,6 +461,8 @@ def execute_local_candidate_inspection(
             candidate_position_epoch_path=(None if frame.decision_binding is None else frame.decision_binding.projection_path)))
 
     def centered_capture(frame, output, index):
+        nonlocal active_view_index
+        active_view_index = index
         def capture(current, destination, view, enabled, timeout, not_before):
             return capture_observation(observation_request_type(
                 current.candidate, destination, view, allow_centering=enabled,
@@ -452,11 +516,11 @@ def execute_local_candidate_inspection(
             capture=capture, turn=turn,
         )
 
-    lidar_arrival_verified = False
+    recover_lidar = None
     if (effects.capture_lidar_view is not None and source_config.camera_calibration is not None
             and source_registry is not None and effects.admit_planning_frame is not None
             and effects.load_route_uncertainty_readiness is not None):
-        from scripts.aufgabe04.real_robot.candidate.lidar_acquisition import prepare_lidar_camera_arrival
+        from scripts.aufgabe04.real_robot.candidate.lidar_acquisition import create_lidar_camera_recovery
         from scripts.aufgabe04.real_robot.candidate.route_uncertainty_readiness import CandidateRouteUncertaintyReadinessRequest
 
         def load_alignment_uncertainty(frame):
@@ -468,26 +532,55 @@ def execute_local_candidate_inspection(
                 sigma_multiplier=source_config.uncertainty_sigma_multiplier,
             ))
 
-        observation_frame, lidar_review, _ = prepare_lidar_camera_arrival(
-            initial_frame=observation_frame, source_config=source_config,
+        def plan_lidar_move(frame, direction, root, serial, source_path, **kwargs):
+            # LiDAR and camera search consume the same candidate route ledger.
+            return route_search.move_direction(
+                requested_normal_rad=direction, standoffs=(kwargs["offset"],),
+                output_root=root,
+                move=lambda offset, proposal_root: plan_and_move(
+                    frame, direction, proposal_root, active_view_index, source_path,
+                    **{**kwargs, "offset": offset}),
+            )
+
+        recovery = create_lidar_camera_recovery(
+            source_config=source_config,
             source_registry=source_registry, effects=effects, candidate_root=candidate_root,
-            fresh_frame=fresh_frame, plan_and_move=plan_and_move,
+            fresh_frame=fresh_frame, plan_and_move=plan_lidar_move,
             load_uncertainty=load_alignment_uncertainty,
         )
-        lidar_arrival_verified = lidar_review["head_alignment_verified"]
-        if lidar_arrival_verified:
-            write_content_hashed_json(candidate_root / "candidate_arrival_admission.json", {
-                **lidar_review, "accepted": True,
-                "admission_kind": "fresh_lidar_calibrated_camera_alignment",
-                "requires_live_target_association": True,
-                "camera_centered": lidar_review["camera_centered_verified"],
-                "motion_authorized": False,
-            }, hash_field="candidate_arrival_admission_sha256")
+
+        def recover_lidar(frame, root, index):
+            nonlocal active_view_index
+            active_view_index = index
+            with phase("lidar_recovery", root, index):
+                if route_search.budget_exhausted:
+                    raise CandidateInspectionRouteUnavailableError(
+                        "candidate route proposal budget exhausted before LiDAR recovery",
+                        reason_code="route_proposal_budget_exhausted", evidence=route_search.to_dict(),
+                    )
+                updated, review, _ = recovery(frame)
+                if not review["motion_completed"]:
+                    return None
+                if review["head_alignment_verified"] and review["camera_centered_verified"]:
+                    # Fresh fitted geometry has already checked range and camera
+                    # pose. Do not undo it with a base-to-old-centroid correction.
+                    write_content_hashed_json(root / "candidate_arrival_admission.json", {
+                        **review, "accepted": True,
+                        "admission_kind": "fresh_lidar_calibrated_camera_alignment",
+                        "requires_live_target_association": True,
+                        "camera_centered": True, "motion_authorized": False,
+                    }, hash_field="candidate_arrival_admission_sha256")
+                    return updated
+                # Reacquire the actual stopped arrival, but do not start a second
+                # correction route inside this one-move recovery callback.
+                return admit(root / "arrival", updated, index)
 
     try:
-        # The fresh scan cohort has already checked actual camera alignment and
-        # physical range. A base-to-old-centroid yaw gate would undo that pose.
-        initial = observation_frame if lidar_arrival_verified else admit_corrected(candidate_root, observation_frame, 0)
+        # Passive camera admission/centering takes priority at the first arrival.
+        # LiDAR support is optional recovery after the observer gets this view.
+        initial = (admit(candidate_root, observation_frame, 0)
+                   if source_config.camera_calibration is not None
+                   else admit_corrected(candidate_root, observation_frame, 0))
     except CandidateInspectionRouteUnavailableError as exc:
         raise CandidateObservationUnavailableError(
             candidate_uid=candidate_uid, observation_attempt_index=0,
@@ -504,5 +597,6 @@ def execute_local_candidate_inspection(
             progress_evidence=progress, route_search_evidence=route_search.to_dict,
             distance_recovery=distance_recovery, move_distance_recovery=move_distance_recovery,
             capture_centered=centered_capture if effects.run_centering_turn is not None else None,
+            recover_lidar=recover_lidar,
         ),
     )

@@ -20,6 +20,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import StandSur
 from scripts.aufgabe04.perception.lidar_visibility_evidence import LidarVisibilityReceipt
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import axial_difference_rad, axial_normalize_rad
 from scripts.aufgabe04.stations.candidate_snapshot import CandidateSnapshot, candidate_snapshot_sha256
+from scripts.aufgabe04.perception.scan_topology import ScanTopology
 
 
 @dataclass(frozen=True)
@@ -54,14 +55,20 @@ class LidarInspectionHint:
         return values
 
 
-def _scan_surface(receipt, center, radius, other_centers) -> HeadSurfaceFit | None:
+def _scan_surface_analysis(receipt, center, radius, other_centers):
+    diagnostics = {"scan_stamp_sec": receipt.scan_stamp_sec, "candidate_indices": [],
+                   "cluster_indices": [], "boundary_fragmented": False,
+                   "motion_authorized": False, "stand_axis_authorized": False}
     if receipt.frame_provenance is None:
-        return None
+        return None, {**diagnostics, "reason": "scan_frame_unavailable"}
     pose = receipt.frame_provenance.canonical_scan_pose_odom
     clusters = []
     current = []
     previous_index = None
     previous_distance = None
+    indices = []
+    cluster_indices = []
+    current_indices = []
     for index, distance in enumerate(receipt.ranges_m):
         if distance is None:
             continue
@@ -70,21 +77,66 @@ def _scan_surface(receipt, center, radius, other_centers) -> HeadSurfaceFit | No
         if math.hypot(point[0] - center.x_m, point[1] - center.y_m) > radius:
             continue
         if any(math.hypot(point[0] - x, point[1] - y) <= r for x, y, r in other_centers):
-            return None  # A return is compatible with another candidate.
+            return None, {**diagnostics, "reason": "competing_candidate"}
         if current and (index != previous_index + 1 or not adjacent_returns(
                 previous_distance, distance, receipt.angle_increment_rad)):
             clusters.append(current)
+            cluster_indices.append(current_indices)
             current = []
+            current_indices = []
         current.append(point)
+        current_indices.append(index)
+        indices.append(index)
         previous_index = index
         previous_distance = distance
     if current:
         clusters.append(current)
-    # Do not join a seam without the original topology proof, or select the
-    # nicest line from multiple surfaces in the candidate envelope.
+        cluster_indices.append(current_indices)
+    metadata = receipt.scan_metadata
+    topology = (ScanTopology(len(receipt.ranges_m), receipt.angle_min_rad, receipt.angle_increment_rad)
+                if metadata is None else metadata.topology(sample_count=len(receipt.ranges_m),
+                    angle_min_rad=receipt.angle_min_rad, angle_increment_rad=receipt.angle_increment_rad))
+    boundary = len(clusters) >= 2 and indices[0] == 0 and indices[-1] == len(receipt.ranges_m)-1
+    diagnostics.update(candidate_indices=indices, cluster_indices=cluster_indices,
+                       boundary_fragmented=boundary, scan_topology=topology.evidence(),
+                       candidate_return_count=len(indices),
+                       angle_increment_rad=receipt.angle_increment_rad,
+                       sensor_range_m=math.hypot(pose.x_m-center.x_m, pose.y_m-center.y_m))
+    # Only the original, validated full-rotation geometry may join endpoints.
+    # Internal missing bins remain separate even when the seam itself is valid.
+    if (boundary and topology.joins_endpoints(indices[-1], indices[0])
+            and adjacent_returns(receipt.ranges_m[indices[-1]], receipt.ranges_m[indices[0]],
+                                 math.tau-(len(receipt.ranges_m)-1)*abs(receipt.angle_increment_rad))):
+        clusters = [clusters[-1] + clusters[0], *clusters[1:-1]]
+        cluster_indices = [cluster_indices[-1] + cluster_indices[0], *cluster_indices[1:-1]]
+        diagnostics.update(cluster_indices=cluster_indices, seam_joined=True, boundary_fragmented=False)
     if len(clusters) != 1:
-        return None
-    return fit_head_surface(clusters[0], sensor_position=(pose.x_m, pose.y_m))
+        return None, {**diagnostics, "reason": "fragmented_candidate_returns" if clusters else "no_candidate_returns"}
+    surface = fit_head_surface(clusters[0], sensor_position=(pose.x_m, pose.y_m))
+    return surface, {**diagnostics, "reason": ("accepted" if surface is not None else
+        "fewer_than_four_returns" if len(clusters[0]) < 4 else "surface_geometry_rejected")}
+
+
+def _scan_surface(receipt, center, radius, other_centers) -> HeadSurfaceFit | None:
+    return _scan_surface_analysis(receipt, center, radius, other_centers)[0]
+
+
+def analyze_candidate_lidar_support(*, registry, candidate_uid, receipts):
+    """Explain all examined scans without selecting or authorizing a head axis."""
+    from collections import Counter
+    source = registry.candidate_for(candidate_uid)
+    if source is None or source.frame_provenance is None:
+        raise ValueError("LiDAR support candidate frame unavailable")
+    center = source.frame_provenance.canonical_odom_point
+    others = [(c.frame_provenance.canonical_odom_point.x_m,
+               c.frame_provenance.canonical_odom_point.y_m, c.radius_m+c.uncertainty_m)
+              for c in registry.candidates if c.candidate_uid != candidate_uid and c.frame_provenance is not None]
+    scans = [_scan_surface_analysis(r, center, source.radius_m+source.uncertainty_m, others)[1]
+             for r in receipts]
+    return {"candidate_uid": candidate_uid, "examined_scan_count": len(scans), "scans": scans,
+            "reason_counts": dict(Counter(s["reason"] for s in scans)),
+            "boundary_fragmented_scan_count": sum(s["boundary_fragmented"] for s in scans),
+            "motion_authorized": False, "stand_axis_authorized": False}
 
 
 def _scan_axis(receipt, center, radius, other_centers):

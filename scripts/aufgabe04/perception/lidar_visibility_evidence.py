@@ -22,6 +22,7 @@ from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.perception.lidar_visibility_frames import (
     LidarVisibilityFrameProvenance,
 )
+from scripts.aufgabe04.perception.lidar_scan_metadata import LidarScanMetadata
 
 
 LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION = 2
@@ -64,6 +65,7 @@ _LEGACY_PAYLOAD_FIELDS = frozenset(
     }
 )
 _PAYLOAD_FIELDS = _LEGACY_PAYLOAD_FIELDS | {"frame_provenance"}
+_METADATA_PAYLOAD_FIELDS = _PAYLOAD_FIELDS | {"scan_metadata"}
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class LidarVisibilityReceipt:
     range_max_m: float
     ranges_m: tuple[float | None, ...]
     frame_provenance: LidarVisibilityFrameProvenance | None = None
+    scan_metadata: LidarScanMetadata | None = None
 
     @property
     def finite_range_count(self) -> int:
@@ -160,11 +163,12 @@ def lidar_visibility_receipt_from_scan(
     range_max_m: float,
     ranges_m: Iterable[float],
     frame_provenance: LidarVisibilityFrameProvenance | None = None,
+    scan_metadata: LidarScanMetadata | None = None,
 ) -> LidarVisibilityReceipt:
     """Build and validate one JSON-safe exact-time visibility receipt."""
 
     receipt = LidarVisibilityReceipt(
-        schema_version=LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION,
+        schema_version=(3 if scan_metadata is not None else LIDAR_VISIBILITY_RECEIPT_SCHEMA_VERSION),
         receipt_id=receipt_id,
         survey_id=survey_id,
         viewpoint_id=viewpoint_id,
@@ -191,6 +195,7 @@ def lidar_visibility_receipt_from_scan(
             range_max_m=range_max_m,
         ),
         frame_provenance=frame_provenance,
+        scan_metadata=scan_metadata,
     )
     return validate_lidar_visibility_receipt(receipt)
 
@@ -202,11 +207,17 @@ def validate_lidar_visibility_receipt(
         raise ValueError("receipt must be a LidarVisibilityReceipt")
     if (
         type(receipt.schema_version) is not int
-        or receipt.schema_version not in (1, 2)
+        or receipt.schema_version not in (1, 2, 3)
     ):
         raise ValueError("unsupported LiDAR visibility receipt schema_version")
     if receipt.schema_version == 1 and receipt.frame_provenance is not None:
         raise ValueError("legacy visibility receipt cannot contain frame provenance")
+    if (receipt.schema_version == 3) != (receipt.scan_metadata is not None):
+        raise ValueError("scan metadata requires visibility receipt schema 3")
+    if receipt.scan_metadata is not None:
+        if not isinstance(receipt.scan_metadata, LidarScanMetadata):
+            raise ValueError("invalid original scan metadata type")
+        receipt.scan_metadata.validate(receipt.ranges_m)
     if receipt.frame_provenance is not None:
         if not isinstance(
             receipt.frame_provenance, LidarVisibilityFrameProvenance
@@ -312,6 +323,8 @@ def visibility_receipt_payload(
             None if receipt.frame_provenance is None
             else receipt.frame_provenance.to_mapping()
         )
+    if receipt.schema_version == 3:
+        payload["scan_metadata"] = receipt.scan_metadata.to_mapping()
     return payload
 
 
@@ -420,9 +433,10 @@ def _receipt_from_hashed_payload(
     payload: Mapping[str, object],
 ) -> LidarVisibilityReceipt:
     schema_version = _required_integer(payload, "schema_version")
-    if schema_version not in (1, 2):
+    if schema_version not in (1, 2, 3):
         raise ValueError("unsupported LiDAR visibility receipt schema_version")
-    fields = _LEGACY_PAYLOAD_FIELDS if schema_version == 1 else _PAYLOAD_FIELDS
+    fields = (_LEGACY_PAYLOAD_FIELDS if schema_version == 1 else
+              _METADATA_PAYLOAD_FIELDS if schema_version == 3 else _PAYLOAD_FIELDS)
     if frozenset(payload) != fields | {_HASH_FIELD}:
         raise ValueError("visibility receipt fields do not match schema")
     stored_hash = payload.get(_HASH_FIELD)
@@ -473,6 +487,8 @@ def _receipt_from_hashed_payload(
                 _required_mapping(unhashed, "frame_provenance")
             )
         ),
+        scan_metadata=(None if schema_version != 3 else
+                       LidarScanMetadata.from_mapping(dict(_required_mapping(unhashed, "scan_metadata")))),
     )
     return validate_lidar_visibility_receipt(receipt)
 

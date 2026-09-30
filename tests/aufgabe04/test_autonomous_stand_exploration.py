@@ -415,6 +415,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
         return_failure: bool = False,
     ) -> dict[str, object]:
         """Run the real outer wrapper with ROS/motion replaced by typed effects."""
+        from tests.aufgabe04.test_lidar_alignment_arrival import calibration as camera_fixture
 
         session_id = "stand_explore_exact2_camera_wrapper_retry"
         output_root = root / "runs"
@@ -642,12 +643,15 @@ class AutonomousStandExplorationTest(unittest.TestCase):
             namespace="",
             amcl_topic="amcl_pose",
             map_frame="map",
+            base_frame="base_link",
+            scan_frame="base_scan",
             scan_origin_to_base_offset_m=0.05,
             max_linear_speed_mps=0.055,
             max_angular_speed_radps=0.18,
             resolved_runtime=lambda: SimpleNamespace(
                 namespace="",
                 cmd_vel_topic="/cmd_vel",
+                scan_topic="/scan",
             ),
         )
         initial_admission = SimpleNamespace(
@@ -824,7 +828,7 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                 execute_start_return=return_to_start,
                 load_real_robot_profile=lambda *_args, **_kwargs: profile,
                 real_robot_profile_sha256=lambda _profile: "e" * 64,
-                load_camera_calibration=lambda *_args, **_kwargs: SimpleNamespace(),
+                load_camera_calibration=lambda *_args, **_kwargs: camera_fixture(),
                 validate_physical_site_contract=lambda *_args, **_kwargs: (
                     SimpleNamespace(
                         expected_stand_count=len(candidates),
@@ -2267,6 +2271,36 @@ class AutonomousStandExplorationTest(unittest.TestCase):
                         None,
                         None,
                     )
+
+    def test_runtime_binds_camera_calibration_to_configured_base_frame(self):
+        import hashlib
+        from scripts.aufgabe04.real_robot.configuration.profile import camera_calibration_sha256
+        from tests.aufgabe04.test_real_robot_pipeline import calibration, robot_profile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            site_path = Path(tmp) / "arena_real.json"
+            site_path.write_text("{}\n")
+            site_sha = hashlib.sha256(site_path.read_bytes()).hexdigest()
+            for base_frame in ("base_footprint", "base_link", "robot1/base_footprint"):
+                with self.subTest(base_frame=base_frame):
+                    parser = build_parser()
+                    args = parser.parse_args([
+                        "--robot-profile", "robot.json", "--camera-calibration", "camera.json",
+                        "--physical-site", str(site_path), "--expected-stand-count", "5",
+                    ])
+                    camera = replace(calibration(), base_frame=base_frame)
+                    profile = replace(robot_profile(camera_calibration_sha256(camera), site_sha),
+                                      base_frame=base_frame)
+                    autonomous_wrapper._validate_inputs(parser, args, profile, camera)
+
+                    # The digest alone can be valid even when the independently
+                    # configured pose sampler uses a different base frame.
+                    mismatch = replace(profile, base_frame="different_robot_base")
+                    stderr = StringIO()
+                    with redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+                        autonomous_wrapper._validate_inputs(parser, args, mismatch, camera)
+                    self.assertEqual(caught.exception.code, 2)
+                    self.assertIn("camera calibration base frame differs from robot profile", stderr.getvalue())
 
     def _run_one_leg_wrapper_to_failure(
         self,

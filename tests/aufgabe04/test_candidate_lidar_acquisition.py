@@ -12,9 +12,8 @@ from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import Plan
 from scripts.aufgabe04.perception.stand_axis.model_profile import load_measured_physical_stand_model
 from scripts.aufgabe04.real_robot.candidate.approach import _CandidateObservationFrame
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
-from scripts.aufgabe04.real_robot.candidate.inspection_adapters import execute_local_candidate_inspection
 from scripts.aufgabe04.real_robot.candidate.lidar_acquisition import (
-    prepare_lidar_camera_arrival, run_bounded_lidar_acquisition,
+    create_lidar_camera_recovery, create_bounded_lidar_recovery,
 )
 from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import CandidateLidarView
 from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import TourScanCaptureError
@@ -30,103 +29,160 @@ def frame_fixture():
 
 
 class BoundedLidarAcquisitionTest(unittest.TestCase):
-    def run_controller(self, *, hints=None, current_fit=None, verified_at=None,
-                       unavailable=False, motion_error=None, centered=True):
+    def controller(self, *, hint=None, current_fit=None, verified=False, centered=True,
+                   unavailable=False, motion_error=None, budget_sec=120.):
         frame, _ = frame_fixture()
+        state = dict(hint=hint, verified=verified, centered=centered, unavailable=unavailable,
+                     now=0., observation_cost=0., motion_cost=0., preflight_cost=0.)
         calls, revisions = [], []
-        hint_values = hints or [None]
 
-        def observe(current, serial):
-            index = len([c for c in calls if c[0] == "observe"])
+        def observe(current, serial, checkpoint):
             calls.append(("observe", serial))
-            verified = verified_at == "always" or index == verified_at
-            return current, hint_values[min(index, len(hint_values)-1)], current_fit, {
-                "head_alignment_verified": verified,
-                "camera_centered_verified": centered and verified,
-                "acquisition_unavailable": unavailable,
+            state["now"] += state["observation_cost"]
+            return current, state["hint"], current_fit, {
+                "head_alignment_verified": state["verified"],
+                "camera_centered_verified": state["centered"] and state["verified"],
+                "acquisition_unavailable": state["unavailable"],
             }
 
-        def move(kind, current, target, serial):
+        def move(kind, current, target, serial, checkpoint):
+            state["now"] += state["preflight_cost"]
+            checkpoint("motion_dispatch")
             calls.append((kind, serial, target))
+            state["now"] += state["motion_cost"]
             if motion_error is not None:
                 raise motion_error
             return current
 
-        output = run_bounded_lidar_acquisition(initial_frame=frame, observe=observe,
+        recovery = create_bounded_lidar_recovery(observe=observe,
             move_probe=lambda *args: move("probe", *args),
             move_aligned=lambda *args: move("aligned", *args),
-            persist=lambda report: revisions.append(copy.deepcopy(report)))
-        return output, calls, revisions
+            persist=lambda report: revisions.append(copy.deepcopy(report)),
+            monotonic=lambda: state["now"], budget_sec=budget_sec)
+        return recovery, frame, state, calls, revisions
 
-    def test_missing_geometry_stops_after_three_probe_moves(self):
-        (_, report), calls, _ = self.run_controller()
-        self.assertEqual([c[1] for c in calls if c[0] == "probe"], [1, 2, 3])
-        self.assertEqual(len([c for c in calls if c[0] == "observe"]), 4)
+    def test_each_call_yields_to_camera_after_one_move_and_fresh_observation(self):
+        recover, frame, _, calls, _ = self.controller()
+        for serial in range(1, 4):
+            before = len(calls)
+            frame, report, _ = recover(frame)
+            self.assertTrue(report["motion_completed"])
+            self.assertEqual([c[0] for c in calls[before:]], ["observe", "probe", "observe"])
+            self.assertEqual(report["probe_moves_attempted"], serial)
+        _, report, _ = recover(frame)
+        self.assertFalse(report["motion_completed"])
         self.assertEqual(report["reason"], "independent_geometry_support_unavailable")
         self.assertFalse(report["head_alignment_verified"])
+        self.assertEqual([c[1] for c in calls if c[0] == "probe"], [1, 2, 3])
 
-    def test_no_motion_probe_rejections_consume_the_three_proposal_budget(self):
+    def test_no_motion_rejections_consume_all_proposal_slots_without_reset(self):
         error = CandidateInspectionRouteUnavailableError("blocked", reason_code="static_clearance")
-        (_, report), calls, revisions = self.run_controller(motion_error=error)
+        recover, frame, _, calls, revisions = self.controller(motion_error=error)
+        _, report, _ = recover(frame)
         self.assertEqual(len([c for c in calls if c[0] == "probe"]), 3)
-        self.assertEqual(report["probe_moves_attempted"], 3)
+        self.assertFalse(report["motion_completed"])
         self.assertEqual(len([e for e in report["history"] if e["event"] == "no_motion_route_unavailable"]), 3)
-        # Consumed attempt is durable before invoking the potentially failing effect.
         proposals = [r for r in revisions if r["history"][-1]["event"] == "motion_proposal"]
         self.assertEqual([r["probe_moves_attempted"] for r in proposals], [1, 2, 3])
+        before = len(calls)
+        recover(frame)
+        self.assertEqual(len(calls), before)
 
-    def test_two_alignment_attempt_cap_includes_no_motion_rejections(self):
+    def test_alignment_budget_persists_across_calls_and_known_no_motion_failure(self):
         for error in (None, CandidateInspectionRouteUnavailableError("blocked")):
             with self.subTest(error=error):
-                (_, report), calls, _ = self.run_controller(hints=[object()], motion_error=error)
+                recover, frame, _, calls, _ = self.controller(hint=object(), motion_error=error)
+                for _ in range(3):
+                    frame, report, _ = recover(frame)
                 self.assertEqual([c[1] for c in calls if c[0] == "aligned"], [1, 2])
                 self.assertEqual(report["alignment_moves_attempted"], 2)
                 self.assertEqual(report["reason"], "alignment_correction_budget_exhausted")
 
-    def test_alternating_fit_availability_does_not_reset_either_budget(self):
-        (_, report), calls, _ = self.run_controller(hints=[None, object(), None, object(), None, None])
+    def test_alternating_fit_availability_never_resets_either_budget(self):
+        recover, frame, state, calls, _ = self.controller()
+        for hint in (None, object(), None, object(), None):
+            state["hint"] = hint
+            frame, report, _ = recover(frame)
+            self.assertTrue(report["motion_completed"])
+        _, report, _ = recover(frame)
         self.assertEqual(len([c for c in calls if c[0] == "probe"]), 3)
         self.assertEqual(len([c for c in calls if c[0] == "aligned"]), 2)
         self.assertEqual(report["probe_moves_attempted"], 3)
         self.assertEqual(report["alignment_moves_attempted"], 2)
 
-    def test_verified_arrival_exits_before_any_motion(self):
-        (_, report), calls, _ = self.run_controller(hints=[object()], verified_at=0)
-        self.assertTrue(report["head_alignment_verified"])
-        self.assertEqual(calls, [("observe", 0)])
-        self.assertFalse(report["motion_authorized"])
+    def test_verified_arrival_and_unavailable_capture_never_send_motion(self):
+        for values in (dict(hint=object(), verified=True), dict(unavailable=True)):
+            recover, frame, _, calls, _ = self.controller(**values)
+            _, report, _ = recover(frame)
+            self.assertEqual(calls, [("observe", 0)])
+            self.assertFalse(report["motion_completed"])
+            self.assertFalse(report["motion_authorized"])
 
-    def test_verified_correction_exits_after_one_attempt(self):
-        (_, report), calls, _ = self.run_controller(hints=[object()], verified_at=1)
-        self.assertTrue(report["head_alignment_verified"])
-        self.assertEqual(len([c for c in calls if c[0] == "aligned"]), 1)
-
-    def test_normal_aligned_but_offcenter_arrival_still_attempts_correction(self):
-        (_, report), calls, _ = self.run_controller(hints=[object()], verified_at="always", centered=False)
-        self.assertEqual(len([c for c in calls if c[0] == "aligned"]), 2)
-        self.assertTrue(report["head_alignment_verified"])
-        self.assertFalse(report["camera_centered_verified"])
-        self.assertEqual(report["reason"], "alignment_correction_budget_exhausted")
-
-    def test_unavailable_capture_never_sends_motion(self):
-        (_, report), calls, _ = self.run_controller(unavailable=True, hints=[object()])
-        self.assertEqual(calls, [("observe", 0)])
-        self.assertFalse(report["head_alignment_verified"])
-        self.assertEqual(report["alignment_moves_attempted"], 0)
-
-    def test_single_view_fit_is_a_probe_hint_and_cannot_verify_alignment(self):
+    def test_single_view_fit_is_probe_hint_never_alignment_authority(self):
         fit = SimpleNamespace(normals=lambda *_: (0., math.pi))
-        (_, report), calls, _ = self.run_controller(current_fit=fit)
+        recover, frame, _, calls, _ = self.controller(current_fit=fit)
+        _, report, _ = recover(frame)
         self.assertFalse(report["head_alignment_verified"])
-        self.assertEqual(len([c for c in calls if c[0] == "probe"]), 3)
+        self.assertEqual(len([c for c in calls if c[0] == "probe"]), 1)
         self.assertFalse(any(c[0] == "aligned" for c in calls))
 
-    def test_execution_errors_and_interruptions_propagate_without_retry(self):
-        for hints in ([None], [object()]):
+    def test_active_time_accumulates_but_camera_time_between_calls_is_excluded(self):
+        recover, frame, state, calls, _ = self.controller(budget_sec=20.)
+        state.update(observation_cost=1., motion_cost=5.)
+        frame, first, _ = recover(frame)
+        state["now"] += 1000.  # Camera work does not consume recovery's budget.
+        frame, second, _ = recover(frame)
+        self.assertEqual(first["active_elapsed_sec"], 7.)
+        self.assertEqual(second["active_elapsed_sec"], 14.)
+        self.assertEqual(len([c for c in calls if c[0] == "probe"]), 2)
+        before_expiry = len(calls)
+        frame, third, _ = recover(frame)
+        self.assertTrue(third["motion_completed"])
+        self.assertFalse(third["head_alignment_verified"])
+        self.assertEqual([c[0] for c in calls[before_expiry:]], ["observe", "probe"])
+        self.assertEqual(third["reason"], "lidar_recovery_time_budget_exhausted")
+        before = len(calls)
+        recover(frame)
+        self.assertEqual(len(calls), before)
+
+    def test_deadline_rechecked_after_planning_before_motion_dispatch(self):
+        recover, frame, state, calls, _ = self.controller(budget_sec=2.)
+        state["preflight_cost"] = 3.
+        _, report, _ = recover(frame)
+        self.assertFalse(report["motion_completed"])
+        self.assertEqual(report["reason"], "lidar_recovery_time_budget_exhausted")
+        self.assertFalse(any(c[0] == "probe" for c in calls))
+        self.assertEqual(report["probe_moves_attempted"], 1)
+
+    def test_wrapped_deadline_error_does_not_consume_another_proposal(self):
+        recover, frame, state, calls, _ = self.controller(
+            budget_sec=2., motion_error=CandidateInspectionRouteUnavailableError(
+                "wrapped pre-dispatch expiry", reason_code="standoff_proposals_exhausted"))
+        state["motion_cost"] = 3.
+        _, report, _ = recover(frame)
+        self.assertEqual(report["reason"], "lidar_recovery_time_budget_exhausted")
+        self.assertEqual(report["probe_moves_attempted"], 1)
+        self.assertFalse(report["motion_completed"])
+
+    def test_shared_route_budget_exhaustion_terminates_without_more_proposals(self):
+        recover, frame, _, calls, _ = self.controller(
+            motion_error=CandidateInspectionRouteUnavailableError(
+                "global ledger exhausted", reason_code="route_proposal_budget_exhausted"))
+        _, report, _ = recover(frame)
+        self.assertEqual(report["reason"], "route_proposal_budget_exhausted")
+        self.assertEqual(report["probe_moves_attempted"], 1)
+        self.assertFalse(report["motion_completed"])
+        self.assertTrue(report["recovery_complete"])
+
+    def test_execution_errors_and_interruptions_propagate_and_record_boundary(self):
+        for hint in (None, object()):
             for error in (RuntimeError("motion outcome unknown"), KeyboardInterrupt()):
-                with self.subTest(hints=hints, error=type(error)):
+                with self.subTest(hint=hint, error=type(error)):
+                    recover, frame, _, calls, revisions = self.controller(hint=hint, motion_error=error)
                     with self.assertRaises(type(error)):
-                        self.run_controller(hints=hints, motion_error=error)
+                        recover(frame)
+                    self.assertEqual(sum(c[0] in ("probe", "aligned") for c in calls), 1)
+                    self.assertIn(revisions[-1]["history"][-1]["event"], ("recovery_failed", "recovery_interrupted"))
 
 
 class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
@@ -143,21 +199,24 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
                 "configs/aufgabe04/stand_models/physical_stand_measured_20260826_v2.json"),
             lidar_scan_frame="base_scan", lidar_scan_topic="/scan",
             physical_clearance={"minimum_active_standoff_m": .33}, approach_offset_m=.55,
-            camera_arrival_range_slack_m=.20, camera_arrival_max_bearing_error_rad=math.radians(3.),
-        )
+            camera_arrival_range_slack_m=.20, camera_arrival_max_bearing_error_rad=math.radians(3.))
         self.move = Mock(side_effect=AssertionError("verified/unavailable arrival must not move"))
         self.fresh = Mock(return_value=self.frame)
         self.uncertainty = SimpleNamespace(covariance=PlanarCovariance(1e-6, 0., 1e-6),
             admission_config=SimpleNamespace(localization_sigma_multiplier=1., heading_sigma_rad=math.radians(.1)))
-        self.effects = SimpleNamespace(clock=Mock(side_effect=[30., 30.35]),
-                                       capture_lidar_view=self.capture)
+        self.now = 30.
+        self.capture_distance = .6
+        self.capture_requests = []
+        self.effects = SimpleNamespace(clock=lambda: self.now, capture_lidar_view=self.capture)
 
     def capture(self, request):
+        self.capture_requests.append(request)
         start = request.observation_not_before_sec
-        receipts = tuple(replace(r, receipt_id=f"arrival_{i}", viewpoint_id=request.viewpoint_id,
+        receipts = tuple(replace(r, receipt_id=f"arrival_{len(self.capture_requests)}_{i}", viewpoint_id=request.viewpoint_id,
                                  scan_stamp_sec=start+.05+i*.08, pose_stamp_sec=start+.05+i*.08,
                                  observer_clock_sec=start+.06+i*.08)
-                         for i,r in enumerate(line_receipts(increment=.01)[:3]))
+                         for i,r in enumerate(line_receipts(increment=.01, distance=self.capture_distance)[:3]))
+        self.now = start+.3
         return CandidateLidarView(request.candidate_uid, request.candidate_snapshot_sha256,
             request.viewpoint_id, receipts, receipts[-1].frame_provenance.canonical_scan_pose_odom,
             receipts[-1].scan_stamp_sec, start+.3, request.output_dir / "candidate_lidar_view.json", "a"*64,
@@ -167,44 +226,166 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
                    "scan_vertical_direction_y": 0., "scan_vertical_direction_z": 1.,
                    "exact_transform_stamp_sec": r.scan_stamp_sec} for r in receipts))
 
+    def make_adapter(self):
+        return create_lidar_camera_recovery(source_config=self.source,
+            source_registry=self.registry, effects=self.effects, candidate_root=self.root,
+            fresh_frame=self.fresh, plan_and_move=self.move,
+            load_uncertainty=lambda _: self.uncertainty)
+
     def run_adapter(self, *, survey=None):
         survey = (line_receipts(increment=.01) + line_receipts(2, increment=.01)) if survey is None else survey
         with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.load_camera_lidar_receipts",
                    return_value=(survey, {})):
-            return prepare_lidar_camera_arrival(initial_frame=self.frame, source_config=self.source,
-                source_registry=self.registry, effects=self.effects, candidate_root=self.root,
-                fresh_frame=self.fresh, plan_and_move=self.move,
-                load_uncertainty=lambda _: self.uncertainty)
+            return self.make_adapter()(self.frame)
 
-    def test_production_adapter_verifies_real_fits_and_persists_hashed_report(self):
+    def test_construction_never_captures_plans_or_writes_before_camera(self):
+        recover = self.make_adapter()
+        self.assertTrue(callable(recover))
+        self.fresh.assert_not_called()
+        self.move.assert_not_called()
+        self.assertEqual(self.capture_requests, [])
+        self.assertFalse((self.root / "lidar_head_acquisition").exists())
+
+    def test_real_fits_verify_and_persist_hashed_report(self):
         returned, report, hint = self.run_adapter()
         self.assertIsNotNone(hint)
         self.assertTrue(report["head_alignment_verified"], report)
         self.assertTrue(report["camera_centered_verified"])
         self.move.assert_not_called()
-        saved = load_content_hashed_json(self.root / "lidar_head_acquisition/arrival_review.json",
+        saved = load_content_hashed_json(Path(report["arrival_review_path"]),
                                         hash_field="lidar_alignment_arrival_sha256")
-        self.assertEqual(saved["probe_moves_attempted"], 0)
-        current = saved["history"][-1]
+        current = next(e for e in reversed(saved["history"]) if e["event"] == "stopped_observation")
         self.assertEqual(current["reason"], "fresh_lidar_camera_alignment_verified")
         self.assertIn("camera_calibration_sha256", current)
         self.assertEqual(len(current["source_receipt_sha256s"]), 3)
         self.assertEqual(returned.observation_pose, returned.planning_frame.current_pose)
 
-    def test_current_only_geometry_stays_unverified_and_failed_routes_are_bounded(self):
-        self.effects.clock = Mock(side_effect=[30., 31., 32., 33.])
+    def test_single_supported_view_rejects_redundant_probe_then_bounds_other_routes(self):
+        self.capture_distance = .58
         self.move.side_effect = CandidateInspectionRouteUnavailableError("unsafe static route")
         _, report, hint = self.run_adapter(survey=())
         self.assertIsNone(hint)
         self.assertFalse(report["head_alignment_verified"])
         self.assertEqual(report["probe_moves_attempted"], 3)
-        # Each of three directions has exactly three bounded standoff proposals.
+        self.assertEqual(self.move.call_count, 6)  # .58→.55 m cannot add 5 cm of range support.
+        self.assertEqual([c.kwargs["offset"] for c in self.move.call_args_list], [.55, .60, .65] * 2)
+        rejected = [e for e in report["history"] if e["event"] == "no_motion_route_unavailable"]
+        self.assertEqual(rejected[0]["reason"], "redundant_lidar_support_probe")
+        self.assertTrue(all("before_motion" in c.kwargs for c in self.move.call_args_list))
+
+    def test_real_fit_recovery_retains_receipts_but_yields_after_one_move_per_call(self):
+        self.capture_distance = .58
+        def move(frame, *args, **kwargs):
+            kwargs["before_motion"]()
+            return frame
+        self.move.side_effect = move
+        recover = self.make_adapter()
+        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.load_camera_lidar_receipts",
+                   return_value=((), {})) as load:
+            frame, first, hint = recover(self.frame)
+            self.assertTrue(first["motion_completed"])
+            self.assertEqual(self.move.call_count, 1)
+            self.assertEqual(len(self.capture_requests), 2)  # Before and after displacement.
+            self.assertIsNone(hint)  # Mock motion cannot manufacture an independent view.
+            _, second, _ = recover(frame)
+        self.assertTrue(second["motion_completed"])
+        self.assertEqual(self.move.call_count, 2)
+        self.assertEqual(second["probe_moves_attempted"], 3)  # Initial redundant proposal consumed one slot.
+        self.assertEqual(len(self.capture_requests), 4)
+        load.assert_called_once()
+        stopped = [e for e in second["history"] if e["event"] == "stopped_observation"]
+        self.assertEqual(len(stopped), 4)
+        self.assertEqual(len(stopped[-1]["fit_diagnostics"]["scan_count_by_view"]), 4)
+
+    def test_same_bearing_probe_can_still_move_closer_when_range_gain_is_useful(self):
+        self.capture_distance = .65
+        self.move.side_effect = CandidateInspectionRouteUnavailableError("unsafe static route")
+        _, report, _ = self.run_adapter(survey=())
         self.assertEqual(self.move.call_count, 9)
-        for direction in range(3):
-            calls = self.move.call_args_list[3*direction:3*direction+3]
-            self.assertEqual([c.kwargs["offset"] for c in calls], [.55, .60, .65])
-        self.assertEqual(len([event for event in report["history"]
-                              if event["event"] == "no_motion_route_unavailable"]), 3)
+        self.assertFalse(any(e.get("reason") == "redundant_lidar_support_probe" for e in report["history"]))
+
+    def test_configured_half_meter_probe_is_not_rejected_using_old_point_five_five_threshold(self):
+        self.source.approach_offset_m = .50
+        self.capture_distance = .58
+        self.move.side_effect = CandidateInspectionRouteUnavailableError("unsafe static route")
+        _, report, _ = self.run_adapter(survey=())
+        self.assertEqual([c.kwargs["offset"] for c in self.move.call_args_list], [.50, .55, .60] * 3)
+        self.assertFalse(any(e.get("reason") == "redundant_lidar_support_probe" for e in report["history"]))
+
+    def test_partial_two_of_three_fit_recovers_with_another_cohort_same_view(self):
+        def capture(request):
+            result = self.capture(request)
+            if len(self.capture_requests) == 1:
+                bad = replace(result.receipts[-1], ranges_m=(None,) * len(result.receipts[-1].ranges_m))
+                result = replace(result, receipts=result.receipts[:-1]+(bad,))
+            return result
+        self.effects.capture_lidar_view = capture
+        _, report, hint = self.run_adapter(survey=line_receipts(2, increment=.01))
+        self.assertTrue(report["head_alignment_verified"])
+        self.assertEqual(len(self.capture_requests), 2)
+        self.assertEqual(len({r.viewpoint_id for r in self.capture_requests}), 1)
+        self.assertEqual(len({r.output_dir for r in self.capture_requests}), 2)
+        view_id = self.capture_requests[0].viewpoint_id
+        self.assertEqual(hint.evidence["scan_count_by_view"][view_id], 5)
+        event = next(e for e in reversed(report["history"]) if e["event"] == "stopped_observation")
+        self.assertEqual(event["examined_scan_count"], 6)
+        self.assertEqual(len(event["source_receipt_sha256s"]), 3)  # Fresh verifier never consumes the older cohort.
+        self.move.assert_not_called()
+
+    def test_bad_first_cohort_counts_against_all_subsequent_support(self):
+        def capture(request):
+            result = self.capture(request)
+            if len(self.capture_requests) == 1:
+                result = replace(result, receipts=tuple(replace(r, ranges_m=(None,) * len(r.ranges_m)) for r in result.receipts))
+            return result
+        self.effects.capture_lidar_view = capture
+        self.move.side_effect = CandidateInspectionRouteUnavailableError("unsafe static route")
+        _, report, hint = self.run_adapter(survey=line_receipts(2, increment=.01))
+        self.assertIsNone(hint)  # 6/9 is below 75%; no discarding the initial failures.
+        self.assertFalse(report["head_alignment_verified"])
+        self.assertEqual(len(self.capture_requests), 3)
+        event = next(e for e in reversed(report["history"]) if e["event"] == "stopped_observation")
+        self.assertEqual(event["examined_scan_count"], 9)
+        local = self.capture_requests[0].viewpoint_id
+        self.assertEqual(event["fit_diagnostics"]["scan_count_by_view"][local], 9)
+        self.assertEqual(event["fit_diagnostics"]["surface_fit_count_by_view"][local], 6)
+
+    def test_additional_cohorts_require_the_same_stationary_view(self):
+        def capture(request):
+            result = self.capture(request)
+            if len(self.capture_requests) == 1:
+                bad = replace(result.receipts[-1], ranges_m=(None,) * len(result.receipts[-1].ranges_m))
+                return replace(result, receipts=result.receipts[:-1]+(bad,))
+            if len(self.capture_requests) == 2:
+                shifted = tuple(replace(r, scan_pose_map=replace(r.scan_pose_map, y_m=.04),
+                    frame_provenance=replace(r.frame_provenance,
+                    canonical_scan_pose_odom=replace(r.frame_provenance.canonical_scan_pose_odom, y_m=.04)))
+                    for r in result.receipts)
+                return replace(result, receipts=shifted)
+            return result
+        self.effects.capture_lidar_view = capture
+        self.move.side_effect = CandidateInspectionRouteUnavailableError("unsafe static route")
+        _, report, hint = self.run_adapter(survey=line_receipts(2, increment=.01))
+        self.assertIsNone(hint)
+        self.assertFalse(report["head_alignment_verified"])
+        self.assertEqual(len(self.capture_requests), 3)
+        event = next(e for e in reversed(report["history"]) if e["event"] == "stopped_observation")
+        self.assertFalse(event["stopped_view_fit_usable"])
+
+    def test_second_cohort_mount_must_be_admitted_before_use(self):
+        def capture(request):
+            result = self.capture(request)
+            if len(self.capture_requests) == 1:
+                bad = replace(result.receipts[-1], ranges_m=(None,) * len(result.receipts[-1].ranges_m))
+                return replace(result, receipts=result.receipts[:-1]+(bad,))
+            return replace(result, mount_evidence=())
+        self.effects.capture_lidar_view = capture
+        _, report, hint = self.run_adapter(survey=line_receipts(2, increment=.01))
+        self.assertIsNone(hint)
+        self.assertFalse(report["head_alignment_verified"])
+        self.assertEqual(len(self.capture_requests), 2)
+        self.assertTrue(report["history"][-1]["acquisition_unavailable"])
+        self.move.assert_not_called()
 
     def test_capture_timeout_falls_back_without_motion(self):
         self.effects.capture_lidar_view = Mock(side_effect=TourScanCaptureError("no fresh stopped scans"))
@@ -214,7 +395,7 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
         self.assertEqual(report["history"][-1]["reason"], "fresh_scan_cohort_unavailable")
         self.move.assert_not_called()
 
-    def test_missing_scan_mount_proof_keeps_alignment_unverified_without_probe_motion(self):
+    def test_missing_mount_proof_never_sends_probe_motion(self):
         self.effects.capture_lidar_view = Mock(side_effect=lambda request: replace(self.capture(request), mount_evidence=()))
         _, report, _ = self.run_adapter()
         self.assertFalse(report["head_alignment_verified"])
@@ -223,87 +404,27 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
         self.effects.capture_lidar_view.assert_called_once()
         self.move.assert_not_called()
 
-    def test_incompatible_stand_model_never_starts_scan_capture_or_motion(self):
+    def test_incompatible_stand_model_never_starts_capture_or_motion(self):
         self.source.measured_stand_model = replace(self.source.measured_stand_model, head_width_m=.09)
-        self.effects.capture_lidar_view = Mock(side_effect=AssertionError("incompatible model must not start capture"))
+        self.effects.capture_lidar_view = Mock(side_effect=AssertionError("incompatible model must not capture"))
         _, report, hint = self.run_adapter()
         self.assertIsNone(hint)
-        self.assertFalse(report["head_alignment_verified"])
         self.assertFalse(report["model_admission"]["accepted"])
-        self.assertEqual(report["history"], [])
         self.fresh.assert_not_called()
         self.effects.capture_lidar_view.assert_not_called()
         self.move.assert_not_called()
 
-    def test_capture_binding_mismatch_is_not_treated_as_route_retry(self):
+    def test_corrupt_capture_identity_is_fatal_not_route_retry(self):
         self.effects.capture_lidar_view = lambda request: replace(self.capture(request), candidate_uid="other")
         with self.assertRaisesRegex(ValueError, "capture candidate binding mismatch"):
             self.run_adapter()
         self.move.assert_not_called()
 
-    def test_capture_execution_error_propagates_without_motion(self):
+    def test_unknown_capture_failure_propagates_without_motion(self):
         self.effects.capture_lidar_view = Mock(side_effect=RuntimeError("capture evidence corrupt"))
         with self.assertRaisesRegex(RuntimeError, "capture evidence corrupt"):
             self.run_adapter()
         self.move.assert_not_called()
-
-
-class CandidateLidarArrivalHandoffTest(unittest.TestCase):
-    def run_handoff(self, root, *, verified):
-        initial, registry = frame_fixture()
-        # Distinguish the freshly measured arrival from the input and legacy
-        # map-centroid admission so a mistaken branch is observable.
-        fresh = replace(initial, observation_pose=initial.planning_frame.current_pose)
-        legacy = replace(initial, observation_pose=replace(initial.planning_frame.current_pose, x_m=-.59))
-        source = SimpleNamespace(camera_calibration=calibration(), max_candidate_inspection_views=8)
-        effects = SimpleNamespace(capture_lidar_view=Mock(), admit_planning_frame=Mock(),
-            load_route_uncertainty_readiness=Mock(), event_sink=Mock(), clock=lambda: 30.,
-            run_centering_turn=None)
-        admit = Mock(side_effect=AssertionError("verified current head must bypass old centroid yaw")
-                     if verified else None, return_value=legacy)
-        prepare_result = (fresh, {"head_alignment_verified": verified,
-                                 "camera_centered_verified": False}, object())
-        sentinel = object()
-        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.prepare_lidar_camera_arrival",
-                   return_value=prepare_result) as prepare, patch(
-                "scripts.aufgabe04.real_robot.candidate.inspection_adapters.execute_candidate_inspection",
-                return_value=sentinel) as execute:
-            result = execute_local_candidate_inspection(
-                observation_frame=initial, source_config=source, effects=effects, source_registry=registry,
-                candidate_root=root, candidate_run_id="run", candidate_index=0,
-                admit_arrival=admit, admit_planning=Mock(side_effect=AssertionError("unexpected planning")),
-                move_certified_opposite=Mock(side_effect=AssertionError("unexpected opposite motion")),
-                execute_motion=Mock(side_effect=AssertionError("unexpected motion")),
-                frame_type=_CandidateObservationFrame, request_type=SimpleNamespace,
-                observation_request_type=SimpleNamespace)
-        self.assertIs(result, sentinel)
-        prepare.assert_called_once()
-        execute.assert_called_once()
-        return admit, execute.call_args.kwargs["initial_frame"], fresh, legacy
-
-    def test_verified_head_arrival_bypasses_old_centroid_yaw_but_keeps_visual_centering_unverified(self):
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            admit, received, fresh, _ = self.run_handoff(root, verified=True)
-            admit.assert_not_called()
-            self.assertIs(received, fresh)
-            receipt = load_content_hashed_json(root / "candidate_arrival_admission.json",
-                                              hash_field="candidate_arrival_admission_sha256")
-            self.assertTrue(receipt["accepted"])
-            self.assertTrue(receipt["head_alignment_verified"])
-            self.assertFalse(receipt["camera_centered"])
-            self.assertFalse(receipt["camera_centered_verified"])
-            self.assertTrue(receipt["requires_live_target_association"])
-            self.assertFalse(receipt["motion_authorized"])
-            self.assertEqual(receipt["admission_kind"], "fresh_lidar_calibrated_camera_alignment")
-
-    def test_unverified_lidar_arrival_still_requires_ordinary_arrival_admission(self):
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            admit, received, _, legacy = self.run_handoff(root, verified=False)
-            admit.assert_called_once()
-            self.assertIs(received, legacy)
-            self.assertFalse((root / "candidate_arrival_admission.json").exists())
 
 
 if __name__ == "__main__":

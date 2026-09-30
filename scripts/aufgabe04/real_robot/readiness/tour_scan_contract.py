@@ -171,22 +171,24 @@ def scan_evidence(message: object, *, received_at_unix_sec: float,
     return evidence
 
 
-def capture_payload(scans: Sequence[Mapping[str, object]], *, tour_id: str,
+def _stationary_capture_payload(scans: Sequence[Mapping[str, object]], *, tour_id: str,
                     odom_frame: str, base_frame: str, scan_frame: str,
-                    captured_at_unix_sec: float) -> dict[str, object]:
-    """Validate one bounded stationary cohort; earlier cohort scans may age .5 s."""
+                    captured_at_unix_sec: float, required_scan_count: int,
+                    maximum_window_sec: float) -> dict[str, object]:
+    """Shared source-time/stationarity validation for distinct capture contracts."""
     if any(not isinstance(value, str) or not value.strip()
            for value in (tour_id, odom_frame, base_frame, scan_frame)):
         raise ValueError("capture identity fields must be nonempty strings")
     now = finite(captured_at_unix_sec, "captured_at_unix_sec")
-    if len(scans) != 3:
-        raise ValueError("capture requires exactly three distinct scans")
+    if len(scans) != required_scan_count:
+        label = "three" if required_scan_count == 3 else str(required_scan_count)
+        raise ValueError(f"capture requires exactly {label} distinct scans")
     stamps = [finite(scan["stamp_sec"], "stamp_sec") for scan in scans]
     receipts = [finite(scan["received_at_unix_sec"], "received_at_unix_sec") for scan in scans]
     if any(b-a < MIN_SAMPLE_SEPARATION_SEC-1e-6 for a, b in zip(stamps, stamps[1:])):
         raise ValueError("scan source stamps must be ordered and separated by .08 s")
-    if stamps[-1]-stamps[0] > MAX_WINDOW_SEC+1e-6 or max(receipts)-min(receipts) > MAX_WINDOW_SEC+1e-6:
-        raise ValueError("stationary scan window exceeds .5 s")
+    if stamps[-1]-stamps[0] > maximum_window_sec+1e-6 or max(receipts)-min(receipts) > maximum_window_sec+1e-6:
+        raise ValueError(f"stationary scan window exceeds {maximum_window_sec:g} s")
     if not -FUTURE_TOLERANCE_SEC <= now-stamps[-1] <= MAX_SCAN_AGE_SEC:
         raise ValueError("latest capture scan is stale or future-dated")
     for scan, stamp, receipt in zip(scans, stamps, receipts):
@@ -223,3 +225,12 @@ def capture_payload(scans: Sequence[Mapping[str, object]], *, tour_id: str,
             "tour_id": tour_id, "odom_frame": odom_frame, "base_frame": base_frame,
             "scan_frame": scan_frame, "captured_at_unix_sec": now,
             "scans": [dict(scan) for scan in scans]}
+
+
+def capture_payload(scans: Sequence[Mapping[str, object]], *, tour_id: str,
+                    odom_frame: str, base_frame: str, scan_frame: str,
+                    captured_at_unix_sec: float) -> dict[str, object]:
+    """The unchanged three-scan, .5-second stored-tour capture contract."""
+    return _stationary_capture_payload(scans, tour_id=tour_id, odom_frame=odom_frame,
+        base_frame=base_frame, scan_frame=scan_frame, captured_at_unix_sec=captured_at_unix_sec,
+        required_scan_count=3, maximum_window_sec=MAX_WINDOW_SEC)

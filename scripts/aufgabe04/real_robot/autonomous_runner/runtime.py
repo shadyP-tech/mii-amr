@@ -1256,12 +1256,14 @@ def _require_completed_motion(outcome: MotionLegOutcome) -> None:
         )
 
 
-def _capture_candidate_lidar_view(*, profile, request):
+def _capture_candidate_lidar_view(*, profile, request, topology_profile="linear"):
+    from dataclasses import replace
     from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import capture_candidate_lidar_view
-    from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import capture_tour_scan
+    from scripts.aufgabe04.real_robot.candidate.lidar_head_capture import capture_head_scan
+    request = replace(request, scan_topology_profile=topology_profile)
     return capture_candidate_lidar_view(
-        request, capture_cohort=lambda bound: capture_tour_scan(
-            profile, tour_id=bound.viewpoint_id,
+        request, capture_cohort=lambda bound: capture_head_scan(
+            profile, viewpoint_id=bound.viewpoint_id, topology_profile=bound.scan_topology_profile,
             output_path=bound.output_dir / "scan_cohort.json",
             observation_not_before_sec=bound.observation_not_before_sec,
         ),
@@ -2017,6 +2019,39 @@ def _run_camera_centering_turn(*, profile, args, master_authorization_path,
     ))
 
 
+def _run_lidar_sampling_turn(*, profile, args, master_authorization_path,
+        minimum_clearance_m, candidate, source_view_path, snapshot_path, output_dir,
+        before_motion):
+    from scripts.aufgabe04.real_robot.candidate.lidar_sampling import (
+        build_sampling_advisory, MAX_TOTAL_TRAVEL_RAD)
+    from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
+    before_motion()
+    try:
+        advisory = build_sampling_advisory(source_view_path=source_view_path, snapshot_path=snapshot_path,
+            session_id=args.session_id, robot_profile_sha256=real_robot_profile_sha256(profile),
+            calibration_profile_sha256=profile.calibration_profile_sha256,
+            base_frame=profile.base_frame, scan_frame=profile.scan_frame, now_sec=time.time())
+    except ValueError as exc:
+        # No publisher or permit has been created; only ordinary unavailability
+        # of a useful sampling turn permits another recovery proposal.
+        if str(exc) not in {"no useful bounded sampling yaw", "sampling source is not current",
+                           "sampling source is not persistently boundary fragmented",
+                           "sampling source requires declared full-rotation scanner"}:
+            raise
+        raise CandidateInspectionRouteUnavailableError(str(exc), reason_code="lidar_sampling_turn_unavailable") from exc
+    write_content_hashed_json(Path(output_dir) / "lidar_sampling_advisory.json", advisory,
+                              hash_field="lidar_sampling_advisory_sha256")
+    before_motion()
+    return run_candidate_centering_child(CandidateCenteringChildRequest(
+        session_id=args.session_id, output_dir=output_dir, profile=profile,
+        master_authorization_path=master_authorization_path,
+        candidate_id=candidate.candidate_uid,
+        view_id=f"{args.session_id}:{candidate.candidate_uid}:lidar_sampling", turn_index=0,
+        advisory=advisory, signed_turn_rad=advisory["requested_yaw_rad"],
+        remaining_travel_rad=MAX_TOTAL_TRAVEL_RAD,
+        minimum_clearance_m=minimum_clearance_m, purpose="candidate_lidar_sampling"))
+
+
 from .cli import (
     build_parser,
     DEFAULT_QR_POSE_FALLBACK_DELAY_SEC,
@@ -2137,6 +2172,8 @@ def _validate_inputs(parser, args, profile, calibration) -> None:
         profile.calibration_profile_sha256
     ):
         parser.error("camera calibration differs from robot profile")
+    if calibration.base_frame != profile.base_frame:
+        parser.error("camera calibration base frame differs from robot profile")
     if (
         args.physical_site.stem != profile.physical_site_id
         or _file_sha256(args.physical_site) != profile.physical_site_sha256
@@ -3038,7 +3075,8 @@ def _run_mission(parser, args) -> int:
         candidate_phase = execute_candidate_approach_phase(
             candidate_config,
             CandidateApproachEffects(
-                capture_lidar_view=lambda request: _capture_candidate_lidar_view(profile=profile, request=request),
+                capture_lidar_view=lambda request: _capture_candidate_lidar_view(profile=profile, request=request,
+                    topology_profile=getattr(args, "scan_topology_profile", "linear")),
                 read_current_pose=lambda: read_current_pose2d_from_amcl(
                     namespace=profile.namespace,
                     amcl_topic=profile.amcl_topic,
@@ -3122,6 +3160,10 @@ def _run_mission(parser, args) -> int:
                     minimum_clearance_m=clearance["minimum_active_standoff_m"],
                     **kwargs,
                 ),
+                run_lidar_sampling_turn=lambda **kwargs: _run_lidar_sampling_turn(
+                    profile=profile, args=args,
+                    master_authorization_path=mission_leg_motion_authorization_json,
+                    minimum_clearance_m=clearance["minimum_active_standoff_m"], **kwargs),
             ),
         )
         if isinstance(candidate_phase, CandidateCameraCheckpoint):

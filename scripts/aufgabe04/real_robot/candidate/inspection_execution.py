@@ -35,6 +35,7 @@ class CandidateInspectionEffects(Generic[Frame, Observation]):
     distance_recovery: Callable[[Frame, Mapping[str, object]], object | None] | None = None
     move_distance_recovery: Callable[[Frame, object, Path, int, Path | None], Frame] | None = None
     capture_centered: Callable[[Frame, Path, int], tuple[Observation, Frame]] | None = None
+    recover_lidar: Callable[[Frame, Path, int], Frame | None] | None = None
 
 
 def execute_candidate_inspection(
@@ -184,6 +185,56 @@ def execute_candidate_inspection(
                         persist()
                         break
                     persist()
+        if (classification == "unobservable"
+                and effects.recover_lidar is not None
+                and getattr(frame, "retained_backside_axis_path", None) is None):
+            # Recovery is optional and belongs between actual camera attempts.
+            # Reserving it here prevents LiDAR support moves from starving the
+            # first camera view or spending motion after the final allowed view.
+            recovery_root = candidate_root / f"lidar_recovery_{index + 1:02d}"
+            recovery_attempt = {
+                "after_observer_attempt_index": index,
+                "next_observer_attempt_index": index + 1,
+                "output_dir": str(recovery_root),
+                "status": "reserved",
+            }
+            state.lidar_recovery_attempts.append(recovery_attempt)
+            persist()
+            try:
+                recovered_frame = effects.recover_lidar(frame, recovery_root, index + 1)
+            except CandidateInspectionRouteUnavailableError as exc:
+                recovery_attempt.update({
+                    "status": "route_unavailable", "reason": str(exc),
+                    "reason_code": exc.reason_code, "evidence": exc.evidence,
+                })
+                state.route_failures.append({
+                    "view_kind": "lidar_recovery", "reason": str(exc),
+                    "reason_code": exc.reason_code, "proposal_evidence": exc.evidence,
+                })
+                if exc.reason_code == "route_proposal_budget_exhausted":
+                    state.termination_reason = "route_proposal_budget_exhausted"
+                    persist()
+                    break
+                persist()
+            except BaseException as exc:
+                recovery_attempt.update({
+                    "status": "terminal_failure", "reason": str(exc)[:1024],
+                    "exception_type": type(exc).__name__[:128],
+                })
+                state.termination_reason = "lidar_recovery_terminal_failure"
+                try:
+                    persist()
+                except Exception as persistence_error:
+                    raise exc from persistence_error
+                raise
+            else:
+                recovery_attempt["status"] = (
+                    "no_motion" if recovered_frame is None else "move_completed"
+                )
+                persist()
+                if recovered_frame is not None:
+                    frame = recovered_frame
+                    continue
         selected = False
         for option_index, next_normal in enumerate(candidate_view_options(
             normal, classification=classification, achieved_normals=state.achieved_normals,

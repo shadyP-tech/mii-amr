@@ -14,6 +14,7 @@ from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_SINGLE_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+    LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     MissionLegKind,
     load_mission_leg_motion_authorization,
@@ -38,14 +39,22 @@ def finite_number(value: object, name: str) -> float:
     return result
 
 
+def advisory_source_stamps(advisory):
+    fields = (("scan_stamp_sec", "odom_stamp_sec") if advisory.get("purpose") == "candidate_lidar_sampling"
+              else ("image_stamp_sec", "scan_stamp_sec"))
+    return tuple(finite_number(advisory.get(k), k) for k in fields)
+
+
 def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object]:
     """Revalidate master scope, observation identity, and the spent view budget."""
     permit = dict(payload)
-    if permit.get("schema_version") != 1 or permit.get("purpose") != "candidate_centering":
+    sampling = permit.get("purpose") == "candidate_lidar_sampling"
+    if permit.get("schema_version") != 1 or permit.get("purpose") not in {"candidate_centering", "candidate_lidar_sampling"}:
         raise ValueError("invalid candidate centering permit contract")
     master = load_mission_leg_motion_authorization(Path(str(permit["master_authorization_path"])))
     if (master.scope_text not in {
             MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+            LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_BOUNDED_RETURN_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
             LEGACY_CENTERING_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
@@ -66,7 +75,17 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
         raise ValueError("candidate centering advisory candidate mismatch")
     # The geometry layer checks calibration and the complete numerical derivation.
     from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
-    validated_advisory = validate_camera_centering_advisory(advisory)
+    if sampling:
+        from scripts.aufgabe04.real_robot.candidate.lidar_sampling import (
+            validate_sampling_advisory, MAX_TURN_RAD as SAMPLING_STEP, MAX_TOTAL_TRAVEL_RAD as SAMPLING_TRAVEL)
+        validated_advisory = validate_sampling_advisory(advisory,
+            candidate_uid=permit["candidate_id"], session_id=permit["session_id"])
+        if master.scope_text != MISSION_LEG_MOTION_AUTHORIZATION_SCOPE:
+            raise ValueError("mission RUN does not authorize LiDAR sampling turns")
+        if permit.get("turn_index") != 0 or permit["view_id"] != f'{permit["session_id"]}:{permit["candidate_id"]}:lidar_sampling':
+            raise ValueError("LiDAR sampling is limited to one turn per candidate")
+    else:
+        validated_advisory = validate_camera_centering_advisory(advisory)
     recovery = validated_advisory.arrival_recovery
     from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import RECOVERY_STEP_RAD, RECOVERY_TRAVEL_RAD, RECOVERY_TURNS
     previous = None
@@ -83,13 +102,14 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
         recovery = recovery or previous.get('arrival_recovery') is True
     if recovery and master.scope_text not in {
         MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
+        LEGACY_OPPOSITE_CHECKPOINT_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
         LEGACY_POSITION_EPOCH_MISSION_LEG_MOTION_AUTHORIZATION_SCOPE,
     }:
         raise ValueError('mission RUN does not authorize extended arrival recovery')
     if permit.get('arrival_recovery', False) != recovery:
         raise ValueError('centering arrival recovery authority mismatch')
-    total_limit = RECOVERY_TRAVEL_RAD if recovery else MAX_TOTAL_TRAVEL_RAD
-    step_limit = RECOVERY_STEP_RAD if recovery and permit.get("turn_index") == 0 else MAX_TURN_RAD
+    total_limit = SAMPLING_TRAVEL if sampling else RECOVERY_TRAVEL_RAD if recovery else MAX_TOTAL_TRAVEL_RAD
+    step_limit = SAMPLING_STEP if sampling else RECOVERY_STEP_RAD if recovery and permit.get("turn_index") == 0 else MAX_TURN_RAD
     if advisory.get("motion_authorized") is not False:
         raise ValueError("observation must not itself authorize motion")
     from scripts.aufgabe04.navigation.foundation.ros_runtime_config import RuntimeConfig, resolve_runtime_config
@@ -98,7 +118,8 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
         raise ValueError("centering requires a physical runtime configuration")
     resolved = resolve_runtime_config(RuntimeConfig(**config))
     if (resolved.namespace != permit["namespace"] or resolved.cmd_vel_topic != permit["cmd_vel_topic"]
-            or resolved.base_frame != advisory["base_from_camera"]["parent_frame"]):
+            or resolved.base_frame != (advisory["base_frame"] if sampling else advisory["base_from_camera"]["parent_frame"])
+            or sampling and resolved.odom_frame != advisory["odom_frame"]):
         raise ValueError("centering runtime topic/frame binding mismatch")
     if finite_number(permit.get("maximum_angular_speed_radps"), "maximum angular speed") <= 0:
         raise ValueError("centering angular speed must be positive")
@@ -120,7 +141,7 @@ def validate_centering_permit(payload: Mapping[str, object]) -> dict[str, object
                 raise ValueError(f"previous centering {field} mismatch")
         if previous.get("turn_index") != permit["turn_index"]-1 or previous.get("status") != "completed":
             raise ValueError("previous centering turn did not complete")
-        if advisory["image_stamp_sec"] <= previous["stopped_at_sec"] or advisory["scan_stamp_sec"] <= previous["stopped_at_sec"]:
+        if min(advisory_source_stamps(advisory)) <= previous["stopped_at_sec"]:
             raise ValueError("centering advisory predates the previous turn stop")
         spent = finite_number(previous["total_angular_travel_rad"], "previous travel")
     elif permit.get("previous_result_path") or permit.get("previous_result_sha256"):
@@ -150,7 +171,7 @@ def load_candidate_centering_permit(path: Path) -> dict[str, object]:
 
 def load_candidate_centering_result(path: Path, *, permit_path: Path | None = None) -> dict[str, object]:
     result = load_content_hashed_json(path, hash_field=RESULT_HASH)
-    if result.get("schema_version") != 1 or result.get("purpose") != "candidate_centering":
+    if result.get("schema_version") != 1 or result.get("purpose") not in {"candidate_centering", "candidate_lidar_sampling"}:
         raise ValueError("invalid centering result contract")
     for key in ("actual_angular_travel_rad", "total_angular_travel_rad", "maximum_translation_m", "stopped_at_sec"):
         if finite_number(result.get(key), key) < 0:
@@ -158,6 +179,8 @@ def load_candidate_centering_result(path: Path, *, permit_path: Path | None = No
     if result.get("translation_commanded") is not False:
         raise ValueError("centering result commanded translation")
     result_limit = MAX_TOTAL_TRAVEL_RAD
+    if result.get("purpose") == "candidate_lidar_sampling":
+        from scripts.aufgabe04.real_robot.candidate.lidar_sampling import MAX_TOTAL_TRAVEL_RAD as result_limit
     if result.get("arrival_recovery") is True:
         from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import RECOVERY_TRAVEL_RAD
         bound_path = Path(result['arrival_recovery_permit_path'])
@@ -188,12 +211,13 @@ def load_candidate_centering_result(path: Path, *, permit_path: Path | None = No
         for field in ("session_id", "candidate_id", "view_id", "turn_index", "signed_turn_rad", "run_id"):
             if result.get(field) != permit[field]:
                 raise ValueError(f"centering result {field} mismatch")
+        if result["purpose"] != permit["purpose"]:
+            raise ValueError("inspection turn result purpose mismatch")
         if abs(result["total_angular_travel_rad"] - result["actual_angular_travel_rad"] - permit["previous_angular_travel_rad"]) > 1e-12:
             raise ValueError("centering result total travel mismatch")
         if result.get("status") == "completed" and (
                 result["actual_angular_travel_rad"] > permit["remaining_travel_rad"] + 1e-12
                 or result["actual_angular_travel_rad"] < abs(permit["signed_turn_rad"])-STOP_TOLERANCE_RAD
-                or result["stopped_at_sec"] <= max(permit["advisory"]["image_stamp_sec"],
-                                                  permit["advisory"]["scan_stamp_sec"])):
+                or result["stopped_at_sec"] <= max(advisory_source_stamps(permit["advisory"]))):
             raise ValueError("centering result exceeds its budget or predates observation")
     return result

@@ -30,6 +30,10 @@ class TourScanCaptureError(RuntimeError):
 
 
 class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
+    sample_count = 3
+    payload_builder = staticmethod(capture_payload)
+    metadata_profile = None
+
     def __init__(self, profile, tour_id, observation_not_before_sec=None):
         super().__init__("stored_pose_tour_scan_capture", namespace=profile.namespace)
         self.profile, self.tour_id = profile, tour_id
@@ -37,7 +41,7 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.pending = deque(maxlen=12)
-        self.samples = deque(maxlen=3)
+        self.samples = deque(maxlen=self.sample_count)
         self.payload = None
         self.last_error = "no fresh scans received"
         self.subscription = self.create_subscription(
@@ -66,6 +70,11 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
                     scan_transform=scan_tf, base_transform=base_tf,
                     odom_frame=self.profile.odom_frame, base_frame=self.profile.base_frame,
                     scan_frame=self.profile.scan_frame)
+                if self.metadata_profile is not None:
+                    from scripts.aufgabe04.perception.lidar_scan_metadata import metadata_from_message
+                    metadata = metadata_from_message(message, topology_profile=self.metadata_profile)
+                    metadata.validate(sample["ranges"])
+                    sample["scan_metadata"] = metadata.to_mapping()
             except TransformException as exc:
                 self.last_error = f"exact scan-time transform unavailable: {exc}"
                 return
@@ -78,9 +87,9 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
             if self.samples and stamp-float(self.samples[-1]["stamp_sec"]) < MIN_SAMPLE_SEPARATION_SEC-1e-6:
                 continue
             self.samples.append(sample)
-            if len(self.samples) == 3:
+            if len(self.samples) == self.sample_count:
                 try:
-                    self.payload = capture_payload(tuple(self.samples), tour_id=self.tour_id,
+                    self.payload = self.payload_builder(tuple(self.samples), tour_id=self.tour_id,
                         odom_frame=self.profile.odom_frame, base_frame=self.profile.base_frame,
                         scan_frame=self.profile.scan_frame, captured_at_unix_sec=time.time())
                     return
@@ -88,12 +97,13 @@ class _TourScanNode(Node):  # pragma: no cover - ROS adapter.
                     self.last_error = str(exc)
 
 
-def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
-                      timeout_sec: float = 3.0, observation_not_before_sec: float | None = None) -> Path:
+def _capture_stationary_scan(profile, *, tour_id: str, output_path: Path, node_factory,
+                      hash_field, timeout_sec: float = 3.0,
+                      observation_not_before_sec: float | None = None) -> Path:
     """Capture exact-time odom scan evidence without any velocity publisher.
 
     The caller owns exclusive-motion preflight and the stopped state. This node
-    verifies that three source-stamped base poses remain stationary while it
+    verifies that the cohort's source-stamped base poses remain stationary while it
     observes. A timeout or invalid cohort never produces an accepted artifact.
     """
     timeout = finite(timeout_sec, "timeout_sec")
@@ -111,13 +121,13 @@ def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
     try:
         if owns_context:
             rclpy.init(args=None)
-        node = _TourScanNode(profile, tour_id, observation_not_before_sec)
+        node = node_factory(profile, tour_id, observation_not_before_sec)
         deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=min(.02, max(0., deadline-time.monotonic())))
             node.poll()
             if node.payload is not None:
-                write_content_hashed_json(path, node.payload, hash_field=HASH_FIELD)
+                write_content_hashed_json(path, node.payload, hash_field=hash_field)
                 return path
         raise TourScanCaptureError(f"stationary tour scan capture failed: {node.last_error}")
     finally:
@@ -125,3 +135,10 @@ def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
             node.destroy_node()
         if owns_context and rclpy.ok():
             rclpy.shutdown()
+
+
+def capture_tour_scan(profile, *, tour_id: str, output_path: Path,
+                      timeout_sec: float = 3.0, observation_not_before_sec: float | None = None) -> Path:
+    return _capture_stationary_scan(profile, tour_id=tour_id, output_path=output_path,
+        node_factory=_TourScanNode, hash_field=HASH_FIELD, timeout_sec=timeout_sec,
+        observation_not_before_sec=observation_not_before_sec)

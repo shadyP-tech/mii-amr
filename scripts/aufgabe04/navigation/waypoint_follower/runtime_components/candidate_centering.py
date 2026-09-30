@@ -97,6 +97,7 @@ class CandidateCenteringRuntimeMixin:
         turn = float(permit["signed_turn_rad"])
         remaining = float(permit["remaining_travel_rad"])
         advisory = permit["advisory"]
+        sampling = permit["purpose"] == "candidate_lidar_sampling"
         requested_anchor = advisory["anchor_odom_pose"]
         direction = math.copysign(1.0, turn)
         live_target = None
@@ -161,7 +162,11 @@ class CandidateCenteringRuntimeMixin:
                 or stamp(self.latest_scan) <= float(advisory["scan_stamp_sec"])
                 or stamp(self.latest_odom) <= float(advisory["odom_stamp_sec"])):
             return finish("stopped", "centering live sensor frame or timestamp mismatch")
-        live_target = fresh_centering_target(self.latest_scan, advisory, self._ros_now_sec())
+        if sampling:
+            from scripts.aufgabe04.real_robot.candidate.lidar_sampling import fresh_sampling_target
+            live_target = fresh_sampling_target(self.latest_scan, advisory, self._ros_now_sec(), base_pose=pose)
+        else:
+            live_target = fresh_centering_target(self.latest_scan, advisory, self._ros_now_sec())
         if live_target is None:
             return finish("stopped", "centering current candidate scan association changed")
         if self._safety_failure():
@@ -197,7 +202,7 @@ class CandidateCenteringRuntimeMixin:
                 return finish("stopped", "centering braking travel reserve exhausted")
             command = VelocityCommand(linear_x_mps=0.0, angular_z_radps=speed)
             failure = self._append_controller_trace(
-                event="candidate_centering_cycle", nominal_command=command,
+                event=("candidate_lidar_sampling_cycle" if sampling else "candidate_centering_cycle"), nominal_command=command,
                 effective_command=command,
                 diagnostics={"candidate_id": permit["candidate_id"], "view_id": permit["view_id"], "turn_index": permit["turn_index"], "angular_travel_rad": travel, "yaw_error_rad": error, "translation_commanded": False},
                 fail_closed=False,

@@ -38,6 +38,7 @@ class CandidateCenteringChildRequest:
     remaining_travel_rad: float
     minimum_clearance_m: float
     previous_result_path: Path | None = None
+    purpose: str = "candidate_centering"
 
 
 @dataclass(frozen=True)
@@ -60,8 +61,16 @@ def validate_candidate_centering_dependencies():
 
 def build_candidate_centering_permit(request):
     profile = request.profile
-    validated = validate_camera_centering_advisory(request.advisory,
+    if request.purpose == "candidate_lidar_sampling":
+        from scripts.aufgabe04.real_robot.candidate.lidar_sampling import validate_sampling_advisory
+        validator = validate_sampling_advisory
+    elif request.purpose == "candidate_centering":
+        validator = validate_camera_centering_advisory
+    else:
+        raise ValueError("unknown inspection turn purpose")
+    validated = validator(request.advisory,
         candidate_uid=request.candidate_id,
+        **({"session_id": request.session_id} if request.purpose == "candidate_lidar_sampling" else {}),
         stream_id=f"{request.session_id}_{request.candidate_id}",
         robot_profile_sha256=real_robot_profile_sha256(profile),
         calibration_profile_sha256=profile.calibration_profile_sha256,
@@ -75,7 +84,7 @@ def build_candidate_centering_permit(request):
     previous_path = None if request.previous_result_path is None else Path(request.previous_result_path).resolve()
     previous = None if previous_path is None else load_candidate_centering_result(previous_path)
     root = Path(request.output_dir).resolve()
-    return dict(schema_version=1, purpose="candidate_centering",
+    return dict(schema_version=1, purpose=request.purpose,
         master_authorization_path=str(master_path),
         master_authorization_sha256=mission_leg_motion_authorization_sha256(master),
         session_id=request.session_id, robot_id=profile.robot_id,
@@ -162,7 +171,7 @@ def execute_candidate_centering_permit(permit_path, *, motion=None):
         load_candidate_centering_result(result_path, permit_path=Path(permit_path))
         return 0 if result["status"] == "completed" else 1
     except BaseException as exc:
-        write_content_hashed_json(failure_path, dict(schema_version=1, purpose="candidate_centering",
+        write_content_hashed_json(failure_path, dict(schema_version=1, purpose=permit["purpose"],
             status="failed_closed", reason=f"{type(exc).__name__}: {exc}",
             permit_sha256=payload_sha256(permit), motion_continues_authorized=False,
             motion_published="unknown_after_exception" if entered_motion else False),
