@@ -18,6 +18,9 @@ from scripts.aufgabe04.real_robot.observer.process import (
     PassiveObserverProcessEvidence,
 )
 from scripts.aufgabe04.real_robot.observer.camera_framing import validate_camera_framing_hint
+from scripts.aufgabe04.real_robot.observer.pipeline_diagnostics import (
+    validate_camera_pipeline_counts, validate_camera_processing_outcomes,
+)
 from scripts.aufgabe04.real_robot.observer.timeout_policy import (
     CANDIDATE_LOCAL_OBSERVER_TIMEOUT_STATES,
     TRANSIENT_TF_OBSERVER_TIMEOUT_STATES,
@@ -93,6 +96,8 @@ class PassiveObserverStatusEvidence:
     observation_evidence_poison_reason: str | None = None
     camera_framing: dict[str, object] | None = None
     qr_binding_diagnostic: dict | None = None
+    camera_pipeline_counts: dict[str, int] | None = None
+    camera_processing_outcomes: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -123,6 +128,9 @@ class PassiveObserverStatusEvidence:
             ),
             "load_error": self.load_error,
             "camera_framing": self.camera_framing,
+            "qr_binding_diagnostic": self.qr_binding_diagnostic,
+            "camera_pipeline_counts": self.camera_pipeline_counts,
+            "camera_processing_outcomes": self.camera_processing_outcomes,
         }
 
 
@@ -248,6 +256,9 @@ def load_passive_observer_status(
         ),
         camera_framing=validate_camera_framing_hint(payload.get("camera_framing")),
         qr_binding_diagnostic=dict(_mapping(payload.get('qr_binding_diagnostic'))) or None,
+        camera_pipeline_counts=validate_camera_pipeline_counts(payload.get("camera_pipeline_counts")),
+        camera_processing_outcomes=validate_camera_processing_outcomes(
+            payload.get("camera_processing_outcomes")),
     )
 
 
@@ -277,6 +288,20 @@ def format_passive_observer_failure(
         details.append(f"last_qr_binding={status.qr_binding_diagnostic.get('reason')}")
     if status.reason is not None:
         details.append(f"reason={status.reason}")
+    pipeline_counts = status.camera_pipeline_counts or {}
+    for counter in ("tf_ready_tuples", "processed_images", "fresh_detector_results"):
+        if counter in pipeline_counts:
+            details.append(f"{counter}={pipeline_counts[counter]}")
+    outcomes = status.camera_processing_outcomes
+    if outcomes is not None:
+        for key, value in outcomes["last_frame"].items():
+            details.append(f"last_processed_{key}={value}")
+        for key in ("estimator_reason", "association_reason"):
+            counts = outcomes[key + "_counts"]
+            if counts:
+                frequent = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+                details.append("processed_" + key + "_counts=" +
+                               ",".join(f"{reason}:{count}" for reason, count in frequent))
     if (
         status.consensus_sample_count is not None
         and status.consensus_required_sample_count is not None

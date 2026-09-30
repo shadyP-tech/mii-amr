@@ -99,10 +99,68 @@ class PassiveObserverDiagnosticsTests(unittest.TestCase):
             reason="camera_map_bearing_interval_exceeds_limit", diagnostic_only=True)
         status = self._load_payload(dict(state="tf_retry_exhausted", qr_binding_diagnostic=diagnostic))
         self.assertEqual(status.qr_binding_diagnostic, diagnostic)
+        self.assertEqual(status.to_dict()["qr_binding_diagnostic"], diagnostic)
         message = format_passive_observer_failure(candidate_uid="candidate", process=self._process(),
             status=status, process_evidence_path=Path("process.json"))
         self.assertIn("71", message)
         self.assertIn("camera_map_bearing_interval_exceeds_limit", message)
+
+    def test_processed_pipeline_and_blockers_survive_terminal_tf_status(self):
+        counts = dict(tf_ready_tuples=217, processed_images=217, fresh_detector_results=217)
+        outcomes = dict(diagnostic_only=True,
+            last_frame=dict(state="metric_model_measurement_unavailable",
+                            estimator_reason="head_model_planar_axis_ambiguous",
+                            association_reason="scan_persistence_current_input_invalid"),
+            state_counts={"metric_model_measurement_unavailable": 217}, reason_counts={},
+            estimator_reason_counts={"model_current_head_border_unavailable": 187,
+                                     "head_model_planar_axis_ambiguous": 10},
+            association_reason_counts={"scan_persistence_current_input_invalid": 18})
+        status = self._load_payload(dict(state="tf_pending_exact_time", reason="future extrapolation",
+            camera_pipeline_counts=counts, camera_processing_outcomes=outcomes,
+            observation_evidence=dict(accepted_frame_count=0, lidar_rejection_count=217)))
+        self.assertEqual(status.to_dict()["camera_pipeline_counts"], counts)
+        self.assertEqual(status.to_dict()["camera_processing_outcomes"], outcomes)
+        message = format_passive_observer_failure(candidate_uid="candidate", process=self._process(),
+            status=status, process_evidence_path=Path("process.json"))
+        for item in ("state=tf_pending_exact_time", "reason=future extrapolation",
+                     "processed_images=217", "tf_ready_tuples=217", "fresh_detector_results=217",
+                     "last_processed_estimator_reason=head_model_planar_axis_ambiguous",
+                     "model_current_head_border_unavailable:187", "scan_persistence_current_input_invalid:18"):
+            self.assertIn(item, message)
+
+    def test_pipeline_diagnostics_do_not_authorize_timeout_recovery(self):
+        for count in (0, 217):
+            with self.subTest(count=count):
+                status = self._load_payload(dict(state="tf_pending_exact_time",
+                    camera_pipeline_counts=dict(tf_ready_tuples=count, processed_images=count),
+                    observation_evidence=dict(accepted_frame_count=0, lidar_rejection_count=0)))
+                self.assertFalse(is_candidate_local_observer_timeout(process=self._process(), status=status))
+                message = format_passive_observer_failure(candidate_uid="candidate", process=self._process(),
+                    status=status, process_evidence_path=Path("process.json"))
+                self.assertIn(f"processed_images={count}", message)
+                self.assertNotIn("last_processed", message)
+
+    def test_pipeline_counters_are_allowlisted_nonnegative_integers(self):
+        for invalid in (True, False, -1, 1.5, "217", None):
+            with self.subTest(invalid=invalid):
+                status = self._load_payload(dict(state="tf_pending_exact_time", camera_pipeline_counts={
+                    "processed_images": invalid, "tf_ready_tuples": 217, "unknown_counter": 999}))
+                self.assertEqual(status.camera_pipeline_counts, {"tf_ready_tuples": 217})
+                self.assertIsNone(status.load_error)
+        status = self._load_payload(dict(state="tf_pending_exact_time", camera_pipeline_counts=[]))
+        self.assertEqual(status.camera_pipeline_counts, {})
+
+    def test_malformed_processing_summary_cannot_change_timeout_policy(self):
+        status = self._load_payload(dict(state="tf_pending_exact_time",
+            camera_processing_outcomes=dict(last_frame=dict(state="metric_model_measurement_unavailable"),
+                state_counts={"good": 2, "bad_bool": True, "bad_float": 2.5, "bad_negative": -1},
+                estimator_reason_counts=[]),
+            observation_evidence=dict(accepted_frame_count=0, lidar_rejection_count=0)))
+        self.assertEqual(status.camera_processing_outcomes["state_counts"], {"good": 2})
+        self.assertEqual(status.camera_processing_outcomes["estimator_reason_counts"], {})
+        self.assertFalse(is_candidate_local_observer_timeout(process=self._process(), status=status))
+        for malformed in ([], "failure", dict(last_frame=dict(state=True))):
+            self.assertIsNone(self._load_payload(dict(camera_processing_outcomes=malformed)).camera_processing_outcomes)
 
     def test_missing_status_is_explicit_and_does_not_raise(self) -> None:
         status = load_passive_observer_status(Path("missing-status.json"))

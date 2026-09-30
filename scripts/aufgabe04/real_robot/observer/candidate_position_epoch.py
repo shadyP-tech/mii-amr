@@ -89,12 +89,13 @@ def epoch_cluster(entry, snapshot, uid, scan, scan_from_map):
         raise ValueError('epoch recovery has competing clusters in position hypotheses')
     if not envelope.associated or envelope.selected_cluster_sample_count < 3:
         raise ValueError('epoch recovery requires one unique three-beam cluster')
-    # The ordinary cone can clip the same stand to one or two edge beams.
-    # Recover only when those exact beams belong to the unique full cluster;
-    # the expanded search above still counts even single-beam competitors.
+    # The ordinary envelope can clip the same stand even when three or more
+    # beams remain. Raw membership, not beam count, proves that it is partial.
+    # Recover only a strict subset of the unique full cluster; the expanded
+    # search above still counts even single-beam competitors.
     if ordinary.eligible_cluster_count and not (
         ordinary.associated and ordinary.eligible_cluster_count == 1
-        and 0 < ordinary.selected_cluster_sample_count < 3
+        and 0 < ordinary.selected_cluster_sample_count
         and set(ordinary.selected_cluster_source_indices) < set(envelope.selected_cluster_source_indices)
     ):
         raise ValueError('ordinary envelope is not a clipped subset of the unique recovery cluster')

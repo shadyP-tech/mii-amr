@@ -98,8 +98,8 @@ def test_three_recorded_partial_clusters_reconcile_the_complete_stand():
     assert proof['motion_authorized'] is False
 
 
-@pytest.mark.parametrize('ordinary_samples, bearing_shift', [(1,0.), (2,.03)])
-def test_one_or_two_clipped_beams_recover_the_same_complete_raw_cluster(ordinary_samples,bearing_shift):
+@pytest.mark.parametrize('ordinary_samples, bearing_shift', [(1,0.), (2,.03), (3,.06), (4,.09)])
+def test_clipped_beams_recover_the_same_complete_raw_cluster(ordinary_samples,bearing_shift):
     row = list(recorded_rows())[-1]
     # Shift only the synthetic candidate envelope across one beam boundary.
     row['options']['map_bearing_rad'] += bearing_shift

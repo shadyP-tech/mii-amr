@@ -126,6 +126,7 @@ from scripts.aufgabe04.real_robot.observer.ingestion_runtime import (
 from scripts.aufgabe04.real_robot.observer.tf_delivery_trace import (
     ObserverTfDeliveryTrace, create_observer_traced_buffer, traced_observer_lookup,
 )
+from scripts.aufgabe04.real_robot.observer.pipeline_diagnostics import CameraProcessingDiagnostics
 from scripts.aufgabe04.real_robot.observer.evidence import (
     AxisWindowReview,
     EvidencePose,
@@ -1264,6 +1265,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         return ready
 
     def _process_latest(self) -> None:
+        processing_diagnostics = getattr(self, "_camera_processing_diagnostics", None)
+        if processing_diagnostics is not None:
+            processing_diagnostics.discard_pending()
         if self.completed:
             return
         self._pending_bounded_head = None
@@ -1640,6 +1644,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             started_monotonic_sec=processing_started_monotonic,
             max_sensor_age_sec=self.args.max_sensor_age_sec)
         self._camera_count("processed_images")
+        if getattr(self, "_camera_processing_diagnostics", None) is None:
+            self._camera_processing_diagnostics = CameraProcessingDiagnostics()
+        self._camera_processing_diagnostics.begin_frame()
         try:
             if not hasattr(self, "_rectification_map_cache"):
                 self._rectification_map_cache = RectificationMapCache()
@@ -3315,6 +3322,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             from scripts.aufgabe04.real_robot.observer.opposite_identity_opportunity import STATE
             state, details = STATE, {**details, **opposite_failure}
             self.completed = True
+        processing_diagnostics = getattr(self, "_camera_processing_diagnostics", None)
+        if processing_diagnostics is not None:
+            processing_diagnostics.record_outcome(state, details)
         self._capture_camera_outcome(state, details)
         observation_evidence = getattr(self, "observation_evidence", None)
         stand_model = getattr(self, "stand_model_profile", None)
@@ -3371,7 +3381,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             ),
             "axis_consensus": consensus_status,
             "observation_evidence": observation_status,
-            "camera_pipeline_counts": dict(getattr(self, "_camera_pipeline_counters", {})),
+            "camera_pipeline_counts": {
+                "tf_ready_tuples": 0, "processed_images": 0, "fresh_detector_results": 0,
+                **getattr(self, "_camera_pipeline_counters", {})},
+            "camera_processing_outcomes": (
+                None if processing_diagnostics is None else processing_diagnostics.snapshot()),
             "scan_witness_diagnostics": (None if getattr(self, "_scan_target_persistence", None) is None
                 else self._scan_target_persistence.diagnostics.snapshot()),
             "qr_scan_witness_diagnostics": (None if getattr(self, "_qr_scan_target_persistence", None) is None

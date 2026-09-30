@@ -177,3 +177,10 @@ tests/aufgabe04/fixtures/candidate_position_epoch_clipped/*
 !tests/aufgabe04/fixtures/candidate_position_epoch_clipped/observations.json
 !tests/aufgabe04/fixtures/candidate_position_epoch_clipped/frame_000005.jpg
 !tests/aufgabe04/fixtures/candidate_position_epoch_clipped/README.md
+!tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/
+tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/*
+!tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/candidate_snapshot.json
+!tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/candidate_frame_projection.json
+!tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/observations.json
+!tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/frame_000031.jpg
+!tests/aufgabe04/fixtures/candidate_position_epoch_partial_20260930/README.md
