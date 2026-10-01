@@ -199,3 +199,8 @@ tests/aufgabe04/fixtures/wall_candidate_20260930/*
 !tests/aufgabe04/fixtures/wall_candidate_20260930/arrival_projection.json
 !tests/aufgabe04/fixtures/wall_candidate_20260930/manifest.json
 !tests/aufgabe04/fixtures/wall_candidate_20260930/README.md
+!tests/aufgabe04/fixtures/target_support_20260930/
+tests/aufgabe04/fixtures/target_support_20260930/*
+!tests/aufgabe04/fixtures/target_support_20260930/inputs.json
+!tests/aufgabe04/fixtures/target_support_20260930/manifest.json
+!tests/aufgabe04/fixtures/target_support_20260930/README.md

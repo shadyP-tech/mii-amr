@@ -157,6 +157,9 @@ from scripts.aufgabe04.real_robot.observer.diagnostics import (
 from scripts.aufgabe04.real_robot.observer.process import (
     monitor_passive_observer_process,
 )
+from scripts.aufgabe04.real_robot.observer.target_support_handoff import (
+    load_target_support_failure_exit,
+)
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationUnavailableError,
 )
@@ -1586,6 +1589,24 @@ def _capture_camera_recommendation(
         process_evidence.to_dict(),
         hash_field="observer_process_evidence_sha256",
     )
+    target_failure = load_target_support_failure_exit(
+        status_path=status_path, process=process_evidence, candidate=candidate,
+        snapshot_path=candidate_crop_snapshot_path,
+        planning_frame=getattr(profile, "map_frame", None),
+        stream_id=f"{args.session_id}_{candidate.candidate_uid}",
+        robot_profile_sha256=lambda: real_robot_profile_sha256(profile),
+        calibration_profile_sha256=getattr(profile, "calibration_profile_sha256", None),
+        stand_model_profile_sha256=stand_model.sha256,
+        observation_not_before_sec=observation_not_before_sec,
+    )
+    if target_failure is not None:
+        raise CandidateObservationUnavailableError(
+            candidate_uid=candidate.candidate_uid,
+            observation_attempt_index=observation_attempt_index,
+            reason="candidate_target_ineligible",
+            process_evidence={**process_evidence.to_dict(), "evidence_path": str(process_evidence_path)},
+            status_evidence=target_failure,
+        )
     if process_evidence.artifact_kind == "candidate_centering":
         from scripts.aufgabe04.real_robot.observer.candidate_centering import validate_camera_centering_advisory
         status_evidence = load_passive_observer_status(status_path)

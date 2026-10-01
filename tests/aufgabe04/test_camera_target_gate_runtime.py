@@ -167,6 +167,73 @@ class CameraTargetGateRuntimeTest(unittest.TestCase):
                              {"target_reconciliation_required"})
             self.assertFalse((config.session_root / "observed_stand_identities.json").exists())
 
+    def test_live_target_failure_continues_other_candidates_without_retry_or_keepout_loss(self):
+        for valid_count in (5, 4, 0):
+            with self.subTest(valid_count=valid_count), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                positions = [("unsupported", .8, 0.)]
+                positions += [(f"stand_{i}", x, y) for i, (x, y) in enumerate(
+                    ((1.8, 0.), (-1., 0.), (0., 1.5), (0., -1.5), (-2., 0.))[:valid_count])]
+                config = replace(self.config(root, positions, expected=5 if valid_count else 1),
+                                 max_candidate_inspection_views=8)
+                original_hash = candidate_snapshot_sha256(config.snapshot)
+                all_uids = set(config.snapshot.candidate_uids)
+                captures, events = [], []
+
+                def capture(request):
+                    uid = request.candidate.candidate_uid
+                    captures.append(uid)
+                    if uid == "unsupported":
+                        raise CandidateObservationUnavailableError(
+                            candidate_uid=uid, observation_attempt_index=request.attempt_index,
+                            reason="candidate_target_ineligible",
+                            process_evidence={"completion_kind": "child_exit", "returncode": 0},
+                            status_evidence={"state": "target_reconciliation_required",
+                                             "motion_authorized": False},
+                        )
+                    return CandidateObservation(request.output_dir / "recommendation.json", f"QR_{uid}", None)
+
+                def plan(request):
+                    self.assertEqual(set(request.snapshot.candidate_uids), all_uids)
+                    return {"route_csv": "route.csv"}
+
+                turn = Mock(side_effect=AssertionError("unsupported target requested centering"))
+                effects = self.effects(
+                    plan_preapproach=Mock(side_effect=plan), capture_observation=capture,
+                    run_centering_turn=turn,
+                    validate_facing=lambda request: {"candidate_uid": request.candidate.candidate_uid},
+                    event_sink=lambda _path, event: events.append(event),
+                )
+                if valid_count == 5:
+                    self.assertEqual(execute_candidate_approach_phase(config, effects).stand_count, 5)
+                else:
+                    with self.assertRaises(CandidateQrGoalIncompleteError):
+                        execute_candidate_approach_phase(config, effects)
+                self.assertEqual(captures[0], "unsupported")
+                self.assertEqual(captures.count("unsupported"), 1)
+                self.assertEqual(set(captures), all_uids)
+                self.assertEqual(len(captures), valid_count + 1)
+                self.assertEqual(effects.run_motion_leg.call_count, valid_count + 1)
+                turn.assert_not_called()
+                self.assertEqual(candidate_snapshot_sha256(config.snapshot), original_hash)
+                deferred = [e for e in events if e["event"] == "camera_candidate_observation_deferred"]
+                self.assertEqual(len(deferred), 1)
+                self.assertEqual(deferred[0]["candidate_uid"], "unsupported")
+                self.assertFalse(deferred[0]["retry_eligible"])
+                progress = json.loads((config.session_root / "candidate_goal_progress.json").read_text())
+                self.assertEqual(progress["goal_completed"], valid_count == 5)
+                self.assertEqual(progress["confirmed_stand_count"], valid_count)
+                if valid_count < 5:
+                    self.assertFalse((config.session_root / "observed_stand_identities.json").exists())
+                self.assertEqual(set(progress["keepout_candidate_uids"]), all_uids)
+                unsupported = next(c for c in progress["candidate_dispositions"]
+                                   if c["candidate_uid"] == "unsupported")
+                self.assertEqual(unsupported["disposition"], "target_reconciliation_required")
+                inspection = next(config.session_root.glob("candidates/*_unsupported/inspection_progress.json"))
+                local_progress = json.loads(inspection.read_text())
+                self.assertEqual(local_progress["termination_reason"], "target_reconciliation_required")
+                self.assertEqual(local_progress["local_view_count"], 1)
+
     def test_post_centering_reprojection_cannot_bypass_target_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

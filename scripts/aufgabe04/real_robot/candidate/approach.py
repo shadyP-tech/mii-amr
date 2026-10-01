@@ -2817,7 +2817,8 @@ def execute_candidate_approach_phase(
                     "event": "camera_candidate_observation_deferred",
                     "timestamp_unix_sec": effects.clock(),
                     "retry_eligible": (
-                        observation_selection.attempt_number
+                        exc.reason != "candidate_target_ineligible"
+                        and observation_selection.attempt_number
                         < observation_ledger.max_attempts_per_candidate
                     ),
                     "future_motion_requires_fresh_live_gates": True,

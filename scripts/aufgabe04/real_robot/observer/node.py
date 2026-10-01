@@ -841,6 +841,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self.backside_proposal_reuse.reset()
         self._last_observation_update = None
         self._inspection_frame = None
+        self._current_target_support = None
+        self._target_support_failure = None
+        support_window = getattr(self, "_target_support_failure_window", None)
+        if support_window is not None:
+            support_window.reset("observation_evidence_reset")
         if reset_inspection:
             self._inspection_progress = None
 
@@ -1076,6 +1081,9 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._position_epoch_failure = self._position_epoch_opportunity.observe(
             getattr(self, '_current_position_epoch_proof', None), self._inspection_frame,
             now_sec=observed_at_sec)
+        from scripts.aufgabe04.real_robot.observer.target_support_runtime import record_target_support
+        record_target_support(self, frame=self._inspection_frame, update=update,
+                              source_freshness=source_freshness)
         return update
 
     def _lookup(self, target_frame: str, source_frame: str, stamp) -> object:
@@ -1278,6 +1286,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self._qr_observation_pose_ready = None
         self._pending_candidate_centering = None
         self._candidate_centering_ready = None
+        self._current_target_support = None
+        self._target_support_failure = None
         if not self._observer_tf_ready():
             return
         sensor_tuple = self._next_sensor_tuple()
@@ -1693,6 +1703,17 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             max_scan_age_sec=self.args.max_sensor_age_sec,
             resolve_lidar_association=resolve_registration)
         registration_fragmentation = getattr(registration_envelope, 'witnessed_fragmentation', None)
+        # Negative support uses the entire allowed registration envelope and
+        # current raw rays. Historical cluster persistence cannot prove absence.
+        raw_support = qr_registration_envelope(plain_scan,
+            map_bearing_rad=scan_bearing,
+            cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+            max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
+            accepted_range_m=(lower_surface_bound, upper_surface_bound),
+            now_sec=self.node.get_clock().now().nanoseconds / 1e9,
+            max_scan_age_sec=self.args.max_sensor_age_sec)
+        self._current_target_support = dict(frame_stamp_sec=image.stamp_sec,
+            scan_stamp_sec=scan.stamp_sec, association=asdict(raw_support))
 
         target_reconciliation = None
         if getattr(self.args, 'candidate_crop_snapshot', None) is not None:
@@ -2364,6 +2385,11 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             or (registration.registered
                 and (registration.head_acquisition or {}).get("candidate_associated") is True)
         )
+        self._current_target_support["associated_head"] = (
+            qr_binding.accepted or fallback_qr_associated
+            or (current_head_association is not None and current_head_association.accepted)
+            or (registration.registered
+                and (registration.head_acquisition or {}).get("candidate_associated") is True))
         front_decision = front_observation_decision(
             qr_texts=qr_texts,
             qr_marker_detected=roi_qr_evidence.marker_detected,
@@ -3309,6 +3335,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 "preceding_state": state,
             }
             state = "inspection_progress_committed"
+        from scripts.aufgabe04.real_robot.observer.target_support_runtime import commit_target_support_failure
+        unsupported_target = commit_target_support_failure(self, state=state,
+            stronger_pending=(centering_pending or qr_observation_grace_pending(self)
+                              or backside_center_grace_pending(self)))
+        if unsupported_target is not None:
+            state, support_details = unsupported_target
+            details = {**details, **support_details}
         failure = getattr(self, '_position_epoch_failure', None)
         self._position_epoch_failure = None
         if (failure is not None and not getattr(self, 'completed', False)

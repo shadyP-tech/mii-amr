@@ -1,0 +1,200 @@
+{
+  "expected": {
+    "contiguous_capture_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "excluded_observer_state": "tf_retry_exhausted",
+    "excluded_tf_sample_count": 0,
+    "first_terminal_capture_index": 20,
+    "first_terminal_checked_at_sec": 1790781400.0106018,
+    "first_terminal_elapsed_sec": 5.253284454345703,
+    "first_terminal_sample_count": 19,
+    "negative_all_in_range_sample_count": 0,
+    "negative_all_model_result_fresh": true,
+    "negative_all_narrow_association_reasons": {
+      "no_samples_in_accepted_range": 18,
+      "no_valid_samples_in_map_cone": 1
+    },
+    "negative_broad_association_reasons": "no_samples_in_accepted_range",
+    "negative_distinct_image_stamps": 19,
+    "negative_distinct_scan_stamps": 19,
+    "negative_image_span_sec": 5.265655994415283,
+    "negative_max_image_scan_skew_sec": 0.04486799240112305,
+    "negative_max_pose_translation_from_first_m": 4.840493254825373e-06,
+    "negative_max_pose_yaw_from_first_rad": 0.0004837559567923144,
+    "negative_outcome_span_sec": 5.253211498260498,
+    "valid_control_associated": true,
+    "valid_control_head_frame_detected": true,
+    "valid_control_selected_cluster_source_indices": [
+      0,
+      1,
+      2
+    ]
+  },
+  "extraction": {
+    "kind": "lossless JSON field selection; values unchanged, formatting canonicalized",
+    "metadata": "All named metadata keys retained verbatim. detector_metadata limited to named fields and metric_model subfields. outcome excludes stand_axis_debug, camera_centering, stand_axis. sensors and tf_samples are complete original subtrees.",
+    "nonfinite_scan_encoding": "Original string values nan/+inf/-inf retained; decode to float for production PlainLaserScan.",
+    "root_frame_fields": "capture_index and image_sha256 copied directly; image path rebased to local archived original without copying image bytes",
+    "source_freshness": "Exact last_evidence_source_freshness subtree from original observer_events.jsonl, first matching image stamp; one-based source_freshness_event_line and source_freshness_artifact SHA bind it. Nonprocessed TF tuple has no source freshness.",
+    "target_receipt": "values copied from matching arrival admission; omitted keys were absent in source"
+  },
+  "fixture_file": {
+    "bytes": 480632,
+    "path": "inputs.json",
+    "sha256": "a03299a4072c5bbdca3bcf8a815af2af894c4dbf989b61f818c56a079a643d34"
+  },
+  "not_included": [
+    "image bytes",
+    "unselected detector diagnostics",
+    "synthetic timestamps",
+    "synthetic association results"
+  ],
+  "original_sources": [
+    {
+      "bytes": 9692,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/candidate_arrival_admission.json",
+      "sha256": "76706584fcfc95e8df30ab179ea58363d328878eb944519da101cfbc306b58db"
+    },
+    {
+      "bytes": 60746,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000002.json",
+      "sha256": "7dfc5288904872be73a690f36b992bfbfd89ee9005663e41d966291ddf680c2a"
+    },
+    {
+      "bytes": 60619,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000005.json",
+      "sha256": "138ce0b5dc903e20a7fa5d8dbbefc3a9e76d9589d33747ec8886452cf76e47fa"
+    },
+    {
+      "bytes": 112346,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000008.json",
+      "sha256": "c2e4e23d3975e6275416b97d69344d79bda04f520f56557cc2a13361674a4e01"
+    },
+    {
+      "bytes": 124661,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000011.json",
+      "sha256": "cdad284592cbb005597fa1adf31a44c49a01c5c507a72ce931e66b31f8fb91e5"
+    },
+    {
+      "bytes": 112660,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000014.json",
+      "sha256": "93f076cafe71f68c993c0a09a0bb14fcffe2479b611cd5a33f893f9d032ae0b2"
+    },
+    {
+      "bytes": 122411,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000017.json",
+      "sha256": "5e651b5f0243d9f5d5b19d7176d3e684417e6f3b6847f3635803f9085587f86d"
+    },
+    {
+      "bytes": 67835,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000020.json",
+      "sha256": "38ca9ba4a8cb4ba42efb5bc5ef55a62f6e98784e0f9ade8d618f01252d922ccf"
+    },
+    {
+      "bytes": 8576,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000001.json",
+      "sha256": "c66e7d1340b1321b770ee5b3eece474fd5c0dbec1dae3749cdcb8b8ea13bec8a"
+    },
+    {
+      "bytes": 6328,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T135242Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T135242Z/candidates/000_survey_candidate_0003/candidate_arrival_admission.json",
+      "sha256": "ddcf312f5de883c4409a62dfc93dafabed70f086a60a3d042114b90116517efb"
+    },
+    {
+      "bytes": 136353,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T135242Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T135242Z/candidates/000_survey_candidate_0003/camera_lidar_attempt_00/capture_history/frame_000001.json",
+      "sha256": "cd45c8e4ad805c4c33e618fa334ce50e40ce514a2ec931baf46756c3369f4769"
+    },
+    {
+      "bytes": 67587,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000003.json",
+      "sha256": "458121f1ed029852e895a4c74ded311be65c7d2f98e34851f5d1efc6c6e964f0"
+    },
+    {
+      "bytes": 60675,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000004.json",
+      "sha256": "f33f385cc5ff0cff7637fd17723140e6820cad87088cf9aff20e044d33f34ba0"
+    },
+    {
+      "bytes": 60644,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000006.json",
+      "sha256": "b532ed684b0918a122615e30356f9d2a4b976e6deb40ab2171f7d4725687730f"
+    },
+    {
+      "bytes": 73079,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000007.json",
+      "sha256": "37cc0f34ca662a5e5c691c81fd82ae36ce6c3f40e25799eafa5a2a0a6b8266e3"
+    },
+    {
+      "bytes": 116731,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000009.json",
+      "sha256": "c71e6a532c99d7d39479ccb4349cf2aefb20099073f8a85941634f7c42cabf03"
+    },
+    {
+      "bytes": 67970,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000010.json",
+      "sha256": "041245cadba305956d462e757bf2fa9152f086e7528a6ac631e11932810e924d"
+    },
+    {
+      "bytes": 124270,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000012.json",
+      "sha256": "1d74754b0b283adc60718d2396625a7efd434c16de8c6ef6892ff14faa2cbf9c"
+    },
+    {
+      "bytes": 68174,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000013.json",
+      "sha256": "80d520334d5726fa1a48ad42a20570948862cfccdb496b992cbd0e4768936fb0"
+    },
+    {
+      "bytes": 113099,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000015.json",
+      "sha256": "de97b763536a4851bc8452a7f87a114f7d3b49acb9682dd2962bc70030c30404"
+    },
+    {
+      "bytes": 74454,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000016.json",
+      "sha256": "bf5227336d2a24d824ac4630cd2b79e3948b406a978f34552835dbb2d0b0cca1"
+    },
+    {
+      "bytes": 116273,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000018.json",
+      "sha256": "c52fa49d50ed9b198560e23e2a67d90abe631bb01b07b3ebffe5ed5a8f2a0baa"
+    },
+    {
+      "bytes": 112752,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/capture_history/frame_000019.json",
+      "sha256": "8bc8d8eed30c0c299ebce802b7b1ac713d120536673323aa634dbb7f94e50b38"
+    },
+    {
+      "bytes": 6199752,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T150526Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T150526Z/candidates/003_survey_candidate_0005/camera_lidar_attempt_00/observer_events.jsonl",
+      "sha256": "9c6a93a3c056eccfa789a5aef25f3dc818390b023edb9bae4d87a57c79df8683"
+    },
+    {
+      "bytes": 230236,
+      "repository_relative_path": "results/implementation_checks/run_audit_20260930T135242Z/source/results/aufgabe04/real/autonomous_exploration/stand_explore_exact2_camera_all5_20260930T135242Z/candidates/000_survey_candidate_0003/camera_lidar_attempt_00/observer_events.jsonl",
+      "sha256": "336839dbf32e9083e1eceaa55d2509bf796f458e1ce443c197ee2357b43b2f00"
+    }
+  ],
+  "schema_version": 1
+}

@@ -19,6 +19,46 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import Candidat
 
 
 class CandidateInspectionExecutionTest(unittest.TestCase):
+    def test_terminal_target_support_failure_prevents_every_local_recovery_path(self):
+        for centered in (False, True):
+            with self.subTest(centered=centered), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                failure = CandidateObservationUnavailableError(
+                    candidate_uid="candidate", observation_attempt_index=0,
+                    reason="candidate_target_ineligible",
+                    process_evidence={"completion_kind": "child_exit", "returncode": 0},
+                    status_evidence={"state": "target_reconciliation_required",
+                                     "motion_authorized": False},
+                )
+                captures = []
+
+                def capture(frame, output, index):
+                    captures.append(index)
+                    raise failure
+
+                def forbidden(*args):
+                    self.fail("terminal unsupported target entered local recovery")
+
+                with self.assertRaises(CandidateObservationUnavailableError) as raised:
+                    execute_candidate_inspection(
+                        candidate_uid="candidate", candidate_root=root, initial_frame=0., max_views=8,
+                        effects=CandidateInspectionEffects(
+                            capture=forbidden if centered else capture,
+                            capture_centered=capture if centered else None,
+                            canonical_normal=lambda frame: frame,
+                            move_view=forbidden, move_opposite=forbidden,
+                            progress_evidence=forbidden, distance_recovery=forbidden,
+                            move_distance_recovery=forbidden, recover_lidar=forbidden,
+                        ),
+                    )
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(captures, [0])
+                progress = json.loads((root / "inspection_progress.json").read_text())
+                self.assertEqual(progress["termination_reason"], "target_reconciliation_required")
+                self.assertEqual(progress["local_view_count"], 1)
+                self.assertFalse(progress["joint_observation_ready"])
+                self.assertEqual(progress["view_history"][0]["outcome"], "observation_unavailable")
+
     def test_qr_observation_pose_completes_without_angle_or_another_move(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

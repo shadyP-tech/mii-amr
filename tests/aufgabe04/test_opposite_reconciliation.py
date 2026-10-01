@@ -193,6 +193,7 @@ def test_arrival_keeps_validated_center_instead_of_turning_back_to_survey(record
     from scripts.aufgabe04.real_robot.candidate.approach import _admit_camera_arrival_geometry
     from scripts.aufgabe04.navigation.foundation.models import Pose2D
     from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json, payload_sha256
+    from tests.aufgabe04.test_candidate_preapproach_planning import CandidatePreapproachPlanningTest
     import json
     _,_,snapshot,_,_,orientation,row,_=recorded
     center=orientation['validated_target_center']
@@ -204,7 +205,11 @@ def test_arrival_keeps_validated_center_instead_of_turning_back_to_survey(record
     config=SimpleNamespace(physical_clearance={'minimum_active_standoff_m':.33},approach_offset_m=.5,
         camera_arrival_range_slack_m=.1,camera_arrival_max_bearing_error_rad=math.radians(3),
         camera_calibration=None)
-    artifacts=SimpleNamespace(config=SimpleNamespace(snapshot=snapshot),evidence_path=target,evidence_sha256=digest,
+    bound_target_config=SimpleNamespace(snapshot=snapshot,
+        map_yaml=Path(__file__).resolve().parents[2]/'maps/aufgabe03/arena_1p898x3p9_auto.yaml',
+        semantic_map_id='arena_1p898x3p9_auto',
+        plan=CandidatePreapproachPlanningTest._plan(snapshot.map_bundle_sha256))
+    artifacts=SimpleNamespace(config=bound_target_config,evidence_path=target,evidence_sha256=digest,
         snapshot_path=Path(row['snapshot_path']),snapshot_sha256=recorded[4]['snapshot_sha256'],
         camera_decision_binding=lambda:SimpleNamespace(projection_path=target,projection_sha256=digest))
     effects=SimpleNamespace(admit_planning_frame=object(),run_centering_turn=object())
@@ -218,6 +223,9 @@ def test_arrival_keeps_validated_center_instead_of_turning_back_to_survey(record
     assert orientation_record(arrived.retained_backside_axis_path)['validated_target_center']==center
     evidence=json.loads((tmp_path/'arrival/camera_attempt_01_arrival/admission.json').read_text())
     assert evidence['accepted'] and evidence['validated_target_center']==center
+    assert evidence['candidate_target_admission']['accepted']
+    assert evidence['candidate_target_admission']['static_map_evidence']['pose']=={
+        'x_m':center['x_m'],'y_m':center['y_m']}
     assert evidence['camera_centered'] is False
 
 
