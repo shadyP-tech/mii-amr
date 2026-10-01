@@ -72,6 +72,7 @@ from scripts.aufgabe04.navigation.approach.camera_axis_binding import (
 )
 from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
     CandidateArrivalAdmissionConfig,
+    PASSIVE_CAMERA_ACQUISITION_MAX_BEARING_ERROR_RAD,
     evaluate_candidate_arrival_admission,
 )
 from scripts.aufgabe04.navigation.approach.camera_decision_geometry_binding import (
@@ -1417,19 +1418,18 @@ def _admit_camera_arrival_geometry(
     )
     strict_decision = decision
     if allow_centering_acquisition and effects.run_centering_turn is not None:
-        from scripts.aufgabe04.real_robot.observer.candidate_centering import (
-            MAX_CENTERING_STEP_RAD,
-        )
         # Admission to passive acquisition is distinct from being centered.
         # The observer must still associate a current head before proposing
-        # a separately certified turn; no map-only correction is authorized.
+        # separately certified turns. Their per-step limit does not limit this
+        # passive view; no map-only correction is authorized.
         decision, calibrated_evidence = _camera_arrival_decision(
             robot_pose=planning_frame.current_pose,
             target_x_m=target_geometry.x_m,
             target_y_m=target_geometry.y_m,
             calibration=source_config.camera_calibration,
             config=replace(strict_decision.config, max_bearing_error_rad=max(
-                strict_decision.config.max_bearing_error_rad, MAX_CENTERING_STEP_RAD,
+                strict_decision.config.max_bearing_error_rad,
+                PASSIVE_CAMERA_ACQUISITION_MAX_BEARING_ERROR_RAD,
             )),
         )
     if not target_admission.accepted:

@@ -16,6 +16,9 @@ from scripts.aufgabe04.navigation.foundation.models import Pose2D
 
 CANDIDATE_ARRIVAL_ADMISSION_SCHEMA_VERSION = 1
 DEFAULT_MAX_BEARING_ERROR_RAD = math.radians(3.0)
+# Passive acquisition can observe an off-center target before any measured,
+# separately admitted centering turn. This is not a per-turn motion limit.
+PASSIVE_CAMERA_ACQUISITION_MAX_BEARING_ERROR_RAD = math.radians(10.0)
 
 ARRIVAL_GEOMETRY_ADMITTED = "arrival_geometry_admitted"
 ARRIVAL_GEOMETRY_REJECTED = "arrival_geometry_rejected"

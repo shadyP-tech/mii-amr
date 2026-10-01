@@ -531,7 +531,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
             candidate_root = config.session_root / "candidates" / "000_candidate_a"
             rejected = json.loads((candidate_root / "candidate_arrival_admission.json").read_text())
             self.assertEqual(rejected["reasons"], ["bearing_error_above_maximum"])
-            self.assertEqual(rejected["thresholds"]["max_bearing_error_rad"], math.radians(6))
+            self.assertEqual(rejected["thresholds"]["max_bearing_error_rad"], math.radians(10))
             self.assertEqual(rejected["strict_arrival"]["thresholds"]["max_bearing_error_rad"], math.radians(3))
             progress = json.loads((candidate_root / "inspection_progress.json").read_text())
             self.assertEqual(len(progress["view_history"]), 1)
@@ -585,7 +585,7 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 self.assertTrue(receipt["acquisition_only"])
                 self.assertFalse(receipt["motion_authorized"])
                 self.assertFalse(receipt["strict_arrival"]["accepted"])
-                self.assertAlmostEqual(receipt["thresholds"]["max_bearing_error_rad"], math.radians(6))
+                self.assertAlmostEqual(receipt["thresholds"]["max_bearing_error_rad"], math.radians(10))
                 events = [json.loads(row) for row in
                           (candidate_root / "inspection_handoff_events.jsonl").read_text().splitlines()]
                 self.assertEqual([(e["event"], e["state"]) for e in events], [
@@ -658,9 +658,10 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
         for distance, tx, yaw, capable, accepted, reason in (
             (.31, -.2, 0., True, False, "range_below_minimum"),
             (.91, .3, 0., True, False, "range_above_maximum"),
-            (.7, .045, 6.01, True, False, "bearing_error_above_maximum"),
+            (.7, .045, 10.01, True, False, "bearing_error_above_maximum"),
             (.7, .045, 4., False, False, "bearing_error_above_maximum"),
             (.7, .045, 4., True, True, None),
+            (.7, .045, 10., True, True, None),
         ):
             with self.subTest(distance=distance, yaw=yaw, capable=capable), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -704,6 +705,76 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 effects.capture_observation.assert_not_called()
                 effects.run_motion_leg.assert_not_called()
 
+    def test_recorded_october_arrivals_admit_passive_acquisition_without_alignment_claims(self):
+        from scripts.aufgabe04.real_robot.candidate.approach import _admit_camera_arrival_geometry
+        from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import load_stand_survey_registry
+        from scripts.aufgabe04.real_robot.configuration.profile import (
+            camera_calibration_sha256, load_camera_calibration,
+        )
+
+        # Original stopped pose and projected target from the two rejected
+        # candidate_arrival_admission.json receipts in run 20261001T133759Z.
+        # The existing recorded fixture contains this run's sealed calibration.
+        calibration_payload = json.loads((Path(__file__).parent / "fixtures"
+            / "opposite_endpoint_20261001.json").read_text())["artifacts"]["sealed_camera_calibration"]
+        recorded = (
+            ("survey_candidate_0006",
+             Pose2D(1.0051589563419088, -.25410113050901817, -.22274795539644),
+             (1.489645918785578, -.4286920004493458),
+             -6.0882238392080605, .5149850373014867),
+            ("survey_candidate_0001",
+             Pose2D(-.6533873362704355, -.2222312069441454, -2.9164765596547),
+             (-1.1583289569308992, -.38458610727562575),
+             7.019017620147124, .5304009369683094),
+        )
+        for uid, pose, target, bearing_deg, distance in recorded:
+            with self.subTest(candidate_uid=uid), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                calibration_path = root / "camera_calibration.json"
+                calibration_path.write_text(json.dumps(calibration_payload))
+                camera = load_camera_calibration(calibration_path)
+                self.assertEqual(camera_calibration_sha256(camera),
+                    "ef9251020036e0ab201ae6dc599594dfc382bd83a995bafdee6b194123b1b2c7")
+                config = self._config(root, (self._candidate(uid, *target),))
+                config = self._write_frame_registry(replace(
+                    config, camera_calibration=camera, camera_arrival_range_slack_m=0.,
+                    physical_clearance={**config.physical_clearance,
+                                        "minimum_active_standoff_m": .33000000000000007},
+                ), frozen_map_from_odom=PlanarTransform2D(0., 0., 0.))
+                effects = CandidateApproachEffects(
+                    read_current_pose=Mock(), plan_preapproach=Mock(), run_motion_leg=Mock(),
+                    capture_observation=Mock(), validate_facing=Mock(), commit_decision=Mock(),
+                    admit_planning_frame=lambda _path: CandidatePlanningFrame(
+                        pose, PlanarTransform2D(0., 0., 0.)),
+                    run_centering_turn=Mock(),
+                )
+
+                _admit_camera_arrival_geometry(
+                    source_config=config, effects=effects,
+                    source_registry=load_stand_survey_registry(config.survey_root / "stand_registry.json"),
+                    candidate_uid=uid, candidate_root=root / "arrival",
+                    observation_attempt_index=0, allow_centering_acquisition=True,
+                )
+                receipt = json.loads((root / "arrival/candidate_arrival_admission.json").read_text())
+                self.assertAlmostEqual(math.degrees(receipt["measurements"]["signed_bearing_error_rad"]),
+                                       bearing_deg, places=12)
+                self.assertAlmostEqual(receipt["measurements"]["range_m"], distance, places=12)
+                self.assertEqual(receipt["thresholds"]["max_bearing_error_rad"], math.radians(10.))
+                self.assertEqual(receipt["strict_arrival"]["thresholds"]["max_bearing_error_rad"],
+                                 math.radians(3.))
+                self.assertFalse(receipt["strict_arrival"]["accepted"])
+                self.assertTrue(receipt["accepted"])
+                self.assertTrue(receipt["acquisition_only"])
+                self.assertTrue(receipt["candidate_target_admission"]["accepted"])
+                self.assertTrue(receipt["requires_live_target_association"])
+                self.assertIsNone(receipt["validated_target_center"])
+                self.assertFalse(receipt["head_alignment_verified"])
+                self.assertFalse(receipt["camera_centered"])
+                self.assertFalse(receipt["motion_authorized"])
+                effects.capture_observation.assert_not_called()
+                effects.run_motion_leg.assert_not_called()
+                effects.run_centering_turn.assert_not_called()
+
     def test_calibrated_arrival_rejects_invalid_or_vertical_optical_transform(self):
         from scripts.aufgabe04.real_robot.candidate.approach import _camera_arrival_decision
         from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import CandidateArrivalAdmissionConfig
@@ -746,25 +817,27 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                 self.assertTrue(decision.accepted)
                 self.assertEqual(evidence["range_reference"], base_frame)
 
-    def test_centering_acquisition_preserves_range_and_capability_gates(self):
+    def test_centering_acquisition_preserves_range_capability_and_static_target_gates(self):
         from scripts.aufgabe04.real_robot.candidate.approach import _admit_camera_arrival_geometry
         from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import load_stand_survey_registry
 
-        for distance, bearing, enabled, capable in (
-            (.7, 6.01, True, True), (.31, 4., True, True),
-            (.91, 4., True, True), (.7, 4., False, True), (.7, 4., True, False),
+        for target_x, distance, bearing, enabled, capable in (
+            (1., .7, 10.01, True, True), (1., .31, 4., True, True),
+            (1., .91, 4., True, True), (1., .7, 4., False, True),
+            (1., .7, 4., True, False), (4.98, .7, 7., True, True),
         ):
-            with self.subTest(distance=distance, bearing=bearing, enabled=enabled, capable=capable), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(target_x=target_x, distance=distance, bearing=bearing,
+                              enabled=enabled, capable=capable), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 config = self._write_frame_registry(
-                    self._config(root, (self._candidate("candidate_a", 2., 0.),)),
+                    self._config(root, (self._candidate("candidate_a", target_x+1., 0.),)),
                     frozen_map_from_odom=PlanarTransform2D(1., 0., 0.),
                 )
                 effects = CandidateApproachEffects(
                     read_current_pose=Mock(), plan_preapproach=Mock(), run_motion_leg=Mock(),
                     capture_observation=Mock(), validate_facing=Mock(), commit_decision=Mock(),
                     admit_planning_frame=lambda _path: CandidatePlanningFrame(
-                        Pose2D(1.-distance, 0., math.radians(bearing)), PlanarTransform2D(0., 0., 0.)),
+                        Pose2D(target_x-distance, 0., math.radians(bearing)), PlanarTransform2D(0., 0., 0.)),
                     run_centering_turn=Mock() if capable else None,
                 )
                 with self.assertRaises(CandidateObservationUnavailableError):
@@ -774,6 +847,12 @@ class AutonomousCandidateApproachTest(unittest.TestCase):
                         candidate_uid="candidate_a", candidate_root=root / "arrival",
                         observation_attempt_index=0, allow_centering_acquisition=enabled,
                     )
+                if target_x == 4.98:
+                    receipt = json.loads((root / "arrival/candidate_arrival_admission.json").read_text())
+                    self.assertTrue(receipt["checks"]["bearing_within_limit"])
+                    self.assertFalse(receipt["candidate_target_admission"]["accepted"])
+                    self.assertIn("target_static_map_incompatible", receipt["reasons"])
+                    self.assertFalse(receipt["acquisition_only"])
                 effects.capture_observation.assert_not_called()
                 effects.run_motion_leg.assert_not_called()
 
