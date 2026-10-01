@@ -7,18 +7,23 @@ from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_observati
 from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import exclusive_identity_crop, bind_crop_text
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import prepare_qr_observation_pose
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
-from scripts.aufgabe04.real_robot.observer.opposite_target_support import detect_opposite_target_support
+from scripts.aufgabe04.real_robot.observer.opposite_target_support import (
+    detect_opposite_target_support, detect_opposite_qr_outline, support_opposite_qr_outline,
+)
 from scripts.aufgabe04.real_robot.observer.candidate_centering_receipt import (
     prepare_candidate_centering, centering_observation_requested,
 )
 from scripts.aufgabe04.qr_scanning.isolated_qr_views import rectify_isolated_qr_view, ISOLATED_QR_VIEWS
 from scripts.aufgabe04.real_robot.configuration.geometry import pose2d_from_transform
+from scripts.aufgabe04.real_robot.observer.opposite_endpoint_confirmation import opposite_endpoint_validation_scope
 
 
+@opposite_endpoint_validation_scope()
 def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose,
         camera_signature, image_stamp_sec, scan, scan_from_map, camera_from_map,
         map_bearing_rad, accepted_range_m, scan_from_camera, base_from_camera, image_stamp,
-        target_reconciliation=None, fragmentation=None, require_target_reconciliation=False):
+        target_reconciliation=None, fragmentation=None, require_target_reconciliation=False,
+        persistence_context=None, reconcile_target=None, raw_frame=None, camera_calibration=None):
     """The caller supplies the ordinary stopped, exact-TF sensor tuple.
 
     A newly decoded payload may finish this branch immediately. No historical
@@ -30,6 +35,48 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         adapter._note_observation_soft_miss('retained_backside_wrong_side', stamp_sec=image_stamp_sec, pose=robot_pose)
         adapter._write_status('opposite_identity_unavailable', reason='retained_backside_wrong_side')
         return
+    endpoint_diagnostics = {}
+    endpoint_outline = None
+    if (require_target_reconciliation and target_reconciliation is None
+            and persistence_context is not None and reconcile_target is not None):
+        from scripts.aufgabe04.real_robot.observer.opposite_endpoint_confirmation import (
+            build_opposite_endpoint_hint, confirm_opposite_endpoint,
+        )
+        try:
+            hint, seed = build_opposite_endpoint_hint(scan=scan,
+                persistence_context=persistence_context,
+                snapshot_path=adapter.args.candidate_crop_snapshot,
+                intrinsics=intrinsics, scan_from_camera=scan_from_camera,
+                camera_from_map=camera_from_map, scan_from_map=scan_from_map,
+                model_profile=adapter.stand_model_profile,
+                model_path=adapter.args.stand_model_profile, now_sec=now,
+                max_scan_age_sec=adapter.args.max_sensor_age_sec,
+                map_bearing_rad=map_bearing_rad, accepted_range_m=accepted_range_m,
+                cone_half_angle_rad=math.radians(adapter.args.lidar_cone_half_angle_deg),
+                max_camera_map_bearing_delta_rad=math.radians(adapter.args.backside_registration_max_bearing_delta_deg))
+            now = adapter.node.get_clock().now().nanoseconds/1e9
+            endpoint_outline = detect_opposite_qr_outline(frame, adapter.cv2, attempt=hint,
+                model_profile=adapter.stand_model_profile, image_stamp_sec=image_stamp_sec,
+                now_sec=now, max_scan_age_sec=adapter.args.max_sensor_age_sec,
+                resources=getattr(adapter, '_qr_decoder_options', {}).get('resources'),
+                max_elapsed_sec=min(.06, adapter.args.max_sensor_age_sec
+                    -max(0., now-min(image_stamp_sec, scan.scan_stamp_sec))-.08),
+                diagnostics=endpoint_diagnostics)
+            if endpoint_outline is not None:
+                confirmed = confirm_opposite_endpoint(seed, endpoint_outline,
+                    now_sec=adapter.node.get_clock().now().nanoseconds/1e9)
+                target_reconciliation = reconcile_target(confirmed)
+                if target_reconciliation is not None:
+                    fragmentation = confirmed
+                    adapter._current_position_epoch_proof = target_reconciliation
+                    endpoint_diagnostics.update(accepted=True, reason='current_outline_confirms_endpoint_target')
+                else:
+                    endpoint_outline = None
+                    endpoint_diagnostics.update(accepted=False, reason='endpoint_target_reconciliation_rejected')
+        except (ValueError, TypeError, KeyError, ArithmeticError, OSError) as exc:
+            endpoint_outline = None
+            endpoint_diagnostics.update(accepted=False, reason=str(exc))
+        now = adapter.node.get_clock().now().nanoseconds/1e9
     options = dict(scan=scan, scan_from_map=scan_from_map,
         target_reconciliation=target_reconciliation,
         camera_from_map=camera_from_map, intrinsics=intrinsics,
@@ -44,7 +91,7 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         search = (None, {**search[1], 'accepted': False,
             'reason': 'retained_target_reconciliation_pending'})
     support_diagnostics = {}
-    support = detect_opposite_target_support(frame, adapter.cv2, attempt=search[0],
+    support_options = dict(attempt=search[0],
         intrinsics=intrinsics, model_profile=adapter.stand_model_profile,
         scan_from_camera=scan_from_camera, scan=scan, image_stamp_sec=image_stamp_sec,
         now_sec=now, map_bearing_rad=map_bearing_rad,
@@ -52,14 +99,24 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         max_scan_age_sec=adapter.args.max_sensor_age_sec,
         max_camera_map_bearing_delta_rad=options['max_camera_map_bearing_delta_rad'],
         diagnostics=support_diagnostics,
-        resources=getattr(adapter, '_qr_decoder_options', {}).get('resources'),
-        target_reconciliation=target_reconciliation, fragmentation=fragmentation,
-        max_elapsed_sec=min(.06, adapter.args.max_sensor_age_sec-max(0., now-min(image_stamp_sec, scan.scan_stamp_sec))-.08))
+        target_reconciliation=target_reconciliation, fragmentation=fragmentation)
+    support = (support_opposite_qr_outline(endpoint_outline,
+            image_shape=frame.shape[:2], **support_options)
+        if endpoint_outline is not None else
+        detect_opposite_target_support(frame, adapter.cv2, **support_options,
+            resources=getattr(adapter, '_qr_decoder_options', {}).get('resources'),
+            max_elapsed_sec=min(.06, adapter.args.max_sensor_age_sec-max(0., now-min(image_stamp_sec, scan.scan_stamp_sec))-.08)))
+    if endpoint_outline is not None and support is None:
+        # This branch was certified by a particular current symbol. Do not
+        # replace a failed ray binding with a larger rectangular identity crop.
+        search = (None, {**search[1], 'accepted': False,
+            'reason': 'endpoint_outline_support_unavailable'})
     attempt, crop = exclusive_identity_crop(candidate_uid=adapter.args.stand_id,
         snapshot=context.snapshot, support=support, search_result=search, **options)
     metadata = dict(policy='opposite_identity_only', retained_backside_orientation=orientation,
                     identity_crop=crop, current_angle_refit=False,
                     target_support_diagnostics=support_diagnostics,
+                    endpoint_confirmation=endpoint_diagnostics,
                     target_reconciliation_status=getattr(getattr(adapter, '_target_reconciliation', None), 'metadata', {}))
     observations = ()
     if attempt is not None:
@@ -69,12 +126,21 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         now = adapter.node.get_clock().now().nanoseconds / 1e9
         remaining = min(.12, adapter.args.max_sensor_age_sec-max(0., now-min(image_stamp_sec, scan.scan_stamp_sec))-.05)
         if remaining > 0:
-            pixels = (rectify_isolated_qr_view(frame, support.corners_px, adapter.cv2, ISOLATED_QR_VIEWS[0])
-                      if crop.get('sampling') == 'isolated_current_qr_quad' else frame[roi.y0:roi.y1, roi.x0:roi.x1])
-            observations = detect_qr_observations_bgr(pixels, adapter.cv2,
-                max_elapsed_sec=remaining, diagnostics=metadata.setdefault('decoder', {}),
-                **getattr(adapter, '_qr_decoder_options', {}),
-                preferred_scale=None if crop.get('sampling') == 'isolated_current_qr_quad' else 4)
+            if endpoint_outline is not None and raw_frame is not None and camera_calibration is not None:
+                from scripts.aufgabe04.real_robot.observer.opposite_raw_qr import decode_opposite_raw_qr
+                observations = decode_opposite_raw_qr(raw_frame, adapter.cv2,
+                    calibration=camera_calibration, calibration_profile=adapter.calibration,
+                    intrinsics=intrinsics,
+                    support=support, crop=crop, image_stamp_sec=image_stamp_sec,
+                    max_elapsed_sec=remaining, decoder_options=getattr(adapter, '_qr_decoder_options', {}),
+                    diagnostics=metadata.setdefault('decoder', {}))
+            else:
+                pixels = (rectify_isolated_qr_view(frame, support.corners_px, adapter.cv2, ISOLATED_QR_VIEWS[0])
+                          if crop.get('sampling') == 'isolated_current_qr_quad' else frame[roi.y0:roi.y1, roi.x0:roi.x1])
+                observations = detect_qr_observations_bgr(pixels, adapter.cv2,
+                    max_elapsed_sec=remaining, diagnostics=metadata.setdefault('decoder', {}),
+                    **getattr(adapter, '_qr_decoder_options', {}),
+                    preferred_scale=None if crop.get('sampling') == 'isolated_current_qr_quad' else 4)
     binding = bind_crop_text(observations, crop)
     texts = tuple(sorted({o.text for o in observations}))
     now = adapter.node.get_clock().now().nanoseconds / 1e9

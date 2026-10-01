@@ -264,6 +264,9 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
         raise ValueError('QR identity crop excludes target center')
     support = crop.get('target_support')
     isolated = crop.get('sampling') == 'isolated_current_qr_quad'
+    from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import require_endpoint_outline_binding
+    require_endpoint_outline_binding(data['qr_binding']['association'], support,
+        sampling=crop.get('sampling'))
     if isolated:
         from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_target_support
         validate_target_support(support)
@@ -291,6 +294,12 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
         _depth_interval(target_depth)
         if not target_depth[0] <= support['depth_m'] <= target_depth[1]:
             raise ValueError('isolated target depth is outside its uncertainty interval')
+    if 'raw_pixel_binding' in crop or 'payload_pixel_source' in crop:
+        from scripts.aufgabe04.real_robot.observer.opposite_raw_qr import validate_opposite_raw_qr_binding
+        validate_opposite_raw_qr_binding(crop.get('raw_pixel_binding'), crop=crop,
+            qr_id=data['qr_id'], image_stamp_sec=image, image_shape=shape,
+            calibration_profile_sha256=data['calibration_profile_sha256'],
+            camera_frame=(data.get('localization_provenance') or {}).get('camera_frame'))
     competitors = crop.get('competitors')
     if not isinstance(competitors, list):
         raise ValueError('QR identity crop lacks neighbor review')

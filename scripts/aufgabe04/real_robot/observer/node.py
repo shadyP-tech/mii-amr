@@ -1662,13 +1662,13 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         try:
             if not hasattr(self, "_rectification_map_cache"):
                 self._rectification_map_cache = RectificationMapCache()
-            frame = compressed_msg_to_bgr_frame(
+            raw_frame = compressed_msg_to_bgr_frame(
                 image_message,
                 self.cv2,
                 self.numpy,
             )
             frame = _rectify_bgr_frame(
-                frame,
+                raw_frame,
                 camera_info.value,
                 self.cv2,
                 self.numpy,
@@ -1718,30 +1718,41 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             scan_stamp_sec=scan.stamp_sec, association=asdict(raw_support))
 
         target_reconciliation = None
+        reconcile_target = None
         if getattr(self.args, 'candidate_crop_snapshot', None) is not None:
             if not hasattr(self, '_target_reconciliation'):
                 self._target_reconciliation = StoppedTargetReconciliation()
-            target_reconciliation = self._target_reconciliation.observe(
+            reconciliation_options = dict(
                 position_epoch_path=getattr(self.args,"candidate_position_epoch",None),
                 use_retained_target=retained_target is not None,
                 retained_orientation=None if opposite_context is None else opposite_context.orientation,
-                fragmentation=registration_fragmentation,
                 snapshot_path=self.args.candidate_crop_snapshot,candidate_uid=self.args.stand_id,
                 planning_frame=self.profile.map_frame,stand_center=(self.args.stand_x,self.args.stand_y),
                 target_key=self._target_evidence_key(),
                 epoch=0 if self.observation_evidence is None else self.observation_evidence.snapshot().motion_epoch,
                 scan=plain_scan, scan_from_map=RigidTransform(self.profile.scan_frame,self.profile.map_frame,
                     scan_translation,scan_rotation),robot_pose=(robot_pose.x_m,robot_pose.y_m,robot_pose.yaw_rad),
-                image_stamp_sec=image.stamp_sec,now_sec=self.node.get_clock().now().nanoseconds/1e9,
+                image_stamp_sec=image.stamp_sec,
                 options=dict(map_bearing_rad=scan_bearing,
                     cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
                     max_camera_map_bearing_delta_rad=math.radians(self.args.backside_registration_max_bearing_delta_deg),
                     accepted_range_m=(lower_surface_bound,upper_surface_bound)))
+            def reconcile_target(fragmentation):
+                # A visual endpoint confirmation is acquired later in this same
+                # tuple. Recheck its real processing age before admitting it.
+                return self._target_reconciliation.observe(**reconciliation_options,
+                    fragmentation=fragmentation,
+                    now_sec=self.node.get_clock().now().nanoseconds/1e9)
+            target_reconciliation = reconcile_target(registration_fragmentation)
 
         self._current_position_epoch_proof = target_reconciliation
         if opposite_context is not None:
             process_opposite_identity(self, context=opposite_context, frame=frame,
+                raw_frame=raw_frame,
+                camera_calibration=camera_calibration_from_info(camera_info.value),
                 fragmentation=registration_fragmentation,
+                persistence_context=scan_persistence_context,
+                reconcile_target=reconcile_target,
                 require_target_reconciliation=retained_target is not None,
                 target_reconciliation=target_reconciliation,
                 intrinsics=intrinsics, robot_pose=robot_pose,

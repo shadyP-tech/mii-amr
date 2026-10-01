@@ -15,6 +15,32 @@ from scripts.aufgabe04.real_robot.observer.qr_target_binding import QrTargetBind
 POLICY = "opposite_current_scan_exclusive_identity_crop"
 
 
+def require_endpoint_outline_binding(envelope, support, *, sampling):
+    """Keep endpoint-confirmed identity on the exact quad that proved it.
+
+    Callers still validate the complete envelope and target support normally.
+    This adds only the visual binding needed by the endpoint proof kind.
+    """
+    from scripts.aufgabe04.real_robot.observer.opposite_endpoint_confirmation import KIND
+    from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND
+    from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_opposite_qr_outline
+    from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
+
+    proof = envelope.get('witnessed_fragmentation') if isinstance(envelope, dict) else None
+    if isinstance(proof, dict) and proof.get('kind') == SUBSET_KIND:
+        proof = proof.get('envelope')
+    if not isinstance(proof, dict) or proof.get('kind') != KIND:
+        return
+    if sampling != 'isolated_current_qr_quad' or not isinstance(support, dict):
+        raise ValueError('endpoint confirmation requires its isolated current QR support')
+    outline = validate_opposite_qr_outline(proof.get('outline'))
+    shape = support.get('image_shape')
+    if (validated_qr_corners(support.get('corners_px')) != validated_qr_corners(outline['corners_px'])
+            or support.get('image_stamp_sec') != outline['image_stamp_sec']
+            or not isinstance(shape, (tuple, list)) or tuple(shape) != tuple(outline['image_shape'])):
+        raise ValueError('endpoint confirmation differs from the isolated current QR outline')
+
+
 def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrinsics,
                             model_profile, support=None, search_result=None, **search_options):
     attempt, search = (current_scan_qr_search(camera_from_map=camera_from_map,
@@ -24,6 +50,12 @@ def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrins
                 candidate_uid=candidate_uid, image_stamp_sec=search_options['image_stamp_sec'])
     if attempt is None:
         return None, {**info, 'reason': search['reason']}
+    try:
+        require_endpoint_outline_binding(search.get('envelope'),
+            None if support is None else support.metadata(),
+            sampling='rectangular_crop' if support is None else 'isolated_current_qr_quad')
+    except ValueError as exc:
+        return None, {**info, 'reason': str(exc)}
     # The search box is intentionally wider than an identity box. Keep a
     # bounded 1.6-head-size region, then exclude projected neighboring heads.
     cx, cy = attempt.expected_center_u_px, attempt.expected_center_v_px

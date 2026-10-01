@@ -362,6 +362,12 @@ def _resolved(current, witnesses, *, kind=INTERNAL_WITNESS_KIND, allow_partial=F
 
 def validated_witnessed_fragmentation(proof, *, association=None):
     """Recompute persisted evidence; arbitrary flags/counts are never sufficient."""
+    from scripts.aufgabe04.real_robot.observer.opposite_endpoint_confirmation import KIND, validate_opposite_endpoint
+    if isinstance(proof, dict) and proof.get('kind') == KIND:
+        result = validate_opposite_endpoint(proof)
+        if association is not None and result != association:
+            raise ValueError('opposite endpoint proof differs from current association')
+        return result
     from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND, validate_envelope_subset
     if isinstance(proof, dict) and proof.get('kind') == SUBSET_KIND:
         result = validate_envelope_subset(proof)

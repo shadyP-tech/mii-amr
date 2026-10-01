@@ -58,6 +58,11 @@ class OppositeIdentityTests(unittest.TestCase):
         self.base = qr_fixture.QrObservationPoseTests();self.base.setUp()
         self.addCleanup(self.base.doCleanups)
         self.adapter = self.base.adapter
+        camera_info = self.adapter._next_sensor_tuple.return_value.camera_info.value
+        camera_info.header = SimpleNamespace(frame_id='camera')
+        camera_info.k = (400., 0., 400., 0., 400., 300., 0., 0., 1.)
+        camera_info.r = (1., 0., 0., 0., 1., 0., 0., 0., 1.)
+        camera_info.d = (0., 0., 0., 0., 0.)
         self.path, self.snapshot = retained_fixture(self.base.root)
         self.context = load_opposite_identity_context(self.path, self.snapshot, candidate_uid='candidate',
             planning_frame='map', stand_center=dict(x_m=.6, y_m=0.), model_sha256='a'*64)

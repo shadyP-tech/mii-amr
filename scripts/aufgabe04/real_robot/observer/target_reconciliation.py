@@ -15,20 +15,20 @@ from scripts.aufgabe04.perception.stand_axis_handoff.geometry import rotate_vect
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import qr_registration_envelope
 from scripts.aufgabe04.real_robot.observer.opposite_target_geometry import RETAINED_TARGET, retained_scan_target
 from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique
-from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapshot, candidate_snapshot_sha256
 
 POLICY = 'three_stopped_scans_candidate_reconciliation'
 RETAINED_POLICY = 'certified_center_current_scan_confirmation'
 MAX_HISTORY_SEC = 1.5
 
 
-def load_reconciliation_snapshot(path, *, candidate_uid, planning_frame, center):
-    snapshot = load_candidate_snapshot(Path(path))
+def load_reconciliation_snapshot(path, *, candidate_uid, planning_frame, center, with_hash=False):
+    from scripts.aufgabe04.real_robot.observer.opposite_endpoint_confirmation import load_endpoint_snapshot
+    snapshot, digest = load_endpoint_snapshot(path)
     target = snapshot.candidate_for(candidate_uid)
     if (snapshot.planning_frame != planning_frame or target is None
             or math.dist(center, (target.geometry.x_m, target.geometry.y_m)) > 1e-6):
         raise ValueError('reconciliation snapshot differs from selected candidate frame')
-    return snapshot
+    return (snapshot, digest) if with_hash else snapshot
 
 
 def _retained_center(record, snapshot, uid):
@@ -131,9 +131,9 @@ def validate_reconciliation(proof, *, candidate_uid=None, stand_center=None, ima
             or proof.get('candidate_geometry_updated') is not False or proof.get('motion_authorized') is not False):
         raise ValueError('invalid target reconciliation proof')
     uid = proof['candidate_uid']
-    snapshot = load_reconciliation_snapshot(proof['snapshot_path'], candidate_uid=uid,
-        planning_frame=proof['planning_frame'], center=proof['stand_center'])
-    if candidate_snapshot_sha256(snapshot) != proof['snapshot_sha256'] or candidate_uid not in (None,uid):
+    snapshot, snapshot_digest = load_reconciliation_snapshot(proof['snapshot_path'], candidate_uid=uid,
+        planning_frame=proof['planning_frame'], center=proof['stand_center'], with_hash=True)
+    if snapshot_digest != proof['snapshot_sha256'] or candidate_uid not in (None,uid):
         raise ValueError('reconciliation snapshot/candidate changed')
     if stand_center is not None and math.dist(stand_center,proof['stand_center']) > 1e-6:
         raise ValueError('reconciliation stand center changed')
@@ -193,8 +193,8 @@ class StoppedTargetReconciliation:
             self.entries = []
             self.context = context
         try:
-            snapshot = load_reconciliation_snapshot(snapshot_path,candidate_uid=candidate_uid,
-                planning_frame=planning_frame,center=stand_center)
+            snapshot, snapshot_digest = load_reconciliation_snapshot(snapshot_path,candidate_uid=candidate_uid,
+                planning_frame=planning_frame,center=stand_center,with_hash=True)
             raw = asdict(scan)
             raw['ranges'] = [v if math.isfinite(v) else None for v in scan.ranges]
             entry = dict(scan=raw,scan_from_map=asdict(scan_from_map),robot_pose=list(robot_pose),
@@ -224,7 +224,7 @@ class StoppedTargetReconciliation:
             proof = dict(policy=RETAINED_POLICY if use_retained_target else POLICY,
                 candidate_uid=candidate_uid,planning_frame=planning_frame,
                 stand_center=list(stand_center),snapshot_path=str(Path(snapshot_path).resolve()),
-                snapshot_sha256=candidate_snapshot_sha256(snapshot),target_key=target_key,epoch=epoch,
+                snapshot_sha256=snapshot_digest,target_key=target_key,epoch=epoch,
                 entries=self.entries.copy(),candidate_geometry_updated=False,motion_authorized=False)
             if retained_orientation is not None:
                 proof["retained_orientation"] = retained_orientation
