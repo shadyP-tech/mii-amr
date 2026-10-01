@@ -743,8 +743,9 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             target_x_m=target.x_m, target_y_m=target.y_m,
             expected_sample_count=recommendation.axis_sample_count,
             # load_recommendation already validated the current QR-front
-            # contract. Retained/backside schemas keep their stricter budget.
+            # contract, including retained angles with a newly decoded ID.
             allow_coarse_front=(recommendation.schema_version == BOUNDED_RECOMMENDATION_SCHEMA_VERSION),
+            qr_front_confirmed=True,
         )
     minimum_active_standoff_m = _required_positive_clearance(
         config.physical_clearance,

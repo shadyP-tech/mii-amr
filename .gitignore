@@ -215,3 +215,10 @@ tests/aufgabe04/fixtures/start_return_20261001/*
 !tests/aufgabe04/fixtures/start_return_20261001/README.md
 !tests/aufgabe04/fixtures/opposite_endpoint_20261001.json
 !tests/aufgabe04/fixtures/opposite_endpoint_20261001.jpg
+!tests/aufgabe04/fixtures/opposite_head_identity_20261001/
+tests/aufgabe04/fixtures/opposite_head_identity_20261001/*
+!tests/aufgabe04/fixtures/opposite_head_identity_20261001/README.md
+!tests/aufgabe04/fixtures/opposite_head_identity_20261001/input.json
+!tests/aufgabe04/fixtures/opposite_head_identity_20261001/frame_000005.jpg
+!tests/aufgabe04/fixtures/opposite_head_identity_20261001/frame_000016.jpg
+!tests/aufgabe04/fixtures/opposite_head_identity_20261001/frame_000031.jpg

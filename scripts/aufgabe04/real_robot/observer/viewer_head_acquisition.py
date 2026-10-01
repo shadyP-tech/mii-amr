@@ -138,7 +138,7 @@ def evaluate_viewer_head(
     position_uncertainty_m=None,
     camera_vertical=(0., 1., 0.),
     previous_head_miss=False, identity_search_attempt=None, search_decoder=None,
-    nearest_context=None,
+    nearest_context=None, identity_enabled=True,
 ):
     """Measure full-frame geometry once, returning neutral side classification.
 
@@ -182,7 +182,8 @@ def evaluate_viewer_head(
     # No previous pixels, payloads or head corners cross this scheduling boundary.
     identity_fallback = identity_search_attempt or fallback_attempt
     early_identity = None
-    if budget.identity_first_due(now_monotonic_sec=now(), previous_head_miss=previous_head_miss):
+    if identity_enabled and budget.identity_first_due(
+            now_monotonic_sec=now(), previous_head_miss=previous_head_miss):
         early_bounds, early_scope = _marker_bounds(frame, None, False, identity_fallback)
         early_identity = _acquire_identity(cv2, frame, bounds=early_bounds, scope=early_scope,
             complete_head=False, cache=cache, budget=budget, native_decoder=native_decoder,
@@ -221,7 +222,13 @@ def evaluate_viewer_head(
     )
     complete_head = current_head_available_for_markers((estimate, debug, None))
     bounds, scope = _marker_bounds(frame, estimate, complete_head, identity_fallback)
-    if early_identity is None:
+    if not identity_enabled:
+        identity = (None, None, None, None, "identity_disabled_for_geometry_only", {
+            "performed": False, "reason": "identity_disabled_for_geometry_only",
+            "identity_scope": scope, "identity_roi": None,
+            "marker_refresh_performed": False, "elapsed_ms": 0.,
+        })
+    elif early_identity is None:
         identity = _acquire_identity(cv2, frame, bounds=bounds, scope=scope,
             complete_head=complete_head, cache=cache, budget=budget,
             native_decoder=native_decoder,

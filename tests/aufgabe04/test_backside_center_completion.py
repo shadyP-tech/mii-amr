@@ -107,7 +107,7 @@ def test_arrival_center_promotes_legacy_angle_without_front_corners_or_refit(leg
     path,qr,_=legacy_arrival
     rec=build_retained_facing(path,stand_radius_m=.06,target_distance_m=.6)
     with pytest.raises(ValueError,match='obliquity'):
-        build_retained_facing(path,stand_radius_m=.06,target_distance_m=.35)
+        build_retained_facing(path,stand_radius_m=.06,target_distance_m=.25)
     assert qr['qr_corners_px'] is None
     assert rec.bounded_orientation==qr['retained_backside_orientation']['bounded_orientation']
     assert rec.axis_sample_count==7 and rec.axis_measurement['current_angle_refit'] is False

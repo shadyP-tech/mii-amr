@@ -78,6 +78,7 @@ class OppositeIdentityTests(unittest.TestCase):
         adapter._write_status = lambda state, **details: PassiveRealViewpointNode._write_status(adapter, state, **details)
         def decode(image, *_args, **kwargs):
             self.assertEqual(image.shape, (200, 200, 3))
+            self.assertIs(kwargs["identity_only"], True)
             if late:
                 self.base.fixture.clock_sec = 100.6
             return observations
@@ -90,7 +91,7 @@ class OppositeIdentityTests(unittest.TestCase):
             fit = stack.enter_context(patch(module+'estimate_stand_axis_from_metric_model', side_effect=AssertionError('front fit requested')))
             viewer = stack.enter_context(patch(module+'evaluate_viewer_head', side_effect=AssertionError('front search requested')))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.current_scan_qr_search', return_value=(attempt, crop['search'])))
-            stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_opposite_target_support', return_value=support))
+            stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_opposite_head_support', return_value=support))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.exclusive_identity_crop', return_value=(attempt, crop)))
             stack.enter_context(patch('scripts.aufgabe04.real_robot.observer.opposite_identity.detect_qr_observations_bgr', side_effect=decode))
             adapter._process_latest()

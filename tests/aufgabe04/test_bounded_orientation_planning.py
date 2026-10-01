@@ -200,7 +200,7 @@ class BoundedOrientationPlanningTest(unittest.TestCase):
             load_recommendation(payload)
 
     def test_bounded_front_identity_keeps_one_collision_checked_facing_route(self):
-        self._assert_front_collision_checked_route(bounds(math.pi / 2), 20)
+        self._assert_front_collision_checked_route(bounds(math.pi / 2), 30)
 
     def test_coarse_front_identity_keeps_one_collision_checked_facing_route(self):
         self._assert_front_collision_checked_route(

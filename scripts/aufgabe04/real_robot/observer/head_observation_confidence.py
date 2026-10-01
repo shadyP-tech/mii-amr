@@ -59,6 +59,7 @@ class HeadObservationConfidence:
             and update.frame_accepted and not snapshot.poisoned
             and current.complete_head_verified is True
             and isinstance(appearance, HeadBacksideAppearance)
+            and appearance.basis == "current_raw_head_and_explicit_marker_checks"
             and appearance.accepted is True
             and appearance.supplies_angle is False and appearance.motion_authorized is False
             and type(appearance.confidence) in (int, float)

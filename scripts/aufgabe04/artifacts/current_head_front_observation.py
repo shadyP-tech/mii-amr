@@ -135,7 +135,13 @@ def validated_current_head_front_evidence(payload, *, expected_sensor_stamp_sec=
             or any(type(v) is not int or v < 4 for v in shape)
             or any(not (1. <= x <= shape[1]-2. and 1. <= y <= shape[0]-2.) for x, y in head)):
         raise ValueError("current head front requires a complete head inside the image")
-    if not qr_quad_inside_current_head(payload["qr_corners_px"], head):
+    from scripts.aufgabe04.real_robot.observer.current_head_identity import (
+        is_current_head_identity, validate_current_head_identity_binding,
+    )
+    head_identity = is_current_head_identity(payload["qr_binding"])
+    if head_identity and payload["qr_corners_px"] is not None:
+        raise ValueError("head-bound QR payload must not claim symbol corners")
+    if not head_identity and not qr_quad_inside_current_head(payload["qr_corners_px"], head):
         raise ValueError("current head front QR must lie inside the current head")
     stamps = {key: _number(payload[key], key) for key in (
         "sensor_stamp_sec", "scan_stamp_sec", "checked_at_sec", "qr_sensor_stamp_sec",
@@ -163,6 +169,16 @@ def validated_current_head_front_evidence(payload, *, expected_sensor_stamp_sec=
         raise ValueError("current head front requires one independently bound decoded QR")
     if expected_qr_id is not None and qr_id != expected_qr_id:
         raise ValueError("current head front QR identity differs from recommendation")
+    if head_identity:
+        if stamps["sensor_stamp_sec"] != stamps["qr_sensor_stamp_sec"] or stamps["scan_stamp_sec"] != stamps["qr_scan_stamp_sec"]:
+            raise ValueError("head-bound identity requires the same current sensor tuple")
+        context = validate_current_head_identity_binding(qr,
+            image_stamp_sec=stamps["sensor_stamp_sec"], scan_stamp_sec=stamps["scan_stamp_sec"],
+            image_shape=shape, target_key=payload["target_key"],
+            camera_signature=payload["camera_signature"], model_profile_sha256=sha,
+            head_corners=payload["head_corners_px"])
+        if context["motion_epoch"] != payload["motion_epoch"]:
+            raise ValueError("head-bound identity belongs to another stationary epoch")
     head_cluster = _association(payload["head_lidar_association"], stamp=stamps["scan_stamp_sec"],
                                 allow_witnessed_head=True)
     qr_cluster = _association(qr.get("association"), stamp=stamps["qr_scan_stamp_sec"])

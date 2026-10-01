@@ -12,6 +12,7 @@ from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.tf_sampli
     refresh_tf_sample_age,
     refreshed_tf_sample_details,
 )
+from scripts.aufgabe04.navigation.waypoint_follower.runtime_components.initial_amcl_refresh import InitialAmclRefresh
 
 rclpy = RuntimeBindingProxy("rclpy", None)
 
@@ -19,6 +20,24 @@ rclpy = RuntimeBindingProxy("rclpy", None)
 def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
     """Acquire all required edges in this listener under one zero-motion budget."""
 
+    node.initial_amcl_refresh = refresh = InitialAmclRefresh()
+    try:
+        return _wait_for_initial_runtime_inputs(node, started_at, refresh)
+    finally:
+        refresh.close()
+        if refresh.active:
+            evidence = dict(refresh.evidence)
+            acquisition = getattr(node, "latest_initial_tf_acquisition", None)
+            if isinstance(acquisition, dict):
+                acquisition["initial_amcl_refresh"] = evidence
+            details = getattr(node, "latest_stop_details", None)
+            if isinstance(details, dict):
+                details["initial_amcl_refresh"] = evidence
+                if isinstance(details.get("initial_tf_acquisition"), dict):
+                    details["initial_tf_acquisition"]["initial_amcl_refresh"] = evidence
+
+
+def _wait_for_initial_runtime_inputs(node, started_at: float, refresh) -> str:
     config = node.follower_config
     context = getattr(node, "odom_execution_context", None)
     state = InitialTfAcquisition(
@@ -73,6 +92,11 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
                 # cold-acquisition budget. Its already-acquired peer edge
                 # must still be fresh after the failed lookup and live probes.
                 failure = _recheck_ready_edge_ages(node, state) or failure
+        refresh_hold = False
+        if refresh.active:
+            refresh_failure, refresh_hold = refresh.poll(node, state, time.monotonic())
+            if refresh_failure:
+                return _finish_wait_failure(node, state, refresh_failure)
         if not failure:
             # A lookup can block. Recheck the live admission inputs after both
             # samples/continuity checks and before reporting startup ready.
@@ -104,7 +128,11 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             if not failure:
                 failure = _recheck_ready_edge_ages(node, state)
             if not failure:
-                node.latest_initial_tf_acquisition = state.to_evidence()
+                if refresh_hold:
+                    node.latest_initial_tf_acquisition = _startup_evidence(node, state)
+                    node.publish_zero()
+                    continue
+                node.latest_initial_tf_acquisition = _startup_evidence(node, state)
                 trace_failure = _trace(node, "initial_runtime_input_ready", state)
                 if trace_failure:
                     return trace_failure
@@ -117,7 +145,7 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             sensors_fresh=state.sensor_inputs_fresh,
             failure_details=dict(node.latest_stop_details or {}), executor_health=health,
         )
-        node.latest_initial_tf_acquisition = state.to_evidence()
+        node.latest_initial_tf_acquisition = _startup_evidence(node, state)
         if not keep_waiting:
             return _finish_wait_failure(node, state, last_failure)
         if state.phase != prior_phase:
@@ -129,6 +157,10 @@ def wait_for_initial_runtime_inputs(node, started_at: float) -> str:
             trace_failure = _trace(node, event, state)
             if trace_failure:
                 return trace_failure
+        if not refresh.active:
+            refresh_failure, _ = refresh.poll(node, state, time.monotonic())
+            if refresh_failure:
+                return _finish_wait_failure(node, state, refresh_failure)
         node.publish_zero()
     return "ROS shutdown"
 
@@ -236,14 +268,22 @@ def _motion_contract_failure(node, state: InitialTfAcquisition) -> str:
 
 def _finish_wait_failure(node, state: InitialTfAcquisition, failure: str) -> str:
     state.sensor_acquisition.graph = publisher_diagnostics(node)
-    node.latest_initial_tf_acquisition = state.to_evidence()
+    node.latest_initial_tf_acquisition = _startup_evidence(node, state)
     node.latest_stop_details = {
         "reason": failure, "source": "initial_runtime_input_wait",
         **dict(node.latest_stop_details or {}),
-        "initial_tf_acquisition": state.to_evidence(),
+        "initial_tf_acquisition": _startup_evidence(node, state),
         "fail_closed": True,
     }
     return failure
+
+
+def _startup_evidence(node, state):
+    evidence = state.to_evidence()
+    refresh = getattr(node, "initial_amcl_refresh", None)
+    if refresh is not None and refresh.active:
+        evidence["initial_amcl_refresh"] = dict(refresh.evidence)
+    return evidence
 
 
 def _trace(node, event: str, state: InitialTfAcquisition) -> str:
@@ -252,12 +292,12 @@ def _trace(node, event: str, state: InitialTfAcquisition) -> str:
     failure = node._append_controller_trace(
         event=event, reason=state.phase, fail_closed=False,
         effective_command=VelocityCommand(0.0, 0.0),
-        diagnostics={"initial_tf_acquisition": state.to_evidence()},
+        diagnostics={"initial_tf_acquisition": _startup_evidence(node, state)},
     )
     if failure:
         node.latest_stop_details = {
             **dict(node.latest_stop_details or {}),
             "reason": failure, "source": "controller_trace",
-            "initial_tf_acquisition": state.to_evidence(), "fail_closed": True,
+            "initial_tf_acquisition": _startup_evidence(node, state), "fail_closed": True,
         }
     return failure

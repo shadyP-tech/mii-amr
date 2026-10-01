@@ -293,6 +293,7 @@ def validate_recommendation(
             target_x_m=target.pose.x_m, target_y_m=target.pose.y_m,
             expected_sample_count=recommendation.axis_sample_count,
             allow_coarse_front=coarse_front,
+            qr_front_confirmed=True,
         )
         bounded = validated_bounded_orientation(recommendation.bounded_orientation,
                                                 allow_coarse_front=coarse_front)

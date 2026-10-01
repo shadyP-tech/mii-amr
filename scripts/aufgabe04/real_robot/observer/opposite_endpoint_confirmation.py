@@ -1,7 +1,8 @@
 """Current visual confirmation of a certified opposite target at the scan seam.
 
-The search hint has no association authority. Only one complete current QR
-outline spanning both bounded gap endpoints can confirm the retained target.
+The search hint has no association authority. Only one complete current head
+region spanning both bounded gap endpoints can confirm the retained target.
+Historical QR-outline confirmations remain readable in the same wire schema.
 Original rays, topology and two raw cluster counts remain unchanged.
 """
 from dataclasses import asdict, replace
@@ -318,14 +319,24 @@ def validate_opposite_endpoint(proof):
 
 def _validate_current_outline(proof):
     from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_opposite_qr_outline
+    from scripts.aufgabe04.real_robot.observer.opposite_head_support import (
+        HEAD_REGION_POLICY, validate_opposite_head_region,
+    )
     scan, association, search, attempt, intrinsics, camera, model, gap = _geometry(proof)
     outline = proof['outline']
-    validate_opposite_qr_outline(outline)
-    expected = attempt.expected_head_height_px*model.qr_symbol_height_m/model.head_height_m
+    head = outline.get('policy') == HEAD_REGION_POLICY if isinstance(outline, dict) else False
+    if head:
+        validate_opposite_head_region(outline)
+        expected = attempt.expected_head_height_px
+        size_key = 'expected_head_height_px'
+    else:
+        validate_opposite_qr_outline(outline)
+        expected = attempt.expected_head_height_px*model.qr_symbol_height_m/model.head_height_m
+        size_key = 'expected_symbol_height_px'
     center = tuple(outline['center_px'])
     if (outline['image_stamp_sec'] != proof['current']['context']['image_stamp_sec']
             or tuple(outline['image_shape']) != (intrinsics.height_px, intrinsics.width_px)
-            or not math.isclose(outline['expected_symbol_height_px'], expected, rel_tol=1e-9, abs_tol=1e-9)
+            or not math.isclose(outline[size_key], expected, rel_tol=1e-9, abs_tol=1e-9)
             or math.dist(center, (attempt.expected_center_u_px, attempt.expected_center_v_px)) > .75*attempt.expected_head_height_px
             or any(not attempt.roi.x0 <= p[0] < attempt.roi.x1 or not attempt.roi.y0 <= p[1] < attempt.roi.y1
                    for p in outline['corners_px'])):
@@ -335,7 +346,7 @@ def _validate_current_outline(proof):
         distance_m=search.distance_m, range_interval_m=search.accepted_range_m)
     if abs(math.remainder(bearing-search.selected_cluster_bearing_rad, math.tau))+uncertainty > math.radians(3)+1e-9:
         raise ValueError('opposite endpoint outline misses the current target ray')
-    # At either accepted depth, the same complete symbol must span BOTH
+    # At either accepted depth, the same complete region must span BOTH
     # missing-interval endpoints. A center-only ray cannot bridge two objects.
     endpoints = tuple(math.remainder(s.bearing_rad-bearing, math.tau) for s in gap)
     for distance in search.accepted_range_m:
@@ -343,6 +354,7 @@ def _validate_current_outline(proof):
                 for p in outline['corners_px']]
         extent = [math.remainder(math.atan2(p[1], p[0])-bearing, math.tau) for p in rays]
         if min(endpoints) < min(extent)-1e-9 or max(endpoints) > max(extent)+1e-9:
-            raise ValueError('current QR outline does not span both scan gap endpoints')
+            raise ValueError('current head region does not span both scan gap endpoints' if head
+                             else 'current QR outline does not span both scan gap endpoints')
     return replace(association, associated=True, distance_m=search.distance_m, rejection_reason='',
         search_association=search, unique_eligible_cluster_required=False, witnessed_fragmentation=proof)

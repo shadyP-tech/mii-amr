@@ -43,11 +43,14 @@ Use the same command with:
 --execute --confirm-unloaded --confirm-odom-continuity
 ```
 
-By default, the initial Start visit only verifies a fresh stopped pose against
-the saved Start pose reprojected into the current localization frame. Arrival
-must be within **0.08 m and 0.15 rad**. This check does not plan a route, capture
-an obstacle-scan cohort or dispatch motion. A failed check stops the tour before
-any server call.
+After local artifact validation and the typed `RUN` confirmation, execution
+requests and freezes the server plan before checking Start. By default, the
+initial Start visit only verifies a fresh stopped pose against the saved Start
+pose reprojected into the current localization frame. Arrival must be within
+**0.08 m and 0.15 rad**. This check does not plan a route, capture an
+obstacle-scan cohort or dispatch motion. A failed check leaves the randomized
+server plan in place but sends no Start scan or arrival report and starts no
+onward motion.
 
 Add `--drive-to-start` if the camera runner's automatic return failed or the
 robot moved afterward. This explicitly allows an initial approach when needed,
@@ -60,30 +63,36 @@ artifacts do not record an odometry reset identifier, so the runner requires thi
 operator assertion. Fresh localization alone cannot repair a changed historical
 origin. Re-explore after an odometry reset.
 
-Execution obtains stopped localization and asks for one typed `RUN` for this new
-tour. It does not reuse the exploration's authorization. Each motion child gets
+Execution asks for one typed `RUN` for this new tour. It does not reuse the
+exploration's authorization. Each motion child gets
 its own sealed, single-use `stored_pose_tour` permit after a successful dry
 admission. All existing live scan, odometry, localization, uncertainty, route,
 clearance and velocity-ownership checks remain active.
 
 The sequence is:
 
-1. Verify the camera runner's stopped arrival at the admitted pose for exact QR
-   `Start`; with `--drive-to-start`, approach first if needed.
-2. Request a random plan from
+1. Request a random plan from
    `POST /api/v1/robots/{robot_id}/plan/randomize` on
    `http://10.42.0.1:8000`, using `qr_count` from the saved numbered QRs and
    `stations` from the command line.
-3. Validate and freeze the returned station order and robot-specific QR mapping.
-4. Report Start through `POST /api/v1/qr/Start/scan`. Follow each validated
-   `next_target.qr_code_id`, preserving repeated stand visits, and report its QR
-   only after a fresh measured arrival at its stored pose.
-5. Wait at the stand for the server's timed actions and earliest-next-scan time.
-   Continue until the server confirms `FINISHED` with no next target.
+2. Fetch `GET /api/v1/robots/{robot_id}/qr-mappings`, then validate and freeze
+   the returned station order and robot-specific QR mapping.
+3. Verify the camera runner's stopped arrival at the admitted pose for exact QR
+   `Start`; with `--drive-to-start`, approach first if needed.
+4. Report verified Start through `POST /api/v1/qr/Start/scan` to receive the
+   first `next_target.qr_code_id`. Wait at Start for the server's timed actions
+   and earliest-next-scan time before navigating to that target.
+5. Follow each validated next target, preserving repeated stand visits. Report
+   its QR only after a fresh measured arrival at its stored pose, then honor
+   the server's waits before departing. Continue until the server confirms
+   `FINISHED` with no next target.
 6. By default, visit any saved stands omitted by the server plan in shuffled
    order, then return to Start. These supplemental visits are navigation only;
    they do not send scans to the already-finished server mission. Use
    `--server-plan-only` to omit them.
+
+Console progress announces upcoming server requests, the accepted next target,
+waits and failures, so the current stage is visible while the tour runs.
 
 The current server expects exact IDs `Start`, `QR_001`, `QR_002`, and so on, with
 4–10 numbered QRs and no gaps. `--stations` requests 3–100 production visits;

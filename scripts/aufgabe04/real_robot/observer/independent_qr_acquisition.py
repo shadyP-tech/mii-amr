@@ -16,11 +16,22 @@ from scripts.aufgabe04.real_robot.observer.qr_acquisition_policy import (
 
 def evaluate_geometry_then_identity(*, frame, roi, roi_source, cache, budget,
                                     native_decoder, full_decoder, geometry_only,
-                                    decorate, now, current_image_head_fit):
+                                    decorate, now, current_image_head_fit,
+                                    identity_enabled=True):
     started = now()
     estimate, debug = geometry_only()
     geometry_ms = (now() - started) * 1000.
     first_timings = dict(debug.stage_timings_ms or {})
+    if not identity_enabled:
+        # Exploration decodes only after the current head has been associated
+        # with its scan target. No decoder or marker refresh may run here.
+        return estimate, replace(debug, qr_detected=None, qr_marker_verified=None,
+            qr_marker_reason="identity_disabled_for_geometry_only"), None, {
+            "performed": False, "reason": "identity_disabled_for_geometry_only",
+            "geometry_first": True, "elapsed_ms": 0.,
+            "current_image_geometry_refit": False,
+            "marker_refresh_performed": False,
+        }
     if budget.remaining_work_sec(now()) < MIN_NATIVE_MARKER_BUDGET_SEC:
         return estimate, debug, None, {
             "performed": False, "reason": "identity_deferred_for_source_freshness",
@@ -69,12 +80,15 @@ def evaluate_geometry_then_identity(*, frame, roi, roi_source, cache, budget,
     return estimate, replace(debug, stage_timings_ms=timings), observations, metadata
 
 
-def probe_identity_after_head_miss(selection, *, cache, budget, full_decoder, now):
+def probe_identity_after_head_miss(selection, *, cache, budget, full_decoder, now,
+                                   identity_enabled=True):
     """Decode one current crop without demanding a successful head or angle.
 
     A skipped/empty probe never claims marker absence or a backside. The QR's
     original crop coordinates are preserved for normal camera/LiDAR binding.
     """
+    if not identity_enabled:
+        return selection
     current = selection.selected
     if current.qr_decode_metadata is None or current.qr_decode_metadata.get("performed") is not False:
         return selection

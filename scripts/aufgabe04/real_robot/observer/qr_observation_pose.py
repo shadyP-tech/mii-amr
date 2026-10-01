@@ -20,6 +20,7 @@ from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256, real_robot_profile_sha256,
 )
+from scripts.aufgabe04.real_robot.observer.current_head_identity import is_current_head_identity
 
 
 FRONT_BOUNDED_OPPORTUNITY_SEC = 5.0
@@ -100,8 +101,11 @@ class QrObservationPoseFallback:
                       "delay_sec": self.delay_sec, "stand_axis_rad": None,
                       "facing_ready": False, "motion_authorized": False}
         if current.retained_backside_orientation is not None:
+            orientation_source = ('certified_unidentified_head'
+                if current.retained_backside_orientation.get('policy') == 'certified_unidentified_head_orientation_retained'
+                else 'certified_backside')
             diagnostic.update(delay_sec=0., stand_axis_rad=current.retained_backside_orientation['stand_axis_rad'],
-                orientation_source='certified_backside', current_angle_refit=False)
+                orientation_source=orientation_source, current_angle_refit=False)
         current.metadata["qr_observation_pose_fallback"] = diagnostic
 
         def reject(reason):
@@ -125,7 +129,8 @@ class QrObservationPoseFallback:
         retained = current.retained_backside_orientation is not None
         crop_bound = (retained and current.qr_binding.accepted
                       and current.qr_binding.reason == "decoded_qr_exclusive_opposite_crop")
-        if not update.qr_sample_accepted or (current.qr_corners is None and not crop_bound):
+        head_bound = is_current_head_identity(current.qr_binding)
+        if not update.qr_sample_accepted or (current.qr_corners is None and not crop_bound and not head_bound):
             return reject("fresh_independently_bound_qr_required")
         qr_id = current.qr_binding.qr_texts_for_evidence[0]
         if qr_id not in (snapshot.tentative_qr_id, snapshot.latched_qr_id):
@@ -141,7 +146,7 @@ class QrObservationPoseFallback:
         diagnostic["delay_sec"] = delay
         if crop_bound:
             diagnostic.update(delay_sec=0., stand_axis_rad=current.retained_backside_orientation['stand_axis_rad'],
-                              orientation_source='certified_backside', current_angle_refit=False)
+                              orientation_source=orientation_source, current_angle_refit=False)
         # Reconciliation establishes target identity; it does not replace the
         # seven current head intervals. One fixed opportunity survives soft
         # misses but cannot be prolonged by another eligible frame.

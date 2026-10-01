@@ -98,16 +98,14 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
     from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import capture_tour_scan
     from scripts.aufgabe04.task_client.station_tour_client import StationTourClient
 
-    effects = build_navigation_effects(session.profile, output_root)
-    effects.admit_planning_frame(output_root / "preflight/before_authorization.json")
     drive_to_start = args.drive_to_start
-    print("Unloaded stand tour: verify the camera exploration's arrival at Start, then request the server plan."
+    print("Unloaded stand tour: request the server plan, then verify the camera exploration's arrival at Start."
           if not drive_to_start else
-          "Unloaded stand tour: approach saved Start if needed, then request the server plan.")
-    print("Travel limits: 0.15 m/s and 0.60 rad/s; slower near corners and final poses.")
-    print("LiDAR obstacles enter a temporary map; blocked routes stop and replan at most twice per visit.")
-    print("Server actions use timed waits only; this runner does not manipulate physical cargo.")
-    print("Keep the arena clear, the operator beside the robot and the physical stop ready.")
+          "Unloaded stand tour: request the server plan, then approach saved Start if needed.", flush=True)
+    print("Travel limits: 0.15 m/s and 0.60 rad/s; slower near corners and final poses.", flush=True)
+    print("LiDAR obstacles enter a temporary map; blocked routes stop and replan at most twice per visit.", flush=True)
+    print("Server actions use timed waits only; this runner does not manipulate physical cargo.", flush=True)
+    print("Keep the arena clear, the operator beside the robot and the physical stop ready.", flush=True)
     if input("Type RUN to authorize this server station tour: ").strip() != "RUN":
         raise RuntimeError("operator did not authorize the station tour")
     runtime = session.profile.resolved_runtime()
@@ -121,6 +119,7 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
         operator_confirmation="RUN",
     ))
     config = replace(session.config, mission_leg_motion_authorization_json=authorization_path)
+    effects = build_navigation_effects(session.profile, output_root)
     obstacle_map = TemporaryObstacleMap(tour_id, runtime.odom_frame, config.plan.map_bundle_sha256)
 
     def capture_scan(path):
@@ -142,7 +141,8 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
                               robot_id=args.server_robot_id,
                               timeout_sec=args.http_timeout_sec)
     return run_station_tour(client, session.poses_by_qr, navigate, output_root / "server",
-                            station_visits=args.stations, cover_all_stands=not args.server_plan_only)
+                            station_visits=args.stations, cover_all_stands=not args.server_plan_only,
+                            progress=lambda message: print(message, flush=True))
 
 
 def _write_json(path: Path, value) -> None:
@@ -225,7 +225,7 @@ def main(argv=None) -> int:
             failure = output_root / "failure.json"
             if not failure.exists():
                 _write_json(failure, {"tour_id": tour_id, "status": "stopped", "error": str(exc) or type(exc).__name__})
-        print(f"Station tour stopped: {exc or type(exc).__name__}")
+        print(f"Station tour stopped: {exc or type(exc).__name__}", flush=True)
         return 130 if isinstance(exc, KeyboardInterrupt) else 2
     finally:
         os.chdir(invocation_cwd)

@@ -58,6 +58,7 @@ def head_appearance_confidence(quality, scale, center, aspect):
 def assess_current_head_backside_appearance(
     estimate, debug, *, model_profile, camera,
     expected_center_u_px, expected_center_v_px, expected_height_px,
+    identity_unresolved=False,
 ):
     """Assess appearance even when a current head has an ambiguous pose."""
     result = HeadBacksideAppearance(
@@ -80,7 +81,11 @@ def assess_current_head_backside_appearance(
             or model_profile.sha256 != estimate.model_profile_sha256
             or quality.profile_sha256 != model_profile.sha256):
         return replace(result, reason="backside_measured_physical_profile_required")
-    if debug.qr_detected is not False or debug.qr_marker_verified is not False:
+    if identity_unresolved:
+        if debug.qr_detected is not None or debug.qr_marker_verified is not None:
+            return replace(result, reason="unidentified_head_requires_unknown_marker_state")
+        result = replace(result, basis="current_raw_head_identity_unresolved")
+    elif debug.qr_detected is not False or debug.qr_marker_verified is not False:
         return replace(result, reason="backside_current_marker_absence_required")
     if not current_head_boundary_eligible(estimate, debug):
         return replace(result, reason="backside_head_boundary_contradicted")
@@ -104,7 +109,8 @@ def assess_current_head_backside_appearance(
         and MIN_NORMALIZED_ASPECT <= aspect <= MAX_NORMALIZED_ASPECT
         and MINIMUM_BACKSIDE_FACE_CONFIDENCE <= confidence <= 1.0)
     return replace(result, accepted=accepted,
-                   reason=("current_head_appearance_backside_candidate" if accepted
+                   reason=(("current_head_geometry_identity_unresolved" if identity_unresolved
+                            else "current_head_appearance_backside_candidate") if accepted
                            else "backside_structure_or_projection_gates_rejected"),
                    head_scale_ratio=scale, head_center_error_ratio=center,
                    normalized_aspect=aspect, confidence=confidence)

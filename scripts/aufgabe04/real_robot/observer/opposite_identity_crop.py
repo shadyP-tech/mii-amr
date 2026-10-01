@@ -1,8 +1,9 @@
 """Current scan crop for text-only identity, with neighboring stand exclusion.
 
 A broad search ROI is not enough. The identity crop is reduced to the current
-projected head vicinity. Overlap requires a complete, current foreground QR
-outline and separated depth bounds; the decoder then samples that symbol only.
+projected head vicinity. Overlap requires a current associated foreground head
+and separated depth bounds; the decoder samples only pixels inside that head.
+Historical QR-supported receipts remain readable.
 """
 from dataclasses import replace
 import math
@@ -16,7 +17,7 @@ POLICY = "opposite_current_scan_exclusive_identity_crop"
 
 
 def require_endpoint_outline_binding(envelope, support, *, sampling):
-    """Keep endpoint-confirmed identity on the exact quad that proved it.
+    """Keep endpoint-confirmed identity on the exact region that proved it.
 
     Callers still validate the complete envelope and target support normally.
     This adds only the visual binding needed by the endpoint proof kind.
@@ -31,14 +32,47 @@ def require_endpoint_outline_binding(envelope, support, *, sampling):
         proof = proof.get('envelope')
     if not isinstance(proof, dict) or proof.get('kind') != KIND:
         return
-    if sampling != 'isolated_current_qr_quad' or not isinstance(support, dict):
+    from scripts.aufgabe04.real_robot.observer.opposite_head_support import (
+        HEAD_REGION_POLICY, HEAD_POLICY, validate_opposite_head_region, validate_head_support_geometry,
+    )
+    region = proof.get('outline') or {}
+    head = region.get('policy') == HEAD_REGION_POLICY
+    if head:
+        if (sampling != 'masked_current_head_region' or not isinstance(support, dict)
+                or support.get('policy') != HEAD_POLICY):
+            raise ValueError('endpoint confirmation requires its masked current head support')
+        outline = validate_opposite_head_region(region)
+    elif sampling != 'isolated_current_qr_quad' or not isinstance(support, dict):
         raise ValueError('endpoint confirmation requires its isolated current QR support')
-    outline = validate_opposite_qr_outline(proof.get('outline'))
+    else:
+        outline = validate_opposite_qr_outline(region)
     shape = support.get('image_shape')
-    if (validated_qr_corners(support.get('corners_px')) != validated_qr_corners(outline['corners_px'])
+    actual = (validate_head_support_geometry(support) if head
+              else validated_qr_corners(support.get('corners_px')))
+    expected = (validate_head_support_geometry(outline) if head
+                else validated_qr_corners(outline['corners_px']))
+    if (actual != expected
             or support.get('image_stamp_sec') != outline['image_stamp_sec']
             or not isinstance(shape, (tuple, list)) or tuple(shape) != tuple(outline['image_shape'])):
-        raise ValueError('endpoint confirmation differs from the isolated current QR outline')
+        raise ValueError('endpoint confirmation differs from the current head region' if head
+                         else 'endpoint confirmation differs from the isolated current QR outline')
+
+
+def masked_identity_pixels(frame, cv2, *, roi, corners_px):
+    """Copy only the current head interior; the bounding box grants no pixels.
+
+    This preserves source sampling and masks adjacent/background content even
+    for a tilted head. No QR geometry or perspective fit is computed.
+    """
+    import numpy as np
+    pixels = frame[roi.y0:roi.y1, roi.x0:roi.x1].copy()
+    points = np.asarray([(x-roi.x0, y-roi.y0) for x, y in corners_px], dtype=np.float32)
+    mask = np.zeros(pixels.shape[:2], dtype=np.uint8)
+    cv2.fillConvexPoly(mask, np.rint(points).astype(np.int32), 255)
+    # Exclude rasterization pixels straddling the measured foreground border.
+    mask = cv2.erode(mask, np.ones((3, 3), dtype=np.uint8))
+    pixels[mask == 0] = 255
+    return pixels
 
 
 def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrinsics,
@@ -50,10 +84,13 @@ def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrins
                 candidate_uid=candidate_uid, image_stamp_sec=search_options['image_stamp_sec'])
     if attempt is None:
         return None, {**info, 'reason': search['reason']}
+    from scripts.aufgabe04.real_robot.observer.opposite_head_support import HEAD_POLICY
+    head_support = support is not None and support.metadata().get('policy') == HEAD_POLICY
+    support_sampling = ('masked_current_head_region' if head_support else 'isolated_current_qr_quad')
     try:
         require_endpoint_outline_binding(search.get('envelope'),
             None if support is None else support.metadata(),
-            sampling='rectangular_crop' if support is None else 'isolated_current_qr_quad')
+            sampling='rectangular_crop' if support is None else support_sampling)
     except ValueError as exc:
         return None, {**info, 'reason': str(exc)}
     # The search box is intentionally wider than an identity box. Keep a
@@ -90,7 +127,7 @@ def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrins
         if proof is not None and proof['policy'] == 'certified_center_current_scan_confirmation':
             uncertainty += proof['retained_orientation']['validated_target_center']['uncertainty_m']
         target_depth_interval = [max(0., support.depth_m-uncertainty), support.depth_m+uncertainty]
-        sampling = 'isolated_current_qr_quad'
+        sampling = support_sampling
     competitors = []
     for candidate in snapshot.candidates:
         if candidate.candidate_uid == candidate_uid:
@@ -111,7 +148,8 @@ def exclusive_identity_crop(*, candidate_uid, snapshot, camera_from_map, intrins
         occluded = bool(overlap and target_depth_interval is not None
                         and neighbor_depth[0] > target_depth_interval[1])
         competitors.append(dict(candidate_uid=candidate.candidate_uid, bounds_xyxy=other,
-            depth_interval_m=neighbor_depth, occluded_by_target_symbol=occluded))
+            depth_interval_m=neighbor_depth,
+            **{('occluded_by_target_head' if head_support else 'occluded_by_target_symbol'): occluded}))
         if overlap and not occluded:
             return None, {**info, 'reason': 'target_crop_overlap_unresolved', 'competitors': competitors}
     if not 0 <= box[0] < box[2] <= intrinsics.width_px or not 0 <= box[1] < box[3] <= intrinsics.height_px:

@@ -254,7 +254,7 @@ def test_identity_overlap_does_not_block_target_recovery(recorded,outline_availa
         _target_evidence_key=lambda:row['target_key'],_write_status=lambda *args,**kwargs:None,
         _record_observation_frame=lambda **kwargs:frames.append(kwargs) or SimpleNamespace(snapshot=SimpleNamespace(as_dict=lambda:{})))
     module='scripts.aufgabe04.real_robot.observer.opposite_identity.'
-    with patch(module+'detect_opposite_target_support',return_value=support if outline_available else None), \
+    with patch(module+'detect_opposite_head_support',return_value=support if outline_available else None), \
          patch(module+'exclusive_identity_crop',return_value=(None,dict(accepted=False,reason='target_crop_overlap_unresolved'))), \
          patch(module+'pose2d_from_transform',return_value=Pose2D(0.,0.,0.)), \
          patch(module+'detect_qr_observations_bgr') as decoder:

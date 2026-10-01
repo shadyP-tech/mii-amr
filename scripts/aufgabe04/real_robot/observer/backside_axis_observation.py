@@ -21,6 +21,8 @@ from scripts.aufgabe04.artifacts.backside_axis_observation import (
     TARGET_REGISTRATION_MODE_BOUNDED_CAMERA_LIDAR,
     TARGET_REGISTRATION_MODE_MAP_PROJECTION,
     validate_backside_axis_observation,
+    UNIDENTIFIED_HEAD_SCHEMA_VERSION, UNIDENTIFIED_HEAD_SOURCE,
+    UNIDENTIFIED_HEAD_BASIS, UNIDENTIFIED_HEAD_SAMPLE_GATES,
 )
 
 
@@ -42,7 +44,7 @@ def build_backside_axis_observation(
     estimate_evidence_state: str,
     estimate_visible_face: str | None,
     visible_face_confidence: float,
-    debug_qr_detected: bool,
+    debug_qr_detected: bool | None,
     qr_texts: Sequence[str],
     evidence_qr_sample_count: int,
     evidence_tentative_qr_id: str | None,
@@ -64,6 +66,7 @@ def build_backside_axis_observation(
     bounded_orientation: Mapping[str, object] | None = None,
     target_reconciliation: dict | None = None,
     head_position_evidence: dict | None = None,
+    identity_unresolved: bool = False,
 ) -> dict[str, object]:
     """Build schema 3 from repeated, registered current-frame evidence."""
 
@@ -86,7 +89,9 @@ def build_backside_axis_observation(
         raise ValueError("backside estimate is not fresh backside evidence")
     if estimate_visible_face != BACKSIDE_VISIBLE_FACE:
         raise ValueError("backside estimate did not classify a backside candidate")
-    if debug_qr_detected is not False:
+    if identity_unresolved and debug_qr_detected is not None:
+        raise ValueError("unidentified head must retain unknown marker state")
+    if not identity_unresolved and debug_qr_detected is not False:
         raise ValueError("a QR marker is present in the current frame")
     if isinstance(qr_texts, (str, bytes)) or list(qr_texts) != []:
         raise ValueError("decoded QR text forbids a backside observation")
@@ -159,6 +164,18 @@ def build_backside_axis_observation(
         # This variant supplies an interval, never a precise axis confidence.
         # Navigation must validate the whole interval at its selected endpoint.
         payload["bounded_orientation"] = dict(bounded_orientation)
+    if identity_unresolved:
+        # The opposite inspection explores the other side of a measured axis.
+        # Failed identity decoding does not establish a physical backside.
+        payload.update(schema_version=UNIDENTIFIED_HEAD_SCHEMA_VERSION,
+            visible_face="unidentified", visible_face_source=UNIDENTIFIED_HEAD_SOURCE,
+            axis_sample_source=UNIDENTIFIED_HEAD_SOURCE,
+            visible_face_confidence_basis="head_geometry_only",
+            classification_basis=UNIDENTIFIED_HEAD_BASIS,
+            model_evidence_state="fresh_unidentified_head", qr_marker_detected=None,
+            identity_undecoded_sample_count=axis_sample_count,
+            sample_gate_evidence={key: True for key in UNIDENTIFIED_HEAD_SAMPLE_GATES})
+        payload.pop("qr_absent_sample_count")
     if target_reconciliation is not None:
         payload["target_reconciliation"] = target_reconciliation
     if head_position_evidence is not None:

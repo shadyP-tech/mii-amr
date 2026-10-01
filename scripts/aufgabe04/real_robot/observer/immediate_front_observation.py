@@ -17,6 +17,9 @@ from scripts.aufgabe04.perception.camera_stand_observation import stand_axis_fro
 from scripts.aufgabe04.perception.stand_axis.head_model_admission import admit_measured_head_model
 from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 from scripts.aufgabe04.real_robot.configuration.recommendation import build_real_viewpoint_recommendation
+from scripts.aufgabe04.real_robot.observer.current_head_identity import (
+    is_current_head_identity, validate_current_head_identity_binding,
+)
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,7 @@ class BoundQrIdentity:
     stamp_sec: float
     scan_stamp_sec: float
     checked_at_sec: float
-    corners: tuple
+    corners: tuple | None
     binding: dict
 
 
@@ -128,7 +131,8 @@ class ImmediateFrontAdmission:
                 and set(current.observed_qr_texts) != {self.identity.qr_id}):
             self.identity = None
             return reject("current_qr_identity_conflict")
-        if update.qr_sample_accepted and current.qr_corners is not None:
+        head_identity = is_current_head_identity(current.qr_binding)
+        if update.qr_sample_accepted and (current.qr_corners is not None or head_identity):
             qr_id = current.qr_binding.qr_texts_for_evidence[0]
             if qr_id not in (snapshot.tentative_qr_id, snapshot.latched_qr_id):
                 self.identity = None
@@ -144,7 +148,20 @@ class ImmediateFrontAdmission:
         if not 0. <= observed_at_sec - identity.stamp_sec <= ttl:
             self.identity = None
             return reject("bound_qr_identity_expired")
-        if not qr_quad_inside_current_head(identity.corners, current.head_corners):
+        if is_current_head_identity(identity.binding):
+            try:
+                # A decoded payload has no image location to carry to a new
+                # frame. Its exclusive head region is admitted only now.
+                validate_current_head_identity_binding(identity.binding,
+                    image_stamp_sec=current.stamp_sec, scan_stamp_sec=current.scan_stamp_sec,
+                    image_shape=current.image_shape, target_key=current.target_key,
+                    camera_signature=current.camera_signature,
+                    model_profile_sha256=current.estimate.model_profile_sha256,
+                    head_corners=current.head_corners)
+            except (TypeError, ValueError, KeyError) as exc:
+                self.identity = None
+                return reject("current_head_identity_required: " + str(exc))
+        elif not qr_quad_inside_current_head(identity.corners, current.head_corners):
             return reject("bound_qr_outside_current_complete_head")
         diagnostic.update(ready=True, reason="current_head_and_bound_qr_ready",
                           qr_id=identity.qr_id, qr_sensor_stamp_sec=identity.stamp_sec,

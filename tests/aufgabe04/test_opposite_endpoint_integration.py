@@ -1,4 +1,9 @@
-"""Original opposite pixels cross the current-proof and persisted QR boundaries."""
+"""Head-only runtime admission and historical endpoint receipt compatibility.
+
+Runtime cases detect the head from original pixels; only the decoded payload is
+stubbed to remove desktop backend differences. Historical QR-corner receipts
+are constructed explicitly through legacy producers, never the live pipeline.
+"""
 from dataclasses import asdict, replace
 from copy import deepcopy
 import json
@@ -23,12 +28,16 @@ from scripts.aufgabe04.real_robot.configuration.profile import camera_calibratio
 from scripts.aufgabe04.real_robot.observer import opposite_identity
 from scripts.aufgabe04.real_robot.observer import opposite_raw_qr
 from scripts.aufgabe04.real_robot.observer.opposite_endpoint_confirmation import (
-    build_opposite_endpoint_hint, validate_opposite_endpoint,
+    build_opposite_endpoint_hint, confirm_opposite_endpoint, validate_opposite_endpoint,
 )
 from scripts.aufgabe04.real_robot.observer.qr_observation_binding import load_bound_qr_observation_pose
-from scripts.aufgabe04.real_robot.observer.qr_observation_pose import commit_qr_observation_pose
-from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import exclusive_identity_crop
-from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_target_support
+from scripts.aufgabe04.real_robot.observer.qr_observation_pose import commit_qr_observation_pose, prepare_qr_observation_pose
+from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import exclusive_identity_crop, bind_crop_text
+from scripts.aufgabe04.real_robot.observer.opposite_target_support import (
+    OppositeQrOutline, support_opposite_qr_outline, validate_target_support,
+)
+from scripts.aufgabe04.real_robot.observer.opposite_head_support import HEAD_REGION_POLICY, HEAD_POLICY
+from scripts.aufgabe04.qr_scanning.qr_observation import DecodedQrObservation
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
 from scripts.aufgabe04.real_robot.observer.target_reconciliation import (
     StoppedTargetReconciliation, validate_reconciliation,
@@ -90,13 +99,79 @@ def endpoint(tmp_path, monkeypatch):
             tuple(base_camera["rotation_xyzw"])), image_stamp=None,
         target_reconciliation=None, require_target_reconciliation=True,
         persistence_context=case["persistence_context"], reconcile_target=reconcile)
-    # Replay the original sensor clock. Native outline/QR detection and its
-    # wall-time budget remain real; separate tests exercise source-clock expiry.
+    # Real current head detection uses original pixels. These are structural
+    # receipt tests, not latency tests: allow its cooperative budget enough
+    # room for a cold desktop backend and stub only the cornerless payload.
+    detect = opposite_identity.detect_opposite_head_region
+    def detect_head(*args, **options):
+        return detect(*args, **{**options, 'max_elapsed_sec': .5})
+    monkeypatch.setattr(opposite_identity, 'detect_opposite_head_region', detect_head)
+    def decode_identity(*args, **options):
+        assert options['identity_only'] is True
+        return (DecodedQrObservation('Start', None, 'payload_only_fixture', 4.),)
+    monkeypatch.setattr(opposite_identity, 'detect_qr_observations_bgr', decode_identity)
     # The lightweight adapter supplies the recorded robot digest. Camera
     # calibration is the authentic, sealed profile and its real hash is checked.
     monkeypatch.setattr("scripts.aufgabe04.real_robot.observer.qr_observation_pose.real_robot_profile_sha256",
         lambda _: orientation["robot_profile_sha256"])
     return case, adapter, clock, kwargs, calls
+
+
+def _legacy_crop(endpoint):
+    """Construct old QR-based proof/crop directly for reader compatibility."""
+    case, adapter, _, kwargs, _ = endpoint
+    hint, seed = build_opposite_endpoint_hint(**case['hint_kwargs'])
+    value = case['outline']
+    outline = OppositeQrOutline(tuple(tuple(p) for p in value['corners_px']),
+        tuple(value['center_px']), value['image_stamp_sec'], tuple(value['image_shape']),
+        value['expected_symbol_height_px'])
+    fragment = confirm_opposite_endpoint(seed, outline, now_sec=case['now_sec'])
+    proof = StoppedTargetReconciliation().observe(**case['row'], fragmentation=fragment)
+    options = dict(case['row']['options'], scan=case['scan'], scan_from_map=case['scan_from_map'],
+        camera_from_map=case['camera_from_map'], intrinsics=case['intrinsics'], model_profile=case['model'],
+        image_stamp_sec=case['row']['image_stamp_sec'], sync_tolerance_sec=.1,
+        target_reconciliation=proof, fragmentation=fragment, now_sec=case['now_sec'], max_scan_age_sec=.5)
+    search = current_scan_qr_search(**options)
+    support_options = {k: v for k, v in options.items()
+        if k not in ('scan_from_map', 'camera_from_map', 'sync_tolerance_sec')}
+    support = support_opposite_qr_outline(outline, attempt=search[0],
+        image_shape=kwargs['frame'].shape[:2], scan_from_camera=case['scan_from_camera'], **support_options)
+    assert support is not None
+    attempt, crop = exclusive_identity_crop(candidate_uid=adapter.args.stand_id,
+        snapshot=case['snapshot'], support=support, search_result=search, **options)
+    assert attempt is not None and crop['sampling'] == 'isolated_current_qr_quad'
+    return attempt, crop, support, proof
+
+
+def _legacy_decode(endpoint, crop, support, **overrides):
+    case, adapter, _, kwargs, _ = endpoint
+    options = dict(calibration=case['calibration'], calibration_profile=adapter.calibration,
+        intrinsics=case['intrinsics'], support=support, crop=crop,
+        image_stamp_sec=case['row']['image_stamp_sec'], max_elapsed_sec=.12)
+    options.update(overrides)
+    return opposite_raw_qr.decode_opposite_raw_qr(kwargs['raw_frame'], cv2, **options)
+
+
+def _legacy_payload(endpoint):
+    """Seal an old-style receipt without invoking current camera processing."""
+    case, adapter, _, kwargs, _ = endpoint
+    attempt, crop, support, proof = _legacy_crop(endpoint)
+    observations = _legacy_decode(endpoint, crop, support)
+    assert len(observations) == 1 and observations[0].text == 'Start'
+    binding = bind_crop_text(observations, crop)
+    adapter._pending_qr_observation_pose = prepare_qr_observation_pose(qr_binding=binding,
+        qr_observations=observations, observed_qr_texts=('Start',),
+        image_stamp_sec=case['row']['image_stamp_sec'], scan_stamp_sec=case['scan'].scan_stamp_sec,
+        robot_pose=case['robot_pose'], target_key=adapter._target_evidence_key(),
+        camera_signature=kwargs['camera_signature'], image_shape=kwargs['frame'].shape,
+        roi=attempt.roi, model_profile_sha256=case['model'].sha256, metadata={},
+        retained_backside_orientation=case['orientation'], arrival_target_reconciliation=proof)
+    adapter._record_observation_frame(robot_pose=case['robot_pose'],
+        image_stamp_sec=case['row']['image_stamp_sec'], scan_stamp_sec=case['scan'].scan_stamp_sec,
+        observed_at_sec=case['now_sec'], lidar_associated=True, axis_yaw_rad=None, axis_source=None,
+        qr_texts=binding.qr_texts_for_evidence, qr_symbol_count=1)
+    assert commit_qr_observation_pose(adapter) is not None
+    return deepcopy(_bound_load(case, adapter))
 
 
 def _bound_load(case, adapter):
@@ -114,6 +189,7 @@ def test_original_opposite_frame_commits_current_qr_and_roundtrips_retained_geom
     opposite_identity.process_opposite_identity(adapter, **kwargs)
     assert len(calls) == 1
     assert calls[0]["kind"] == "retained_opposite_current_qr_endpoint_confirmation"
+    assert calls[0]['outline']['policy'] == HEAD_REGION_POLICY
     proof = adapter._current_position_epoch_proof
     validate_reconciliation(proof, candidate_uid=adapter.args.stand_id,
         image_stamp_sec=case["row"]["image_stamp_sec"], scan_stamp_sec=case["scan"].scan_stamp_sec)
@@ -130,6 +206,10 @@ def test_original_opposite_frame_commits_current_qr_and_roundtrips_retained_geom
     qr = _bound_load(case, adapter)
     assert qr["qr_id"] == "Start" and qr["motion_authorized"] is False and qr["facing_ready"] is False
     assert qr["retained_backside_orientation"] == case["orientation"]
+    crop = qr['qr_binding']['current_head_binding']
+    assert crop['sampling'] == 'masked_current_head_region'
+    assert crop['target_support']['policy'] == HEAD_POLICY
+    assert 'raw_pixel_binding' not in crop and qr['qr_corners_px'] is None
     assert qr["arrival_target_reconciliation"]["entries"][0]["scan"]["scan_stamp_sec"] == case["scan"].scan_stamp_sec
     rec = build_retained_facing(adapter.args.qr_observation_pose_json,
         stand_radius_m=case["snapshot"].candidate_for(adapter.args.stand_id).geometry.radius_m, target_distance_m=.4)
@@ -147,9 +227,9 @@ def test_original_opposite_frame_commits_current_qr_and_roundtrips_retained_geom
     assert load_recommendation(path) == projected
 
 
-def test_missing_current_outline_cannot_admit_hint_or_decode_identity(endpoint, monkeypatch):
+def test_missing_current_head_cannot_admit_hint_or_decode_identity(endpoint, monkeypatch):
     _, adapter, _, kwargs, calls = endpoint
-    monkeypatch.setattr(opposite_identity, "detect_opposite_qr_outline", lambda *a, **k: None)
+    monkeypatch.setattr(opposite_identity, "detect_opposite_head_region", lambda *a, **k: None)
     opposite_identity.process_opposite_identity(adapter, **kwargs)
     assert calls == []
     assert getattr(adapter, "_current_position_epoch_proof", None) is None
@@ -159,17 +239,61 @@ def test_missing_current_outline_cannot_admit_hint_or_decode_identity(endpoint, 
     assert not adapter.args.qr_observation_pose_json.exists()
 
 
-def test_outline_work_that_outlives_current_tuple_cannot_admit_endpoint(endpoint, monkeypatch):
+def test_current_head_endpoint_path_never_constructs_native_qr_outline_detector(endpoint, monkeypatch):
+    _, adapter, _, kwargs, calls = endpoint
+    def forbidden(*args, **options):
+        raise AssertionError('camera exploration requested QR outline detection')
+    monkeypatch.setattr(cv2, 'QRCodeDetector', forbidden)
+    opposite_identity.process_opposite_identity(adapter, **kwargs)
+    assert len(calls) == 1 and calls[0]['outline']['policy'] == HEAD_REGION_POLICY
+    assert adapter._pending_qr_observation_pose.qr_binding.qr_texts_for_evidence == ('Start',)
+    assert commit_qr_observation_pose(adapter) is not None
+
+
+@pytest.mark.parametrize('texts', [(), ('Start', 'QR_003')])
+def test_endpoint_support_cannot_replace_missing_or_conflicting_payload(endpoint, monkeypatch, texts):
+    _, adapter, _, kwargs, calls = endpoint
+    monkeypatch.setattr(opposite_identity, 'detect_qr_observations_bgr',
+        lambda *a, **kw: tuple(DecodedQrObservation(t, None, 'payload_only_fixture', 4.) for t in texts))
+    opposite_identity.process_opposite_identity(adapter, **kwargs)
+    assert len(calls) == 1
+    assert not adapter._pending_qr_observation_pose.qr_binding.accepted
+    assert commit_qr_observation_pose(adapter) is None
+    assert not adapter.args.qr_observation_pose_json.exists()
+
+
+@pytest.mark.parametrize('tamper', ['image_stamp', 'gap_coverage'])
+def test_current_head_endpoint_requires_same_tuple_and_visual_gap_coverage(endpoint, monkeypatch, tamper):
+    _, adapter, _, kwargs, calls = endpoint
+    detect = opposite_identity.detect_opposite_head_region
+    def changed_region(*args, **options):
+        region = detect(*args, **options)
+        assert region is not None
+        if tamper == 'image_stamp':
+            return replace(region, image_stamp_sec=region.image_stamp_sec-.01)
+        return replace(region, corners_px=tuple((x+25., y) for x, y in region.corners_px),
+            full_image_center_px=(region.full_image_center_px[0]+25., region.full_image_center_px[1]))
+    monkeypatch.setattr(opposite_identity, 'detect_opposite_head_region', changed_region)
+    opposite_identity.process_opposite_identity(adapter, **kwargs)
+    assert calls == []
+    reason = adapter._capture_pending['detector_metadata']['endpoint_confirmation']['reason']
+    assert ('differs from its current calibrated hint' if tamper == 'image_stamp'
+            else 'does not span both scan gap endpoints') in reason
+    assert commit_qr_observation_pose(adapter) is None
+    assert not adapter.args.qr_observation_pose_json.exists()
+
+
+def test_head_work_that_outlives_current_tuple_cannot_admit_endpoint(endpoint, monkeypatch):
     case, adapter, clock, kwargs, calls = endpoint
-    detect = opposite_identity.detect_opposite_qr_outline
+    detect = opposite_identity.detect_opposite_head_region
 
     def delayed(*args, **options):
-        outline = detect(*args, **options)
-        assert outline is not None
+        region = detect(*args, **options)
+        assert region is not None
         clock.clock_sec = case["row"]["image_stamp_sec"] + .6
-        return outline
+        return region
 
-    monkeypatch.setattr(opposite_identity, "detect_opposite_qr_outline", delayed)
+    monkeypatch.setattr(opposite_identity, "detect_opposite_head_region", delayed)
     opposite_identity.process_opposite_identity(adapter, **kwargs)
     assert calls == []
     assert getattr(adapter, "_current_position_epoch_proof", None) is None
@@ -198,7 +322,7 @@ def test_ready_current_qr_still_cannot_publish_after_source_expiry(endpoint):
     assert adapter._last_camera_publication_freshness["accepted"] is False
 
 
-def test_endpoint_proof_cannot_produce_rectangular_identity_crop_without_its_outline(endpoint):
+def test_endpoint_proof_cannot_produce_rectangular_identity_crop_without_its_head(endpoint):
     case, adapter, _, kwargs, calls = endpoint
     opposite_identity.process_opposite_identity(adapter, **kwargs)
     assert len(calls) == 1
@@ -214,7 +338,7 @@ def test_endpoint_proof_cannot_produce_rectangular_identity_crop_without_its_out
     attempt, evidence = exclusive_identity_crop(candidate_uid=adapter.args.stand_id,
         snapshot=case["snapshot"], support=None, search_result=search, **options)
     assert attempt is None and evidence["accepted"] is False
-    assert evidence["reason"] == "endpoint confirmation requires its isolated current QR support"
+    assert evidence["reason"] == "endpoint confirmation requires its masked current head support"
 
 
 @pytest.mark.parametrize("tamper", ("remove_support", "different_valid_quad"))
@@ -227,11 +351,11 @@ def test_persisted_endpoint_receipt_rejects_crop_rebinding_even_with_new_hash(en
     if tamper == "remove_support":
         crop.pop("target_support")
         crop["sampling"] = "rectangular_crop"
-        reason = "endpoint confirmation requires its isolated current QR support"
+        reason = "endpoint confirmation requires its masked current head support"
     else:
         support = crop["target_support"]
         # A tiny, symmetric change preserves the same calibrated center and
-        # valid target ray. It still is not the exact outline that proved the
+        # valid target ray. It still is not the exact head region that proved the
         # endpoints, so a producer cannot substitute it at the file boundary.
         delta = 1 / 1024
         support["corners_px"] = [
@@ -240,7 +364,7 @@ def test_persisted_endpoint_receipt_rejects_crop_rebinding_even_with_new_hash(en
                 ((1, 1), (-1, 1), (-1, -1), (1, -1)))
         ]
         validate_target_support(support)
-        reason = "endpoint confirmation differs from the isolated current QR outline"
+        reason = "endpoint confirmation differs from the current head region"
     payload.pop(HASH_FIELD)
     forged = content_hashed_payload(payload, hash_field=HASH_FIELD)
     with pytest.raises(ValueError, match=reason):
@@ -249,10 +373,7 @@ def test_persisted_endpoint_receipt_rejects_crop_rebinding_even_with_new_hash(en
 
 @pytest.mark.parametrize("tamper", ("projection", "stamp", "other_quad", "missing_corners"))
 def test_persisted_raw_payload_binding_replays_calibration_stamp_and_own_corners(endpoint, tamper):
-    case, adapter, _, kwargs, _ = endpoint
-    opposite_identity.process_opposite_identity(adapter, **kwargs)
-    assert commit_qr_observation_pose(adapter) is not None
-    payload = deepcopy(_bound_load(case, adapter))
+    payload = _legacy_payload(endpoint)
     crop = payload["qr_binding"]["current_head_binding"]
     raw = crop["raw_pixel_binding"]
     assert raw["qr_id"] == "Start"
@@ -277,8 +398,8 @@ def test_persisted_raw_payload_binding_replays_calibration_stamp_and_own_corners
 
 
 @pytest.mark.parametrize("tamper", ("missing_corners", "other_quad", "backend_error"))
-def test_raw_decoder_cannot_admit_unbound_payload_or_native_failure(endpoint, monkeypatch, tamper):
-    _, adapter, _, kwargs, calls = endpoint
+def test_legacy_raw_decoder_rejects_unbound_payload_or_native_failure(endpoint, monkeypatch, tamper):
+    _, crop, support, _ = _legacy_crop(endpoint)
     decode = opposite_raw_qr.detect_qr_observations_bgr
 
     def invalid_native_result(*args, **options):
@@ -291,12 +412,8 @@ def test_raw_decoder_cannot_admit_unbound_payload_or_native_failure(endpoint, mo
         return (replace(observations[0], corners=changed),)
 
     monkeypatch.setattr(opposite_raw_qr, "detect_qr_observations_bgr", invalid_native_result)
-    opposite_identity.process_opposite_identity(adapter, **kwargs)
-    assert len(calls) == 1  # The actual current endpoint proof still succeeded.
-    assert not adapter._pending_qr_observation_pose.qr_binding.accepted
-    assert adapter._qr_observation_pose_ready is None
-    assert commit_qr_observation_pose(adapter) is None
-    assert not adapter.args.qr_observation_pose_json.exists()
+    assert _legacy_decode(endpoint, crop, support) == ()
+    assert 'raw_pixel_binding' not in crop
 
 
 def _changed_calibration(calibration, field):
@@ -317,29 +434,26 @@ def _changed_calibration(calibration, field):
 
 @pytest.mark.parametrize("field", ("projection_matrix", "camera_matrix", "distortion",
     "rectification_matrix", "sealed_profile"))
-def test_raw_decoder_rejects_changed_calibration_before_decoding(endpoint, monkeypatch, field):
-    case, adapter, _, kwargs, calls = endpoint
+def test_legacy_raw_decoder_rejects_changed_calibration_before_decoding(endpoint, monkeypatch, field):
+    case, adapter, _, _, _ = endpoint
+    _, crop, support, _ = _legacy_crop(endpoint)
+    options = {}
     if field == "sealed_profile":
         adapter.calibration = replace(adapter.calibration, source="untrusted replacement calibration")
     else:
-        kwargs["camera_calibration"] = _changed_calibration(case["calibration"], field)
+        options['calibration'] = _changed_calibration(case["calibration"], field)
     def unexpected_decode(*args, **options):
         raise AssertionError("mismatched calibration reached QR decoding")
     monkeypatch.setattr(opposite_raw_qr, "detect_qr_observations_bgr", unexpected_decode)
-    opposite_identity.process_opposite_identity(adapter, **kwargs)
-    assert len(calls) == 1
-    assert not adapter._pending_qr_observation_pose.qr_binding.accepted
-    assert commit_qr_observation_pose(adapter) is None
+    assert _legacy_decode(endpoint, crop, support, **options) == ()
+    assert 'raw_pixel_binding' not in crop
 
 
 @pytest.mark.parametrize("field", ("camera_matrix", "distortion", "rectification_matrix"))
 @pytest.mark.parametrize("replace_sealed_profile", (False, True))
 def test_rehashed_coherent_raw_calibration_substitution_cannot_change_sealed_source(
         endpoint, field, replace_sealed_profile):
-    case, adapter, _, kwargs, _ = endpoint
-    opposite_identity.process_opposite_identity(adapter, **kwargs)
-    assert commit_qr_observation_pose(adapter) is not None
-    payload = deepcopy(_bound_load(case, adapter))
+    payload = _legacy_payload(endpoint)
     crop = payload["qr_binding"]["current_head_binding"]
     raw = crop["raw_pixel_binding"]
     calibration = _changed_calibration(CameraCalibration(**raw["calibration"]), field)

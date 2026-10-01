@@ -54,17 +54,30 @@ def prepare_bounded_head(*, estimate, debug, association, crop, appearance_crop,
         metadata["bounded_orientation_rejection"] = "current_head_scan_or_bounds_binding_mismatch"
         return None
     texts = qr_binding.qr_texts_for_evidence
+    identity_crop = qr_binding.current_head_binding or {}
+    head_identity = identity_crop.get('sampling') == 'masked_current_head_region'
     front = (qr_binding.accepted and qr_binding.reason == "decoded_qr_target_associated"
-             and qr_binding.symbol_count == 1 and len(texts) == 1 and marker_verified is True)
+             and qr_binding.symbol_count == 1 and len(texts) == 1
+             and (marker_verified is True or head_identity))
     appearance = getattr(debug, "head_backside_appearance", None)
     backside = (not marker_seen_in_epoch and not texts and not marker_verified
                 and debug.qr_detected is False and debug.qr_marker_verified is False
                 and appearance_crop.accepted is True and appearance is not None
                 and appearance.accepted is True and appearance.supplies_angle is False)
-    if not front and not backside:
+    attempt = metadata.get('current_head_identity') or {}
+    unidentified = (not marker_seen_in_epoch and not texts and not marker_verified
+        and debug.qr_detected is None and debug.qr_marker_verified is None
+        and appearance is not None
+        and appearance.accepted is True and appearance.supplies_angle is False
+        and appearance.basis == 'current_raw_head_identity_unresolved'
+        and attempt.get('attempted') is True and attempt.get('accepted_crop') is True
+        and attempt.get('decoded_texts') == []
+        and attempt.get('image_stamp_sec') == image_stamp_sec
+        and attempt.get('scan_stamp_sec') == scan_stamp_sec)
+    if not front and not backside and not unidentified:
         return None
     registration = None
-    if backside:
+    if backside or unidentified:
         try:
             registration = build_backside_target_registration_evidence(
                 final_head_center_error_ratio=appearance.head_center_error_ratio,
@@ -81,7 +94,8 @@ def prepare_bounded_head(*, estimate, debug, association, crop, appearance_crop,
         camera_yaw_rad=proof.center_rad, camera_heading_rad=camera_heading_rad)
     sample = BoundedHeadSample(
         image_stamp_sec, axis, proof.half_width_rad, estimate.model_profile_sha256,
-        camera_signature, "front" if front else "backside", texts[0] if front else None,
+        camera_signature, "front" if front else "unidentified" if unidentified else "backside",
+        texts[0] if front else None,
         tuple((p.u_px + roi.x0, p.v_px + roi.y0) for p in estimate.corners),
         projected_center_px, expected_head_height_px)
     # Proofs travel with the current sample, independently of the diagnostic
@@ -117,7 +131,7 @@ def record_bounded_head(adapter, *, update, image_stamp_sec, observed_at_sec):
     if current.sample.face == "front":
         if update.resolved_qr_id != current.sample.qr_id:
             return
-    else:
+    elif current.sample.face == 'backside':
         backside = (getattr(adapter, "_head_confidence_metadata", None) or {}).get("backside", {})
         if (backside.get("state") != "backside_supported"
                 or backside.get("current_sample_accepted") is not True):
@@ -160,7 +174,9 @@ def commit_bounded_head(adapter):
                 return None
             snapshot, appearance = update.snapshot, current.appearance
             registration = current.registration
-            confidence = adapter._head_confidence_metadata["backside"]["confidence"]
+            unidentified = sample.face == 'unidentified'
+            confidence = (appearance.confidence if unidentified
+                          else adapter._head_confidence_metadata["backside"]["confidence"])
             payload = build_backside_axis_observation(
                 target_reconciliation=current.target_reconciliation,
                 head_position_evidence=current.head_position_evidence,
@@ -174,7 +190,8 @@ def commit_bounded_head(adapter):
                 estimate_source=BACKSIDE_AXIS_SAMPLE_SOURCE,
                 estimate_evidence_state=BACKSIDE_MODEL_EVIDENCE_STATE,
                 estimate_visible_face=BACKSIDE_VISIBLE_FACE, visible_face_confidence=confidence,
-                debug_qr_detected=False, qr_texts=(),
+                debug_qr_detected=None if unidentified else False, qr_texts=(),
+                identity_unresolved=unidentified,
                 evidence_qr_sample_count=snapshot.current_qr_sample_count,
                 evidence_tentative_qr_id=snapshot.tentative_qr_id,
                 evidence_latched_qr_id=snapshot.latched_qr_id,
@@ -209,7 +226,7 @@ def commit_bounded_head(adapter):
                                           scan_stamp_sec=current.scan_stamp_sec, artifact_kind=kind):
         return None
     adapter.completed = True
-    if sample.face == "backside":
+    if sample.face in {"backside", "unidentified"}:
         adapter.axis_observation_committed = True
     return state, {kind: str(output), "axis_sample_count": bounds["sample_count"],
                    "bounded_orientation": bounds, "single_angle_confidence_claimed": False}

@@ -1,4 +1,8 @@
-"""Current QR outline and range support; no payload, head pose, or angle fit."""
+"""Shared current range support and legacy QR-outline receipt compatibility.
+
+Camera exploration uses physical head regions from opposite_head_support.
+Historical outline producers remain readable without changing their policy.
+"""
 from dataclasses import asdict, dataclass
 import math
 import time
@@ -86,21 +90,26 @@ class OppositeTargetSupport:
 
 def validate_target_support(value):
     """Validate the persisted current-source proof, including its pixel extent."""
-    if not isinstance(value, dict) or value.get('policy') != POLICY or value.get('accepted') is not True:
+    from scripts.aufgabe04.real_robot.observer.opposite_head_support import (
+        HEAD_POLICY, validate_head_support_geometry,
+    )
+    if not isinstance(value, dict) or value.get('policy') not in (POLICY, HEAD_POLICY) or value.get('accepted') is not True:
         raise ValueError('current opposite QR support missing')
+    head_region = value['policy'] == HEAD_POLICY
     shape = value.get('image_shape')
     if not isinstance(shape, (tuple, list)) or len(shape) != 2 or any(type(v) is not int or v <= 0 for v in shape):
         raise ValueError('opposite QR image shape invalid')
-    corners = validated_qr_corners(value.get('corners_px'), image_shape=shape)
+    corners = (validate_head_support_geometry(value) if head_region else
+               validated_qr_corners(value.get('corners_px'), image_shape=shape))
     if corners is None:
         raise ValueError('opposite QR outline is incomplete')
-    height = value.get('expected_symbol_height_px')
+    height = value.get('expected_head_height_px' if head_region else 'expected_symbol_height_px')
     depth = value.get('depth_m')
     stamp = value.get('image_stamp_sec')
     if any(type(v) not in (int, float) or not math.isfinite(v) for v in (height, depth, stamp)) or min(height, depth) <= 0:
         raise ValueError('opposite QR scale/depth invalid')
     edges = [math.dist(corners[i], corners[(i+1)%4]) for i in range(4)]
-    if not .6*height <= min(edges) or max(edges) > 1.4*height:
+    if not head_region and (not .6*height <= min(edges) or max(edges) > 1.4*height):
         raise ValueError('opposite QR outline does not match target scale')
     center = tuple(sum(p[k] for p in corners)/4 for k in (0, 1))
     if tuple(value.get('center_px', ())) != center:
@@ -256,7 +265,8 @@ def _registration_context(*, scan, image_stamp_sec, now_sec, map_bearing_rad,
 
 def _support_for_outline(outline, *, intrinsics, scan_from_camera, scan,
         now_sec, cone_half_angle_rad, accepted_range_m, max_scan_age_sec,
-        target_reconciliation, registration, diagnostics):
+        target_reconciliation, registration, diagnostics,
+        support_factory=OppositeTargetSupport):
     envelope, reference, limit, association_range = registration
     try:
         bearing, uncertainty, depth = finite_target_bearing(center_px=outline.full_image_center_px,
@@ -274,8 +284,11 @@ def _support_for_outline(outline, *, intrinsics, scan_from_camera, scan,
         min_cluster_sample_count=1, max_camera_map_bearing_delta_rad=limit)
     lidar = bind_ray_to_envelope(lidar, scan, envelope,
         now_sec=now_sec, max_scan_age_sec=max_scan_age_sec)
-    support = OppositeTargetSupport(outline.corners_px, outline.full_image_center_px, lidar,
-        outline.image_stamp_sec, outline.image_shape, outline.expected_symbol_height_px,
+    height = getattr(outline, 'expected_head_height_px', None)
+    if height is None:
+        height = outline.expected_symbol_height_px
+    support = support_factory(outline.corners_px, outline.full_image_center_px, lidar,
+        outline.image_stamp_sec, outline.image_shape, height,
         depth, target_reconciliation,
         dict(intrinsics=asdict(intrinsics), scan_from_camera=asdict(scan_from_camera)))
     try:

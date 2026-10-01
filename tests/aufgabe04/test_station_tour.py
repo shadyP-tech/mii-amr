@@ -112,10 +112,10 @@ class StationTourTests(unittest.TestCase):
     def read_summary(self):
         return json.loads((self.output / "summary.json").read_text())
 
-    def test_verified_start_precedes_one_randomization_and_every_report(self):
+    def test_validated_server_plan_precedes_start_and_every_report_requires_arrival(self):
         summary = self.run_tour(cover_all_stands=False)
-        self.assertEqual(self.events[0][:3], ("navigate", "Start", 0))
-        self.assertEqual(self.events[1], ("randomize", 4, 3))
+        self.assertEqual(self.events[:2], [("randomize", 4, 3), ("get_mappings",)])
+        self.assertEqual(self.events[2][:3], ("navigate", "Start", 0))
         self.assertEqual(sum(event[0] == "randomize" for event in self.events), 1)
         self.assertEqual(summary["qr_visit_order"], ["Start", "QR_003", "QR_001", "QR_003", "Start"])
         self.assertEqual(summary["completed_visits"], 5)
@@ -138,18 +138,49 @@ class StationTourTests(unittest.TestCase):
         tail = [event for event in self.events if event[0] == "navigate"][-3:]
         self.assertEqual([event[2] for event in tail], [5, 6, 7])
 
-    def test_failed_start_does_not_randomize_or_report(self):
+    def test_failed_start_leaves_created_plan_but_never_reports_arrival(self):
         with self.assertRaises(StationTourError):
             self.run_tour(navigate=lambda qr, index: {"arrival_verified": False, "qr_id": qr})
-        self.assertEqual(self.events, [])
-        self.assertFalse(self.read_summary()["randomization_attempted"])
+        self.assertEqual(self.events, [("randomize", 4, 3), ("get_mappings",)])
+        self.assertTrue(self.read_summary()["randomization_attempted"])
+        self.assertTrue(self.read_summary()["randomization_completed"])
+        self.assertEqual(self.client.reported, [])
+        self.assertTrue((self.output / "frozen_plan.json").exists())
 
     def test_arrival_requires_explicit_matching_qr(self):
         for arrival in ({"arrival_verified": True}, {"arrival_verified": True, "qr_id": "wrong"}):
             with self.subTest(arrival=arrival), tempfile.TemporaryDirectory() as temporary:
                 with self.assertRaises(StationTourError):
                     self.run_tour(output_root=Path(temporary)/"run", navigate=lambda qr, index: arrival)
-        self.assertFalse(any(event[0] == "randomize" for event in self.events))
+        self.assertFalse(any(event[0] == "report" for event in self.events))
+
+    def test_server_randomization_failure_never_starts_navigation_or_retries(self):
+        def failed(**request):
+            self.events.append(("randomize", request["qr_count"], request["stations"]))
+            raise StationTourHttpError("plan service unavailable", write_outcome_unknown=True)
+        self.client.randomize_plan = failed
+        messages = []
+        with self.assertRaisesRegex(StationTourHttpError, "unavailable"):
+            self.run_tour(progress=messages.append)
+        self.assertEqual(self.events, [("randomize", 4, 3)])
+        self.assertEqual(self.client.reported, [])
+        self.assertTrue(self.read_summary()["write_outcome_unknown"])
+        self.assertFalse(self.read_summary()["randomization_completed"])
+        self.assertIn("POST /api/v1/robots/robot/plan/randomize", messages[0])
+        self.assertIn("plan service unavailable", messages[-1])
+
+    def test_malformed_initial_plan_or_mappings_never_starts_navigation(self):
+        for failure in ("plan", "mappings"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                client = FakeClient(self.events)
+                if failure == "plan":
+                    client.plan["expanded_path"][1] = "UNKNOWN"
+                else:
+                    client.get_qr_mappings = lambda: []
+                with self.assertRaises(StationTourError):
+                    self.run_tour(client=client, output_root=Path(folder)/"server")
+                self.assertFalse(any(event[0] == "navigate" for event in self.events))
+                self.assertEqual(client.reported, [])
 
     def test_malformed_saved_identity_set_has_no_side_effect(self):
         for ids in (QR_IDS[:-1], (*QR_IDS, "QR_004"), ("Start", "QR001", "QR002", "QR003", "QR004")):
@@ -167,6 +198,23 @@ class StationTourTests(unittest.TestCase):
         next_arrival = next(event for event in self.events if event[:3] == ("navigate", "QR_003", 1))
         self.assertEqual(next_arrival[3], start_time+12)
         self.assertEqual(sum(self.clock.waits), 12)
+
+    def test_progress_reports_requests_validated_target_and_dwell_in_order(self):
+        messages = []
+        self.client.responses[0]["actions"] = [{"type": "pickup_material", "duration_s": 4}]
+        self.run_tour(cover_all_stands=False, progress=messages.append)
+        plan = next(i for i, text in enumerate(messages) if "Server plan validated" in text)
+        start = messages.index("Arrival verified: Start (visit 0).")
+        target = messages.index("Server accepted Start; next target: QR_003.")
+        hold = next(i for i, text in enumerate(messages) if "Waiting 4.0 s at Start" in text)
+        finished = messages.index("Server action wait complete at Start.")
+        onward = messages.index("Arrival verified: QR_003 (visit 1).")
+        self.assertLess(plan, start)
+        self.assertLess(start, target)
+        self.assertLess(target, hold)
+        self.assertLess(hold, finished)
+        self.assertLess(finished, onward)
+        self.assertEqual(messages[-1], "Station tour completed.")
 
     def test_invalid_action_or_wait_failure_never_departs(self):
         self.client.responses[0]["actions"] = [{"type": "pickup_material", "duration_s": 5}]
@@ -204,6 +252,7 @@ class StationTourTests(unittest.TestCase):
         with self.assertRaisesRegex(StationTourError, "requested fresh production"):
             self.run_tour()
         self.assertEqual(self.client.reported, [])
+        self.assertFalse(any(event[0] == "navigate" for event in self.events))
 
     def test_mutated_mapping_stops_even_if_both_endpoints_agree(self):
         original = self.client.get_plan

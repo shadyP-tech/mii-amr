@@ -32,6 +32,7 @@ def detect_qr_observations_bgr(
     prefer_native_geometry: bool = False,
     resources=None,
     preferred_scale: int | None = None,
+    identity_only: bool = False,
 ) -> tuple[DecodedQrObservation, ...]:
     """Share text and corners from the same decoder and bounded preprocessing.
 
@@ -46,6 +47,11 @@ def detect_qr_observations_bgr(
     binding; it never substitutes the head rectangle for QR corners.
     Optional single-owner resources retain backend instances and bounded cost
     forecasts across calls, never pixels, payloads, corners or symbol counts.
+    ``identity_only`` returns the first nonempty payload batch without asking
+    for QR corners or trying isolated-quad recovery. It takes precedence over
+    ``prefer_native_geometry``; association must already be provided by the
+    caller's current head/LiDAR crop. Multiple decoded symbols stay ambiguous,
+    including symbols with the same text.
     """
     if max_elapsed_sec is not None and (
         type(max_elapsed_sec) not in (int, float)
@@ -65,6 +71,7 @@ def detect_qr_observations_bgr(
     if diagnostics is not None:
         diagnostics["preferred_scale"] = preferred_scale
         diagnostics["search_policy"] = (
+            "identity_only" if identity_only else
             "current_head_native_geometry_first" if prefer_native_geometry else "default"
         )
 
@@ -102,12 +109,15 @@ def detect_qr_observations_bgr(
             scale=scale, border_px=border, runtime=runtime, deferred_single=deferred_single,
             budget_exhausted=exhausted,
             prefer_native_geometry=prefer_native_geometry,
+            identity_only=identity_only,
         ):
             observations = runtime.conservative_observations(observations)
             if not observations:
                 if exhausted():
                     return finish(provisional)
                 continue
+            if identity_only:
+                return finish(observations)
             if len(observations) > 1:
                 return finish(observations)
             if provisional and provisional[0].text != observations[0].text:
@@ -145,8 +155,14 @@ def detect_qr_observations_bgr(
 
 def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
                              runtime=None, deferred_single=None, budget_exhausted=None,
-                             prefer_native_geometry=False):
+                             prefer_native_geometry=False, identity_only=False):
     runtime = runtime if runtime is not None else QrDecoderRuntime(cv2)
+    if identity_only:
+        yield from _identity_observations(
+            candidate, scale=scale, border_px=border_px, runtime=runtime,
+            budget_exhausted=budget_exhausted,
+        )
+        return
     stages = ((_native_observations, _wechat_observations) if prefer_native_geometry
               else (_wechat_observations, _native_observations))
     for stage in stages:
@@ -157,6 +173,40 @@ def _candidate_observations(candidate, cv2, *, image_shape, scale, border_px,
             runtime=runtime, deferred_single=deferred_single,
             budget_exhausted=budget_exhausted, prefer_native_geometry=prefer_native_geometry,
         )
+
+
+def _identity_observations(candidate, *, scale, border_px, runtime, budget_exhausted):
+    # Payload-capable calls only: never seek native QR outlines, inspect their
+    # corners, or warp a quad. Stop at the first successful backend via the
+    # caller's generator loop, preserving every payload returned by that call.
+    for backend, stage, method in (
+        ("wechat", "wechat", "detectAndDecode"),
+        ("native", "opencv_multi", "detectAndDecodeMulti"),
+        ("native", "opencv_single", "detectAndDecode"),
+    ):
+        if budget_exhausted is not None and budget_exhausted():
+            return
+        if not runtime.allow_work(stage, candidate):
+            continue
+        decoder = runtime.decoder(backend)
+        if decoder is None:
+            continue
+        try:
+            result = runtime.run_work(stage, candidate, lambda: getattr(decoder, method)(candidate))
+            if stage == "opencv_multi":
+                decoded = result[1] if len(result) > 1 and result[0] else ()
+            else:
+                decoded = result[0]
+            texts = ((decoded,) if isinstance(decoded, str)
+                     else tuple(decoded) if decoded is not None else ())
+            observations = tuple(
+                DecodedQrObservation(str(raw).strip(), None, stage, float(scale))
+                for raw in texts if raw is not None and str(raw).strip()
+            )
+            runtime.record(stage, scale=scale, border_px=border_px, observations=observations)
+            yield observations
+        except Exception:
+            runtime.record(stage, scale=scale, border_px=border_px, reason="decoder_error")
 
 
 def _wechat_observations(candidate, cv2, *, image_shape, scale, border_px, runtime, **_kwargs):

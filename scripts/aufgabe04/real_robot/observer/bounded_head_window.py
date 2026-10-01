@@ -92,9 +92,9 @@ class BoundedHeadWindow:
                              "sample_count": len(self._samples)}
             return None
         if (not isinstance(sample, BoundedHeadSample)
-                or sample.face not in {"front", "backside"}
+                or sample.face not in {"front", "backside", "unidentified"}
                 or sample.face == "front" and (not sample.qr_id or not update.qr_sample_accepted)
-                or sample.face == "backside" and (sample.qr_id is not None
+                or sample.face in {"backside", "unidentified"} and (sample.qr_id is not None
                     or snapshot.tentative_qr_id is not None or snapshot.latched_qr_id is not None)
                 or type(sample.stamp_sec) not in (int, float)
                 or not math.isfinite(sample.stamp_sec) or sample.stamp_sec < 0

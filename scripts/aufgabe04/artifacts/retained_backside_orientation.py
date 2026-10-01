@@ -22,7 +22,8 @@ def _orientation_record(path):
     path = Path(path).resolve()
     axis = load_backside_axis_frame_projection(path)
     source = json.loads(axis.source_axis_observation_path.read_text())
-    record = dict(policy="certified_backside_orientation_retained", path=str(path),
+    record = dict(policy=("certified_unidentified_head_orientation_retained" if source.get('schema_version') == 5
+                          else "certified_backside_orientation_retained"), path=str(path),
         file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         projection_sha256=axis.projection_sha256,
         candidate_uid=axis.stand_id, planning_frame=axis.planning_frame,

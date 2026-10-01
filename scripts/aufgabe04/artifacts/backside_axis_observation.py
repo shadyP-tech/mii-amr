@@ -29,6 +29,14 @@ PASSIVE_VIEWPOINT_OBSERVER_VERSION = (
 LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 2
 BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 3
 WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION = 4
+UNIDENTIFIED_HEAD_SCHEMA_VERSION = 5
+UNIDENTIFIED_HEAD_SOURCE = "current_measured_head_unidentified"
+UNIDENTIFIED_HEAD_BASIS = "measured_head_geometry_plus_repeated_identity_attempts"
+UNIDENTIFIED_HEAD_SAMPLE_GATES = (
+    "all_samples_stationary", "all_samples_synchronized",
+    "all_samples_lidar_associated", "all_samples_current_frame_model_geometry",
+    "all_samples_identity_attempted", "all_samples_identity_undecoded",
+)
 BACKSIDE_AXIS_OBSERVATION_KIND = "real_stand_backside_axis_without_qr"
 REAL_STAND_AXIS_OBSERVATION_KIND = BACKSIDE_AXIS_OBSERVATION_KIND
 BACKSIDE_AXIS_SAMPLE_SOURCE = "model_backside_current_frame"
@@ -161,8 +169,10 @@ def validated_backside_axis_observation(
         LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
         WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
+        UNIDENTIFIED_HEAD_SCHEMA_VERSION,
     ):
-        raise ValueError("axis observation schema_version must be exactly 2, 3 or 4")
+        raise ValueError("axis observation schema_version must be exactly 2, 3, 4 or 5")
+    unidentified = schema_version == UNIDENTIFIED_HEAD_SCHEMA_VERSION
     is_legacy_receipt = (
         schema_version == LEGACY_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION
     )
@@ -180,7 +190,8 @@ def validated_backside_axis_observation(
             payload.get("target_registration"), "target_registration"
         )
         expected_registration_keys = set(TARGET_REGISTRATION_EVIDENCE_KEYS)
-        if schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION:
+        if (schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION
+                or unidentified and "witnessed_fragmentation" in target_registration):
             expected_registration_keys.add("witnessed_fragmentation")
         if set(target_registration) != expected_registration_keys:
             raise ValueError(
@@ -197,23 +208,23 @@ def validated_backside_axis_observation(
             )
     if payload.get("observation_kind") != BACKSIDE_AXIS_OBSERVATION_KIND:
         raise ValueError("unexpected axis observation kind")
-    if payload.get("visible_face") != BACKSIDE_VISIBLE_FACE:
+    if payload.get("visible_face") != ("unidentified" if unidentified else BACKSIDE_VISIBLE_FACE):
         raise ValueError(
             "axis observation visible_face is not a backside candidate"
         )
-    if payload.get("visible_face_source") != BACKSIDE_AXIS_SAMPLE_SOURCE:
+    if payload.get("visible_face_source") != (UNIDENTIFIED_HEAD_SOURCE if unidentified else BACKSIDE_AXIS_SAMPLE_SOURCE):
         raise ValueError(
             "axis observation visible_face_source is not current-frame"
         )
-    if payload.get("axis_sample_source") != expected_axis_sample_source:
+    if payload.get("axis_sample_source") != (UNIDENTIFIED_HEAD_SOURCE if unidentified else expected_axis_sample_source):
         raise ValueError(
             "axis observation axis_sample_source does not match target registration"
         )
-    if payload.get("model_evidence_state") != BACKSIDE_MODEL_EVIDENCE_STATE:
+    if payload.get("model_evidence_state") != ("fresh_unidentified_head" if unidentified else BACKSIDE_MODEL_EVIDENCE_STATE):
         raise ValueError(
             "axis observation model evidence is not fresh backside"
         )
-    if payload.get("classification_basis") != BACKSIDE_CLASSIFICATION_BASIS:
+    if payload.get("classification_basis") != (UNIDENTIFIED_HEAD_BASIS if unidentified else BACKSIDE_CLASSIFICATION_BASIS):
         raise ValueError(
             "axis observation classification_basis is unsupported"
         )
@@ -225,7 +236,12 @@ def validated_backside_axis_observation(
         raise ValueError(
             "axis observation stand_model_measurement_status must be measured"
         )
-    if payload.get("qr_marker_detected") is not False:
+    if unidentified:
+        if (payload.get("qr_marker_detected", False) is not None
+                or payload.get("visible_face_confidence_basis") != "head_geometry_only"
+                or "qr_absent_sample_count" in payload):
+            raise ValueError("unidentified head must not claim QR absence or known side")
+    elif payload.get("qr_marker_detected") is not False:
         raise ValueError(
             "axis observation must prove qr_marker_detected is false"
         )
@@ -245,6 +261,8 @@ def validated_backside_axis_observation(
         payload.get("axis_confidence"), "axis_confidence"
     )
     bounded_payload = payload.get("bounded_orientation")
+    if unidentified and (bounded_payload is None or payload.get("axis_sample_count", 0) < 7):
+        raise ValueError("unidentified head requires seven current bounded orientation samples")
     minimum_axis_confidence = MINIMUM_BACKSIDE_AXIS_CONFIDENCE if bounded_payload is None else 0.0
     if not minimum_axis_confidence <= axis_confidence <= 1.0:
         raise ValueError(
@@ -266,7 +284,7 @@ def validated_backside_axis_observation(
             expected_sample_count=axis_sample_count,
             allow_coarse_front=False,
         )
-    qr_absent_sample_count = payload.get("qr_absent_sample_count")
+    qr_absent_sample_count = payload.get("identity_undecoded_sample_count" if unidentified else "qr_absent_sample_count")
     if (
         type(qr_absent_sample_count) is not int
         or qr_absent_sample_count != axis_sample_count
@@ -278,11 +296,12 @@ def validated_backside_axis_observation(
     gates = _mapping(
         payload.get("sample_gate_evidence"), "sample_gate_evidence"
     )
-    if set(gates) != set(BACKSIDE_SAMPLE_GATE_KEYS):
+    gate_keys = UNIDENTIFIED_HEAD_SAMPLE_GATES if unidentified else BACKSIDE_SAMPLE_GATE_KEYS
+    if set(gates) != set(gate_keys):
         raise ValueError(
             "axis observation sample_gate_evidence has unexpected fields"
         )
-    for gate in BACKSIDE_SAMPLE_GATE_KEYS:
+    for gate in gate_keys:
         if gates.get(gate) is not True:
             raise ValueError(
                 f"axis observation sample_gate_evidence.{gate} must be true"
@@ -318,12 +337,14 @@ def validated_backside_axis_observation(
             "axis observation head_center_error_ratio must be in [0, 0.55]"
         )
     if target_registration is not None:
+        witnessed = (schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION
+                     or unidentified and "witnessed_fragmentation" in target_registration)
         _validate_target_registration(
             target_registration,
             final_head_center_error_ratio=head_center_error_ratio,
-            witnessed=schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION,
+            witnessed=witnessed,
         )
-        if schema_version == WITNESSED_BACKSIDE_AXIS_OBSERVATION_SCHEMA_VERSION:
+        if witnessed:
             from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND
 
             proof = target_registration["witnessed_fragmentation"]

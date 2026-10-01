@@ -219,7 +219,7 @@ class QrObservationPoseTests(unittest.TestCase):
             PassiveRealViewpointNode._write_status(self.adapter, "collecting_consensus")
         self.assertIsNone(self.result())
 
-    def test_processing_head_acquisition_failure_still_commits_current_qr_pose(self):
+    def test_processing_head_acquisition_failure_never_decodes_a_search_region(self):
         import cv2
         adapter = self.adapter
         adapter.cv2 = cv2  # Current producer also builds the rectification support mask.
@@ -282,17 +282,12 @@ class QrObservationPoseTests(unittest.TestCase):
             self.assertTrue(all(not any(key.startswith("expected_head_") for key in call.kwargs)
                                 for call in estimator.call_args_list))
             acquire.assert_not_called()
-            self.assertEqual(native.call_count, 2)
-            self.assertEqual(decoder.call_count, 2)
-            self.assertTrue(all(call.kwargs["max_elapsed_sec"] <= .12 for call in decoder.call_args_list))
-            self.assertTrue(all(call.args[0].shape[0] < frame.shape[0] and
-                                call.args[0].shape[1] < frame.shape[1] for call in decoder.call_args_list))
-        self.assertIsNotNone(self.result(), json.loads(adapter.args.status_json.read_text()))
-        self.assertEqual(self.result()["sensor_stamp_sec"], 102.)
-        self.assertIsNone(self.result()["stand_axis_rad"])
-        self.assertFalse(self.result()["facing_ready"])
-        self.assertFalse(self.result()["motion_authorized"])
-        self.assertEqual(self.result()["completion_scope"], "discovery_only")
+            native.assert_not_called()
+            decoder.assert_not_called()
+        self.assertIsNone(self.result())
+        status = json.loads(adapter.args.status_json.read_text())
+        self.assertEqual(status["stand_axis_debug"]["metric_model"]["current_head_identity"]["reason"],
+                         "current_complete_associated_head_required")
         self.assertEqual(adapter._last_observation_update.snapshot.current_axis_sample_count, 0)
 
     def test_usable_but_wrongly_associated_head_cannot_block_independent_qr(self):

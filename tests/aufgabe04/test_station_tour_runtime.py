@@ -103,8 +103,38 @@ class StationTourRuntimeTest(unittest.TestCase):
     def test_explicit_drive_to_start_allows_initial_navigation(self):
         self._assert_execute_start_policy(drive_to_start=True)
 
-    def test_unverified_start_handoff_prevents_all_server_requests(self):
+    def test_unverified_start_handoff_follows_plan_requests_but_prevents_arrival_reports(self):
         self._assert_execute_start_policy(drive_to_start=False, fail_handoff=True)
+
+    def test_declined_run_has_no_localization_navigation_or_server_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(drive_to_start=False)
+            effects = Mock()
+            with patch.object(runtime, "build_navigation_effects", return_value=effects) as build, \
+                 patch("builtins.input", return_value="STOP"), \
+                 patch("scripts.aufgabe04.task_client.station_tour_client.StationTourClient") as client, \
+                 patch("scripts.aufgabe04.navigation.execution.mission_leg_motion_permit.write_mission_leg_motion_authorization") as authorize, \
+                 redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "did not authorize"):
+                runtime.execute_tour(self.session(), args, Path(directory), "tour_test")
+            build.assert_not_called()
+            effects.admit_planning_frame.assert_not_called()
+            effects.run_motion_leg.assert_not_called()
+            client.assert_not_called()
+            authorize.assert_not_called()
+
+    def test_invalid_source_artifacts_fail_before_run_and_server_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("scripts.aufgabe04.real_robot.mission.stored_pose_session.load_stored_pose_session",
+                       side_effect=ValueError("source hash changed")), \
+                 patch("builtins.input") as confirm, \
+                 patch.object(runtime, "build_navigation_effects") as effects, \
+                 patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network")), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(runtime.main(self.arguments(root) + ["--execute", "--confirm-unloaded",
+                    "--confirm-odom-continuity"]), 2)
+            confirm.assert_not_called()
+            effects.assert_not_called()
 
     def _assert_execute_start_policy(self, *, drive_to_start, fail_handoff=False):
         from tests.aufgabe04.test_station_tour import FakeClient
@@ -131,6 +161,10 @@ class StationTourRuntimeTest(unittest.TestCase):
                 self.assertTrue(callable(capture_scan))
                 self.assertEqual(config.mission_leg_motion_authorization_json, root / "motion_authorization/tour.json")
                 qr_id = next(qr for qr, value in session.poses_by_qr.items() if value is stored)
+                if visit_index == 0:
+                    self.assertEqual(client.events[:2], [("randomize", 4, 3), ("get_mappings",)])
+                    self.assertTrue((root / "server/frozen_plan.json").exists())
+                client.events.append(("navigate", qr_id, visit_index))
                 self.assertEqual(output_root, root / "visits" / f"{visit_index:03d}")
                 self.assertEqual(verify_start_handoff, visit_index == 0 and not drive_to_start)
                 if fail_handoff:
@@ -140,17 +174,29 @@ class StationTourRuntimeTest(unittest.TestCase):
                 return {"arrival_verified": True, "qr_id": qr_id}
             # Give each QR a distinguishable immutable saved-target object.
             session.poses_by_qr = {qr: SimpleNamespace(qr_id=qr) for qr in session.poses_by_qr}
-            with patch.object(runtime, "build_navigation_effects", return_value=effects), \
-                 patch("builtins.input", return_value="RUN"), \
+            authorized = []
+            def confirm(_):
+                self.assertEqual(client.events, [])
+                self.assertEqual(effects.mock_calls, [])
+                authorized.append(True)
+                return "RUN"
+            def build(*_):
+                self.assertTrue(authorized)
+                return effects
+            output = io.StringIO()
+            with patch.object(runtime, "build_navigation_effects", side_effect=build), \
+                 patch("builtins.input", side_effect=confirm), \
                  patch("scripts.aufgabe04.task_client.station_tour_client.StationTourClient", return_value=client), \
                  patch("scripts.aufgabe04.real_robot.mission.tour_obstacle_navigation.execute_tour_obstacle_navigation",
-                       side_effect=arrived) as navigate, redirect_stdout(io.StringIO()):
+                       side_effect=arrived) as navigate, redirect_stdout(output):
                 if fail_handoff:
                     with self.assertRaisesRegex(RuntimeError, "Start handoff"):
                         runtime.execute_tour(session, args, root, "tour_test")
-                    self.assertEqual(client.events, [])
+                    self.assertEqual(client.events, [("randomize", 4, 3), ("get_mappings",), ("navigate", "Start", 0)])
                     self.assertEqual(client.reported, [])
                     self.assertEqual(navigate.call_count, 1)
+                    effects.admit_planning_frame.assert_not_called()
+                    self.assertIn("Server plan: validated", output.getvalue())
                     return
                 result = runtime.execute_tour(session, args, root, "tour_test")
             self.assertTrue(result["all_saved_stands_visited"])
@@ -158,6 +204,9 @@ class StationTourRuntimeTest(unittest.TestCase):
             self.assertEqual(navigate.call_count, 8)
             self.assertTrue(all(value is maps[0] for value in maps))
             self.assertEqual(len(client.reported), 5)
+            effects.admit_planning_frame.assert_not_called()
+            self.assertIn("Server request: POST /api/v1/robots/robot/plan/randomize", output.getvalue())
+            self.assertIn("Server accepted Start; next target: QR_003", output.getvalue())
             authorization = load_mission_leg_motion_authorization(root / "motion_authorization/tour.json")
             self.assertEqual(authorization.session_id, "tour_test")
             self.assertEqual(authorization.allowed_leg_kinds, (MissionLegKind.STORED_POSE_TOUR,))

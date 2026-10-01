@@ -189,11 +189,13 @@ def _scan_result(response, *, frozen, qr_id, visit_index, mission_id):
 
 def run_station_tour(client, available_qr_ids, navigate, output_root, *, station_visits=3,
                      clock=time.time, wait=time.sleep, event_id_factory=None,
-                     cover_all_stands=True, shuffle=None):
+                     cover_all_stands=True, shuffle=None, progress=None):
     """Run once; persist every request before I/O and stop on any ambiguous write.
 
     ``navigate(qr_id, visit_index)`` must return a JSON mapping containing the
     exact ``qr_id`` and ``arrival_verified: true`` after measured arrival.
+    The server plan is created and validated before the first navigation call.
+    ``progress(message)`` optionally receives concise operator-facing status.
     ``output_root`` must be new. Exceptions propagate after writing failure
     evidence; existing journals are never resumed or overwritten automatically.
     """
@@ -203,6 +205,8 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
         raise ValueError("station_visits must be an integer from 3 to 100")
     if type(cover_all_stands) is not bool:
         raise ValueError("cover_all_stands must be boolean")
+    if progress is not None and not callable(progress):
+        raise ValueError("progress must be callable")
     robot_id = _identifier(client.robot_id, "client robot_id")
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=False)
@@ -214,9 +218,14 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
                "station_visits": station_visits, "report_source": "stored_pose_arrival",
                "fresh_camera_scan": False, "navigation_only": True, "physical_actions_performed": False,
                "completed_visits": 0, "qr_visit_order": [], "randomization_attempted": False,
+               "randomization_completed": False,
                "automatic_write_retries": 0, "journal": str(journal), "visits": [],
                "cover_all_stands": cover_all_stands, "server_mission_finished": False,
                "supplemental_visits": [], "supplemental_qr_visit_order": []}
+
+    def show(message):
+        if progress is not None:
+            progress(message)
 
     def log(event, **data):
         entry = {"event": event, "timestamp_unix_sec": _now(clock), **data}
@@ -236,6 +245,7 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
             method, body = "GET", None
             path = robot_path + ("/plan" if operation == "get_plan" else "/qr-mappings")
         log("server_request", operation=operation, request={**request, "method": method, "path": path, "body": body})
+        show(f"Server request: {method} {path}")
         summary["write_outcome_unknown"] = method != "GET"
         try:
             response = invoke()
@@ -257,14 +267,15 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
             raise StationTourError("navigation did not verify arrival at the stored QR pose")
         if arrival.get("qr_id") != qr:
             raise StationTourError("navigation arrival belongs to another QR")
+        show(f"Arrival verified: {qr} (visit {index}).")
         return dict(arrival)
 
     try:
         log("tour_started", **{key: value for key, value in summary.items() if key != "visits"})
-        arrival = arrive("Start", 0)
         summary["randomization_attempted"] = True
         randomized = call("randomize_plan", lambda: client.randomize_plan(qr_count=qr_count, stations=station_visits),
                           qr_count=qr_count, stations=station_visits)
+        summary["randomization_completed"] = True
         mappings = call("get_qr_mappings", client.get_qr_mappings)
         frozen = validate_tour_plan(randomized, mappings, robot_id=robot_id, available_qr_ids=available)
         if (frozen.payload["mode"] != "random" or len(frozen.payload["processing_sequence"]) != station_visits
@@ -275,6 +286,8 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
                        frozen_plan=str(root / "frozen_plan.json"),
                        saved_qr_ids_not_in_server_plan=sorted(set(available) - set(frozen.qr_order)))
         previous_progress = (randomized["next_job_index"], randomized["next_step_index"])
+        show(f"Server plan validated: {len(frozen.qr_order)} visits, beginning at Start.")
+        arrival = arrive("Start", 0)
 
         def refresh():
             nonlocal previous_progress
@@ -308,6 +321,8 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
                             qr_id=qr_id, robot_id=robot_id, client_event_id=event_id)
             mission_id, next_qr, actions, duration, earliest = _scan_result(
                 response, frozen=frozen, qr_id=qr_id, visit_index=visit_index, mission_id=mission_id)
+            show(f"Server accepted {qr_id}; next target: {next_qr}." if next_qr is not None
+                 else f"Server accepted {qr_id}; mission FINISHED.")
             summary["mission_id"] = mission_id
             visit = {"visit_index": visit_index, "qr_id": qr_id, "client_event_id": event_id,
                      "arrival": arrival, "server_state": response["state"], "actions": actions,
@@ -317,12 +332,14 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
             log("server_action_wait_started", visit_index=visit_index, actions=actions,
                 duration_s=duration, wait_until_unix_sec=deadline, physical_actions_performed=False)
             while (remaining := deadline - _now(clock)) > 1e-6:
+                show(f"Waiting {remaining:.1f} s at {qr_id} for the server action deadline.")
                 before = _now(clock)
                 wait(min(remaining, 30.0))
                 if _now(clock) <= before:
                     raise StationTourError("wait did not advance the clock; actions are unfinished")
             visit["action_wait_completed"] = True
             log("server_action_wait_completed", visit_index=visit_index, physical_actions_performed=False)
+            show(f"Server action wait complete at {qr_id}.")
             summary["completed_visits"] += 1
             summary["qr_visit_order"].append(qr_id)
         refresh()
@@ -352,6 +369,7 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
         summary["status"] = "completed"
         log("tour_completed", mission_id=mission_id, completed_visits=summary["completed_visits"])
         write_content_hashed_json(root / "summary.json", summary, hash_field="station_tour_summary_sha256")
+        show("Station tour completed.")
         return summary
     except BaseException as exc:
         summary.update(status="failed_closed", error=str(exc), error_type=type(exc).__name__,
@@ -359,4 +377,10 @@ def run_station_tour(client, available_qr_ids, navigate, output_root, *, station
         log("tour_failed", error=str(exc), error_type=type(exc).__name__,
             completed_visits=summary["completed_visits"])
         write_content_hashed_json(root / "summary.json", summary, hash_field="station_tour_summary_sha256")
+        plan_status = ("validated" if summary.get("plan_sha256") else
+                       "response received, not validated" if summary["randomization_completed"] else
+                       "creation unconfirmed")
+        show(f"Station tour stopped: {str(exc) or type(exc).__name__}. "
+             f"Server plan: {plan_status}; "
+             f"completed visits: {summary['completed_visits']}.")
         raise

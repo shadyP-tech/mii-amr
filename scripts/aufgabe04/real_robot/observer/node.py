@@ -405,6 +405,10 @@ def _stand_axis_profile_from_args(args) -> RealCameraStandAxisProfile:
 
 class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
     def __init__(self, args) -> None:
+        from scripts.aufgabe04.real_robot.observer.current_head_identity import validate_identity_startup
+        stand_model_profile = load_measured_physical_stand_model(args.stand_model_profile)
+        validate_identity_startup(stand_model_profile,
+            candidate_crop_snapshot=getattr(args, "candidate_crop_snapshot", None))
         import cv2
         import numpy
         import rclpy
@@ -429,9 +433,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         self.Time = Time
         self.TransformException = TransformException
         self.stand_axis_profile = _stand_axis_profile_from_args(args)
-        self.stand_model_profile = load_measured_physical_stand_model(
-            args.stand_model_profile
-        )
+        self.stand_model_profile = stand_model_profile
         self.stand_head_center_height_m = resolve_head_center_height_m(
             self.stand_model_profile,
             args.stand_head_center_height_m,
@@ -1874,7 +1876,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             evaluator = (evaluate_geometry_then_identity if physical_geometry
                          else evaluate_roi_with_qr_acquisition)
             scheduling = ({"geometry_only": lambda: fit(None, marker_policy="disabled"),
-                           "decorate": fit} if physical_geometry else {"estimate": fit})
+                           "decorate": fit, "identity_enabled": False}
+                          if physical_geometry else {"estimate": fit})
             attempt_estimate, attempt_debug, qr_observations, qr_metadata = evaluator(
                 frame=attempt_frame,
                 roi=(attempt_roi.x0, attempt_roi.y0, attempt_roi.x1, attempt_roi.y1),
@@ -2025,6 +2028,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                 max_scan_age_sec=self.args.max_sensor_age_sec)
             tracking_evaluation = evaluate_viewer_head(
                 self.cv2, frame, model_profile=self.stand_model_profile,
+                identity_enabled=False,
                 intrinsics=intrinsics, pose_hint=prediction.pose,
                 projection=head_search_projection, expected_head_height_px=expected_head_height_px,
                 max_center_offset_ratio=self.args.backside_registration_max_center_offset_ratio,
@@ -2113,6 +2117,8 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         if not viewer_geometry:
             registration = probe_identity_after_head_miss(
                 registration, cache=qr_decode_cache, budget=qr_acquisition_budget,
+                identity_enabled=not (getattr(self.stand_model_profile, "committable", False)
+                    and self.stand_model_profile.environment == "physical"),
                 full_decoder=lambda crop, limit, provenance: detect_qr_observations_bgr(
                     crop, self.cv2, diagnostics=provenance, max_elapsed_sec=limit,
                     **getattr(self, "_qr_decoder_options", {}),
@@ -2319,7 +2325,27 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
                     model_path=str(self.args.stand_model_profile.resolve()))
             model_metadata["scan_target_persistence"] = dict(self._scan_target_persistence.last_metadata)
         selected_qr_observations = getattr(selected, "qr_observations", None)
-        if selected_qr_observations is None and selected.qr_decode_metadata is None:
+        if viewer_geometry:
+            from scripts.aufgabe04.real_robot.observer.current_head_identity import acquire_current_head_identity
+            selected_qr_observations, qr_binding = acquire_current_head_identity(self,
+                frame=frame, estimate=estimate, association=current_head_association,
+                crop_review=review_current_head_crop(registration), selected_roi=roi,
+                intrinsics=intrinsics, scan=plain_scan, scan_from_camera=scan_from_camera_geometry,
+                scan_from_map=RigidTransform(self.profile.scan_frame, self.profile.map_frame,
+                    scan_translation, scan_rotation),
+                camera_from_map=RigidTransform(self.profile.camera_optical_frame, self.profile.map_frame,
+                    camera_translation, camera_rotation),
+                map_bearing_rad=scan_bearing, accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                image_stamp_sec=image.stamp_sec, robot_pose=robot_pose,
+                camera_signature=candidate_context.camera_signature,
+                target_reconciliation=target_reconciliation, fragmentation=registration_fragmentation,
+                metadata=model_metadata)
+            qr_texts = tuple(sorted({observation.text for observation in selected_qr_observations}))
+            from scripts.aufgabe04.real_robot.observer.roi_qr_evidence import RoiQrEvidence
+            roi_qr_evidence = RoiQrEvidence(bool(qr_texts), True if qr_texts else None,
+                qr_texts, "multiple_qr_symbols_in_current_head" if len(selected_qr_observations) > 1 else None,
+                len(selected_qr_observations))
+        elif selected_qr_observations is None and selected.qr_decode_metadata is None:
             # Preserve legacy injected evaluations; the operational evaluator
             # carries the same observations used by metric fitting, or an
             # explicit not-performed result. A spent head budget must not
@@ -2332,32 +2358,33 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         # Recentring may remove a previously observed marker from the crop.
         # Preserve its veto/conflict evidence; target identity still comes
         # only from the selected symbol's independently bound image ray.
-        roi_qr_evidence = summarize_roi_qr_evidence(registration)
+        if not viewer_geometry:
+            roi_qr_evidence = summarize_roi_qr_evidence(registration)
         qr_texts = tuple(sorted(set(qr_texts) | set(roi_qr_evidence.qr_texts)))
         axis_metadata["roi_qr_evidence"] = roi_qr_evidence.metadata()
-        qr_binding = bind_qr_observations_to_target(
-            selected_qr_observations, roi=roi, intrinsics=intrinsics,
-            scan_from_camera=scan_from_camera_geometry, scan=plain_scan,
-            map_bearing_rad=scan_bearing,
-            cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
-            accepted_range_m=(lower_surface_bound, upper_surface_bound),
-            now_sec=now_sec, max_scan_age_sec=self.args.max_sensor_age_sec,
-            min_cluster_sample_count=self.args.lidar_min_samples,
-            camera_registration_accepted=(is_camera_registered_head_roi_attempt(selected_attempt)
-                or (current_head_association is not None and current_head_association.accepted)),
-            max_camera_map_bearing_delta_rad=math.radians(
-                self.args.backside_registration_max_bearing_delta_deg
-            ),
-            target_reconciliation=target_reconciliation,
-            fragmentation=registration_fragmentation,
-            resolve_lidar_association=resolve_qr_lidar_association,
-            candidate_context=(None if getattr(self.args,"candidate_crop_snapshot",None) is None else
-                dict(snapshot_path=str(self.args.candidate_crop_snapshot),candidate_uid=self.args.stand_id,
-                    scan_from_map=dict(parent_frame=self.profile.scan_frame,child_frame=self.profile.map_frame,
-                        translation_xyz_m=scan_translation,rotation_xyzw=scan_rotation))),
-            allow_independent_registration=(viewer_geometry and
-                getattr(self.args, "qr_observation_pose_json", None) is not None),
-        )
+        if not viewer_geometry:
+            qr_binding = bind_qr_observations_to_target(
+                selected_qr_observations, roi=roi, intrinsics=intrinsics,
+                scan_from_camera=scan_from_camera_geometry, scan=plain_scan,
+                map_bearing_rad=scan_bearing,
+                cone_half_angle_rad=math.radians(self.args.lidar_cone_half_angle_deg),
+                accepted_range_m=(lower_surface_bound, upper_surface_bound),
+                now_sec=now_sec, max_scan_age_sec=self.args.max_sensor_age_sec,
+                min_cluster_sample_count=self.args.lidar_min_samples,
+                camera_registration_accepted=(is_camera_registered_head_roi_attempt(selected_attempt)
+                    or (current_head_association is not None and current_head_association.accepted)),
+                max_camera_map_bearing_delta_rad=math.radians(
+                    self.args.backside_registration_max_bearing_delta_deg
+                ),
+                target_reconciliation=target_reconciliation,
+                fragmentation=registration_fragmentation,
+                resolve_lidar_association=resolve_qr_lidar_association,
+                candidate_context=(None if getattr(self.args,"candidate_crop_snapshot",None) is None else
+                    dict(snapshot_path=str(self.args.candidate_crop_snapshot),candidate_uid=self.args.stand_id,
+                        scan_from_map=dict(parent_frame=self.profile.scan_frame,child_frame=self.profile.map_frame,
+                            translation_xyz_m=scan_translation,rotation_xyzw=scan_rotation))),
+                allow_independent_registration=False,
+            )
         model_metadata["qr_scan_target_persistence"] = dict(
             self._qr_scan_target_persistence.last_metadata)
         if qr_texts:
@@ -2368,7 +2395,7 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
         # Discovery binds the decoded symbol to the mapped LiDAR candidate;
         # an unavailable or wrong head fit cannot replace that independent ray.
         independent_qr_binding = qr_binding
-        if current_head_association is not None and current_head_association.accepted:
+        if not viewer_geometry and current_head_association is not None and current_head_association.accepted:
             qr_binding = bind_qr_to_current_head(
                 qr_binding, selected_qr_observations, head_corners=estimate.corners,
                 head_association=current_head_association,
@@ -3638,7 +3665,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-position-epoch", type=Path, default=None,
         help="Bounded recovery context for a localization-displaced survey candidate")
     parser.add_argument("--candidate-crop-snapshot", type=Path, default=None,
-        help="Admitted candidate snapshot for bounded reconciliation and neighboring-target exclusion.")
+        help="Required for measured physical stand profiles: admitted candidate snapshot for identity ownership, bounded reconciliation and neighboring-target exclusion.")
     parser.add_argument("--qr-pose-fallback-delay-sec", type=float, default=0.0,
         help="Optional same-stop geometry grace before QR-only discovery (0–10 seconds; default admits a current decode after geometry declines).")
     parser.add_argument("--inspection-progress-frames", type=int, default=7)

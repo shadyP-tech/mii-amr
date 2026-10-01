@@ -45,11 +45,12 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
     stored = data.pop(HASH_FIELD, None)
     if not isinstance(stored, str) or stored != payload_sha256(data):
         raise ValueError("QR observation pose hash mismatch")
-    if (type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2)
+    if (type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3)
             or data.get("observation_kind") != OBSERVATION_KIND):
         raise ValueError("unsupported QR observation pose schema")
     retained = data.get("retained_backside_orientation")
     crop_identity = data['schema_version'] == 2
+    head_identity = data['schema_version'] == 3
     if ((not crop_identity and (data.get("stand_axis_rad", 0) is not None or retained is not None))
             or data.get("facing_ready") is not False
             or data.get("motion_authorized") is not False
@@ -78,7 +79,8 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
     shape = data.get("image_shape")
     if (not isinstance(shape, (list, tuple)) or len(shape) != 2
             or any(type(v) is not int or v <= 0 for v in shape)
-            or (not crop_identity and validated_qr_corners(data.get("qr_corners_px"), image_shape=shape) is None)):
+            or (not crop_identity and not head_identity
+                and validated_qr_corners(data.get("qr_corners_px"), image_shape=shape) is None)):
         raise ValueError("QR observation needs valid current decoded corners")
     binding = data.get("qr_binding")
     if (not isinstance(binding, Mapping) or binding.get("accepted") is not True
@@ -86,7 +88,15 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
             or type(binding.get("symbol_count")) is not int or binding["symbol_count"] != 1
             or tuple(binding.get("qr_texts_for_evidence") or ()) != (data["qr_id"],)):
         raise ValueError("QR observation needs one independently bound decoded identity")
-    if not crop_identity:
+    if head_identity:
+        if data.get("qr_corners_px") is not None:
+            raise ValueError("head-bound payload cannot claim QR corners")
+        from scripts.aufgabe04.real_robot.observer.current_head_identity import validate_current_head_identity_binding
+        validate_current_head_identity_binding(binding,
+            image_stamp_sec=image, scan_stamp_sec=scan, image_shape=shape,
+            target_key=data["target_key"], camera_signature=data.get("camera_signature"),
+            model_profile_sha256=data["stand_model_profile_sha256"], expected_context=data)
+    elif not crop_identity:
         _number(binding.get("camera_bearing_rad"), "QR camera bearing")
     else:
         from scripts.aufgabe04.artifacts.retained_backside_orientation import (
@@ -233,8 +243,10 @@ def validate_qr_verified_observation_pose(payload: Mapping) -> dict:
 
 def build_qr_verified_observation_pose(**fields) -> dict:
     retained = fields.get('retained_backside_orientation')
+    from scripts.aufgabe04.real_robot.observer.current_head_identity import is_current_head_identity
+    schema = 2 if retained is not None else (3 if is_current_head_identity(fields.get('qr_binding')) else 1)
     return validate_qr_verified_observation_pose(content_hashed_payload({
-        **fields, "schema_version": 1 if retained is None else 2, "observation_kind": OBSERVATION_KIND,
+        **fields, "schema_version": schema, "observation_kind": OBSERVATION_KIND,
         "stand_axis_rad": None if retained is None else retained['stand_axis_rad'],
         "facing_ready": False, "motion_authorized": False,
         "completion_authorized": True, "completion_scope": "discovery_only",
@@ -264,12 +276,19 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
         raise ValueError('QR identity crop excludes target center')
     support = crop.get('target_support')
     isolated = crop.get('sampling') == 'isolated_current_qr_quad'
+    head_region = crop.get('sampling') == 'masked_current_head_region'
+    if crop.get('sampling', 'rectangular_crop') not in (
+            'rectangular_crop', 'isolated_current_qr_quad', 'masked_current_head_region'):
+        raise ValueError('QR identity crop sampling invalid')
     from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import require_endpoint_outline_binding
     require_endpoint_outline_binding(data['qr_binding']['association'], support,
         sampling=crop.get('sampling'))
-    if isolated:
+    if isolated or head_region:
         from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_target_support
         validate_target_support(support)
+        from scripts.aufgabe04.real_robot.observer.opposite_head_support import HEAD_POLICY
+        if head_region != (support.get('policy') == HEAD_POLICY):
+            raise ValueError('QR crop sampling differs from current target support')
         proof = support.get('target_reconciliation')
         if proof is not None and (proof['candidate_uid'] != data['candidate_uid']
                 or proof['target_key'] != data['target_key'] or proof['epoch'] != data['motion_epoch']
@@ -311,7 +330,8 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
             raise ValueError('QR identity crop overlaps a neighboring candidate')
         overlap = box[0] < other[2] and other[0] < box[2] and box[1] < other[3] and other[1] < box[3]
         if overlap:
-            if not isolated or competitor.get('occluded_by_target_symbol') is not True:
+            occlusion_key = 'occluded_by_target_head' if head_region else 'occluded_by_target_symbol'
+            if not (isolated or head_region) or competitor.get(occlusion_key) is not True:
                 raise ValueError('QR identity crop overlaps a neighboring candidate')
             _depth_interval(competitor.get('depth_interval_m'))
             if competitor['depth_interval_m'][0] <= target_depth[1]:

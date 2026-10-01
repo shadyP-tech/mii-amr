@@ -100,6 +100,7 @@ def classify_current_head_backside(
     # cannot promote that angle or bypass the observer's complete-head checks.
     debug = replace(debug, head_backside_appearance=assess_current_head_backside_appearance(
         estimate, debug, model_profile=model_profile, camera=camera,
+        identity_unresolved=debug.qr_marker_reason == "identity_disabled_for_geometry_only",
         expected_center_u_px=expected_center_u_px,
         expected_center_v_px=expected_center_v_px, expected_height_px=expected_height_px))
     proof = HeadBacksideClassification(

@@ -102,7 +102,7 @@ def validate_opposite_orientation(bounded, *, selected_normal_rad, robot_side_ra
 def validate_bounded_endpoint(payload, *, selected_normal_rad, stand_x_m, stand_y_m, stand_uncertainty_m,
                               target_x_m, target_y_m, expected_sample_count=None,
                               observing_robot_x_m=None, observing_robot_y_m=None,
-                              allow_coarse_front=False):
+                              allow_coarse_front=False, qr_front_confirmed=False):
     """Analytically bound incidence for one endpoint, including arrival error.
 
     This certifies viewing geometry only. The caller must also validate the
@@ -113,7 +113,13 @@ def validate_bounded_endpoint(payload, *, selected_normal_rad, stand_x_m, stand_
                                             expected_sample_count=expected_sample_count,
                                             allow_coarse_front=allow_coarse_front)
     coarse_front = bounded.policy == COARSE_FRONT_ORIENTATION_POLICY
-    maximum_view = (COARSE_FRONT_MAXIMUM_QR_VIEW_OBLIQUITY_RAD if coarse_front
+    if type(qr_front_confirmed) is not bool:
+        raise ValueError("confirmed QR front permission must be boolean")
+    if qr_front_confirmed and observing_robot_x_m is not None:
+        raise ValueError("unidentified opposite inspection cannot claim a confirmed QR front")
+    # The user's approximate front-view allowance also applies when the angle
+    # was measured on the other side. Its original interval stays unchanged.
+    maximum_view = (COARSE_FRONT_MAXIMUM_QR_VIEW_OBLIQUITY_RAD if coarse_front or qr_front_confirmed
                     else MAXIMUM_QR_VIEW_OBLIQUITY_RAD)
     dx = _number(target_x_m, "target x") - _number(stand_x_m, "stand x")
     dy = _number(target_y_m, "target y") - _number(stand_y_m, "stand y")

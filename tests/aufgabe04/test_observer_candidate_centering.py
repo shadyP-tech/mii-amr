@@ -204,10 +204,34 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
 
 
     def test_missing_optional_odom_does_not_suppress_current_qr_completion(self):
-        adapter, recommendation, output = self.run_processing("bound_qr", odom_available=False)
-        self.assertFalse(output.exists())
-        self.assertIsNotNone(recommendation)
-        self.assertTrue(adapter.completed)
+        # The old physical fixture injected a QR quad into geometry acquisition.
+        # Exercise the current ID-only head crop and actual status publisher.
+        from pytest import MonkeyPatch
+        from tests.aufgabe04.test_current_head_identity import (
+            make_ordinary, acquire, prepare_strict_front, publish,
+        )
+        with MonkeyPatch.context() as monkeypatch:
+            fixture = make_ordinary(self.root, monkeypatch)
+            adapter, options = fixture.adapter, fixture.kwargs
+            output = adapter.args.candidate_centering_json = self.root / "processed_centering.json"
+            observations, binding = acquire(fixture)
+            self.assertTrue(binding.accepted, options['metadata'])
+            self.assertIsNone(observations[0].corners)
+            adapter._pending_candidate_centering = prepare_candidate_centering(
+                crop=options['crop_review'], association=options['association'],
+                image_stamp_sec=options['image_stamp_sec'], scan_stamp_sec=options['scan'].scan_stamp_sec,
+                target_key=adapter._target_evidence_key(), robot_pose=options['robot_pose'],
+                odom_pose=None, intrinsics=options['intrinsics'],
+                scan_from_camera=options['scan_from_camera'],
+                base_from_camera=fixture.case['base_from_camera'], metadata=options['metadata'])
+            self.assertIsNone(adapter._pending_candidate_centering)
+            prepare_strict_front(fixture, observations, binding)
+            publish(fixture, observations, binding)
+            self.assertFalse(output.exists())
+            self.assertTrue(adapter.args.recommended_pose_json.exists())
+            self.assertTrue(adapter.completed)
+            self.assertEqual(json.loads(adapter.args.recommended_pose_json.read_text())[
+                'axis_measurement']['qr_id'], 'Start')
 
     def test_missing_current_geometry_scan_uniqueness_or_odom_cannot_advise(self):
         for kwargs in ({"complete": False}, {"associated": False}, {"ambiguous": True},

@@ -171,6 +171,28 @@ def test_no_identity_budget_runs_no_decoder_or_marker_work(scene):
     assert not result.qr_decode_metadata["performed"]
 
 
+@pytest.mark.parametrize("previous_head_miss", (False, True))
+def test_geometry_only_switch_bypasses_every_identity_probe(scene, previous_head_miss):
+    decoder = Mock(side_effect=AssertionError("no identity work before association"))
+    work = Mock()
+    work.identity_first_due.side_effect = AssertionError("identity scheduling disabled")
+    with patch(f"{MODULE}.detect_qr_quad", side_effect=AssertionError("no QR outlines")):
+        result, estimator = evaluate(scene, native=decoder, full=decoder,
+            search_decoder=decoder, previous_head_miss=previous_head_miss,
+            budget=work, identity_enabled=False)
+    estimator.assert_called_once()
+    assert estimator.call_args.kwargs["qr_marker_policy"] == "disabled"
+    assert result.estimate is scene[4][0]
+    assert result.debug.head_model_quality is scene[4][1].head_model_quality
+    assert result.qr_observations is None
+    assert result.debug.qr_detected is None and result.debug.qr_marker_verified is None
+    assert result.qr_decode_metadata["reason"] == "identity_disabled_for_geometry_only"
+    assert result.qr_decode_metadata["marker_refresh_performed"] is False
+    assert classified(scene, result).estimate.visible_face is None
+    decoder.assert_not_called()
+    assert not work.mock_calls
+
+
 def test_actual_native_finder_absence_classifies_only_after_geometry_return(scene):
     with patch(f"{MODULE}.detect_qr_quad", wraps=detect_qr_quad) as finder:
         result, estimator = evaluate(scene)

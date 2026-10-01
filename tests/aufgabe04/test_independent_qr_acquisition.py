@@ -80,6 +80,39 @@ def test_expired_identity_budget_returns_geometry_with_unknown_side():
     decorate.assert_not_called()
 
 
+def test_geometry_only_switch_preserves_fit_without_any_identity_work(profile):
+    image, corners = head_image(profile)
+    holder = CurrentImageHeadFit()
+    native, full, decorate = (Mock(side_effect=AssertionError("identity work disabled"))
+                              for _ in range(3))
+    work = Mock(side_effect=AssertionError("identity budget is not consulted"))
+    result, debug, observations, metadata = evaluate_geometry_then_identity(
+        frame=image, roi=(0, 0, 800, 600), roi_source="registered_head",
+        cache=RoiQrDecodeCache(), budget=work, native_decoder=native,
+        full_decoder=full, decorate=decorate, now=lambda: 10.,
+        geometry_only=lambda: fit(profile, image, holder, None,
+            qr_marker_policy="disabled", current_head_proposal_corners=corners),
+        current_image_head_fit=holder, identity_enabled=False)
+    assert result.usable and debug.head_model_quality is not None
+    assert observations is None
+    assert debug.qr_detected is None and debug.qr_marker_verified is None
+    assert metadata["reason"] == "identity_disabled_for_geometry_only"
+    assert metadata["marker_refresh_performed"] is False
+    native.assert_not_called()
+    full.assert_not_called()
+    decorate.assert_not_called()
+    assert not work.mock_calls
+
+
+def test_disabled_head_miss_probe_does_not_inspect_or_decode_selection():
+    selection = object()
+    decoder, work = Mock(), Mock()
+    assert probe_identity_after_head_miss(selection, cache=RoiQrDecodeCache(),
+        budget=work, full_decoder=decoder, now=Mock(), identity_enabled=False) is selection
+    decoder.assert_not_called()
+    assert not work.mock_calls
+
+
 @pytest.mark.parametrize("observations", [(), (DecodedQrObservation("Start", None, "text_only"),)])
 def test_head_miss_can_decode_but_never_claims_marker_absence(observations):
     attempt = SimpleNamespace(roi=SimpleNamespace(x0=5, y0=6, x1=105, y1=106), source="expanded")
