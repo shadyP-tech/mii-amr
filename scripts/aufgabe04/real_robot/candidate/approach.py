@@ -115,6 +115,7 @@ from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import (
     stand_survey_registry_sha256,
 )
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (
+    BOUNDED_RECOMMENDATION_SCHEMA_VERSION,
     REAL_VIEWPOINT_SOURCE,
     load_recommendation,
     normalize_angle,
@@ -740,6 +741,9 @@ def validate_facing_pose(request: FacingValidationRequest) -> dict[str, object]:
             stand_uncertainty_m=view_uncertainty,
             target_x_m=target.x_m, target_y_m=target.y_m,
             expected_sample_count=recommendation.axis_sample_count,
+            # load_recommendation already validated the current QR-front
+            # contract. Retained/backside schemas keep their stricter budget.
+            allow_coarse_front=(recommendation.schema_version == BOUNDED_RECOMMENDATION_SCHEMA_VERSION),
         )
     minimum_active_standoff_m = _required_positive_clearance(
         config.physical_clearance,

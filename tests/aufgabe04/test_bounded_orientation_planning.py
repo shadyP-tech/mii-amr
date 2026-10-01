@@ -7,7 +7,9 @@ import tempfile
 import unittest
 
 from scripts.aufgabe04.artifacts.bounded_orientation import (
-    BOUNDED_ORIENTATION_POLICY, validated_bounded_orientation, validate_bounded_endpoint,
+    BOUNDED_ORIENTATION_POLICY, COARSE_FRONT_ORIENTATION_POLICY,
+    endpoint_evidence_matches, validated_bounded_orientation, validate_bounded_endpoint,
+    validate_opposite_orientation,
 )
 from scripts.aufgabe04.artifacts.backside_axis_observation import validated_backside_axis_observation
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import BacksideAxisFrameProjection
@@ -31,12 +33,75 @@ from tests.aufgabe04 import test_autonomous_candidate_approach as candidate_fixt
 PHYSICAL_CLEARANCE = fixtures.PHYSICAL_CLEARANCE
 
 
-def bounds(center=0.0, half_degrees=8.0, count=7):
-    return {"policy": BOUNDED_ORIENTATION_POLICY, "center_rad": center,
+def bounds(center=0.0, half_degrees=8.0, count=7, policy=BOUNDED_ORIENTATION_POLICY):
+    return {"policy": policy, "center_rad": center,
             "half_width_rad": math.radians(half_degrees), "sample_count": count}
 
 
 class BoundedOrientationPlanningTest(unittest.TestCase):
+    def test_coarse_front_requires_explicit_permission_and_preserves_full_interval(self):
+        payload = bounds(half_degrees=19.4, policy=COARSE_FRONT_ORIENTATION_POLICY)
+        with self.assertRaisesRegex(ValueError, "unsupported in this context"):
+            validated_bounded_orientation(payload)
+        bounded = validated_bounded_orientation(payload, allow_coarse_front=True)
+        rotated = bounded.rotated(.4)
+        self.assertEqual(rotated.policy, COARSE_FRONT_ORIENTATION_POLICY)
+        self.assertEqual(rotated.half_width_rad, payload["half_width_rad"])
+        self.assertEqual(rotated.sample_count, 7)
+        self.assertAlmostEqual(rotated.center_rad, .4)
+        self.assertEqual(validated_bounded_orientation(
+            json.loads(json.dumps(rotated.payload())), allow_coarse_front=True), rotated)
+        for changed in ({"half_width_rad": math.radians(30.01)}, {"sample_count": 6},
+                        {"sample_count": 33}, {"sample_count": True}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                validated_bounded_orientation({**payload, **changed}, allow_coarse_front=True)
+        with self.assertRaisesRegex(ValueError, "15 degrees"):
+            validated_bounded_orientation(bounds(half_degrees=19.4), allow_coarse_front=True)
+
+    def test_coarse_front_endpoint_uses_30_degree_total_budget_and_bound_metadata(self):
+        payload = bounds(half_degrees=19.4, policy=COARSE_FRONT_ORIENTATION_POLICY)
+        args = dict(selected_normal_rad=math.pi / 2, stand_x_m=0, stand_y_m=0,
+                    stand_uncertainty_m=.02, target_x_m=0, target_y_m=.35)
+        with self.assertRaisesRegex(ValueError, "unsupported in this context"):
+            validate_bounded_endpoint(payload, **args)
+        result = validate_bounded_endpoint(payload, allow_coarse_front=True, **args)
+        self.assertAlmostEqual(math.degrees(result["worst_case_view_obliquity_rad"]),
+                               27.61321070173819)
+        self.assertEqual(result["policy"], COARSE_FRONT_ORIENTATION_POLICY)
+        self.assertEqual(result["bounded_orientation"], payload)
+        self.assertEqual(result["maximum_view_obliquity_rad"], math.radians(30))
+        self.assertEqual(result["maximum_orientation_half_width_rad"], math.radians(30))
+        self.assertFalse(result["motion_authorized"])
+        self.assertTrue(endpoint_evidence_matches(copy.deepcopy(result), result))
+        for changed in ({"policy": BOUNDED_ORIENTATION_POLICY},
+                        {"maximum_view_obliquity_rad": math.radians(31)},
+                        {"maximum_orientation_half_width_rad": math.radians(31)}):
+            with self.subTest(changed=changed):
+                self.assertFalse(endpoint_evidence_matches({**result, **changed}, result))
+        for changed in ({"stand_uncertainty_m": .04}, {"target_y_m": .25},
+                        {"target_x_m": -.35 * math.sin(math.radians(3)),
+                         "target_y_m": .35 * math.cos(math.radians(3))}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "viewing obliquity"):
+                validate_bounded_endpoint(payload, allow_coarse_front=True, **{**args, **changed})
+        # Explicit front permission does not widen a legacy receipt's 20-degree limit.
+        with self.assertRaisesRegex(ValueError, "viewing obliquity"):
+            validate_bounded_endpoint(bounds(half_degrees=15), allow_coarse_front=True, **args)
+
+    def test_coarse_front_cannot_authorize_backside_even_with_narrow_interval(self):
+        payload = backside_axis_payload()
+        payload["bounded_orientation"] = bounds(policy=COARSE_FRONT_ORIENTATION_POLICY)
+        with self.assertRaisesRegex(ValueError, "unsupported in this context"):
+            validated_backside_axis_observation(payload)
+        bounded = validated_bounded_orientation(payload["bounded_orientation"], allow_coarse_front=True)
+        with self.assertRaisesRegex(ValueError, "legacy bounded orientation policy"):
+            validate_opposite_orientation(bounded, selected_normal_rad=math.pi / 2,
+                                          robot_side_rad=-math.pi / 2)
+        with self.assertRaisesRegex(ValueError, "legacy bounded orientation policy"):
+            validate_bounded_endpoint(payload["bounded_orientation"], allow_coarse_front=True,
+                selected_normal_rad=math.pi / 2, stand_x_m=0, stand_y_m=0,
+                stand_uncertainty_m=.02, target_x_m=0, target_y_m=.5,
+                observing_robot_x_m=0, observing_robot_y_m=-.7)
+
     def test_contract_rejects_unbounded_malformed_or_insufficient_evidence(self):
         for changed in ({"half_width_rad": float("nan")}, {"half_width_rad": math.radians(16)},
                         {"sample_count": 6}, {"sample_count": True}, {"policy": "ignore_ambiguity"},
@@ -135,6 +200,13 @@ class BoundedOrientationPlanningTest(unittest.TestCase):
             load_recommendation(payload)
 
     def test_bounded_front_identity_keeps_one_collision_checked_facing_route(self):
+        self._assert_front_collision_checked_route(bounds(math.pi / 2), 20)
+
+    def test_coarse_front_identity_keeps_one_collision_checked_facing_route(self):
+        self._assert_front_collision_checked_route(
+            bounds(math.pi / 2, half_degrees=19.4, policy=COARSE_FRONT_ORIENTATION_POLICY), 30)
+
+    def _assert_front_collision_checked_route(self, orientation, maximum_view_degrees):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             map_yaml = write_free_map(root, width=80, height=40, resolution=.05)
@@ -154,15 +226,18 @@ class BoundedOrientationPlanningTest(unittest.TestCase):
                 robot_pose=Pose2D(-.5, 0, 0), stand_axis_rad=math.pi / 2,
                 axis_confidence=0., axis_sample_count=7, sensor_stamp_sec=123,
                 expected_qr_id="QR_002", observed_qr_ids=("QR_002",), target_distance_m=.35,
-                bounded_orientation=bounds(math.pi / 2),
+                bounded_orientation=orientation,
             )
             recommendation_path = root / "recommendation.json"
             recommendation_path.write_text(json.dumps(recommendation_to_payload(recommendation)))
             result = validate_facing_pose(FacingValidationRequest(
                 config=config, candidate=candidate, recommendation_path=recommendation_path,
                 current_pose=Pose2D(-.5, 0, 0), output_dir=root / "facing"))
-            self.assertEqual(result["bounded_orientation"], bounds(math.pi / 2))
+            self.assertEqual(result["bounded_orientation"], orientation)
             self.assertTrue(result["bounded_orientation_view"]["all_plausible_angles_supported"])
+            self.assertEqual(result["bounded_orientation_view"]["policy"], orientation["policy"])
+            self.assertEqual(result["bounded_orientation_view"]["maximum_view_obliquity_rad"],
+                             math.radians(maximum_view_degrees))
             self.assertTrue(result["active_stand_clearance"]["continuous_centerline_validated"])
             self.assertFalse(result["motion_to_facing_pose_authorized"])
 

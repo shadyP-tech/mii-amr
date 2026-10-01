@@ -1034,12 +1034,14 @@ class PassiveRealViewpointNode:  # pragma: no cover - requires ROS runtime.
             self._qr_observation_pose_ready = None
             self._qr_observation_pose_fallback = None
         else:
-            record_qr_observation_pose(self, update=update, image_stamp_sec=image_stamp_sec,
-                                       observed_at_sec=observed_at_sec)
             record_immediate_front(self, update=update, image_stamp_sec=image_stamp_sec,
                                    observed_at_sec=observed_at_sec)
             record_bounded_head(self, update=update, image_stamp_sec=image_stamp_sec,
                                 observed_at_sec=observed_at_sec)
+            # QR-only completion gives this exact admitted front sample a
+            # bounded opportunity to gather its independent orientation range.
+            record_qr_observation_pose(self, update=update, image_stamp_sec=image_stamp_sec,
+                                       observed_at_sec=observed_at_sec)
         self._last_observation_update = update
         self._head_qr_tracking_stamp_sec = (
             image_stamp_sec

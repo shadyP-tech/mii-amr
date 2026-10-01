@@ -14,8 +14,11 @@ import math
 
 
 BOUNDED_ORIENTATION_POLICY = "current_head_noise_expanded_interval"
+COARSE_FRONT_ORIENTATION_POLICY = "current_head_coarse_front_interval"
 MAXIMUM_ORIENTATION_HALF_WIDTH_RAD = math.radians(15.0)
 MAXIMUM_QR_VIEW_OBLIQUITY_RAD = math.radians(20.0)
+COARSE_FRONT_MAXIMUM_ORIENTATION_HALF_WIDTH_RAD = math.radians(30.0)
+COARSE_FRONT_MAXIMUM_QR_VIEW_OBLIQUITY_RAD = math.radians(30.0)
 TERMINAL_POSITION_RESERVE_M = 0.03
 _KEYS = {"policy", "center_rad", "half_width_rad", "sample_count"}
 
@@ -53,15 +56,26 @@ class BoundedOrientation:
                                   self.half_width_rad, self.sample_count)
 
 
-def validated_bounded_orientation(payload, *, expected_axis_rad=None, expected_sample_count=None):
+def orientation_half_width_limit(policy, *, allow_coarse_front=False):
+    """Coarse intervals require an explicit, independently QR-bound front context."""
+    if type(allow_coarse_front) is not bool:
+        raise ValueError("coarse front permission must be boolean")
+    if policy == BOUNDED_ORIENTATION_POLICY:
+        return MAXIMUM_ORIENTATION_HALF_WIDTH_RAD
+    if policy == COARSE_FRONT_ORIENTATION_POLICY and allow_coarse_front:
+        return COARSE_FRONT_MAXIMUM_ORIENTATION_HALF_WIDTH_RAD
+    raise ValueError("bounded orientation policy is unsupported in this context")
+
+
+def validated_bounded_orientation(payload, *, expected_axis_rad=None, expected_sample_count=None,
+                                  allow_coarse_front=False):
     if not isinstance(payload, Mapping) or set(payload) != _KEYS:
         raise ValueError("bounded orientation has unexpected fields")
-    if payload["policy"] != BOUNDED_ORIENTATION_POLICY:
-        raise ValueError("bounded orientation policy is unsupported")
+    limit = orientation_half_width_limit(payload["policy"], allow_coarse_front=allow_coarse_front)
     center = _number(payload["center_rad"], "center_rad")
     half_width = _number(payload["half_width_rad"], "half_width_rad")
-    if not 0.0 <= half_width <= MAXIMUM_ORIENTATION_HALF_WIDTH_RAD:
-        raise ValueError("bounded orientation half width exceeds 15 degrees")
+    if not 0.0 <= half_width <= limit:
+        raise ValueError(f"bounded orientation half width exceeds {math.degrees(limit):g} degrees")
     count = payload["sample_count"]
     if type(count) is not int or not 7 <= count <= 32:
         raise ValueError("bounded orientation requires 7 to 32 current samples")
@@ -69,11 +83,13 @@ def validated_bounded_orientation(payload, *, expected_axis_rad=None, expected_s
         raise ValueError("bounded orientation center differs from selected axis")
     if expected_sample_count is not None and count != expected_sample_count:
         raise ValueError("bounded orientation sample count differs from receipt")
-    return BoundedOrientation(BOUNDED_ORIENTATION_POLICY, _axis(center), half_width, count)
+    return BoundedOrientation(payload["policy"], _axis(center), half_width, count)
 
 
 def validate_opposite_orientation(bounded, *, selected_normal_rad, robot_side_rad, robot_side_uncertainty_rad=0.0):
     """Every plausible face must remain at least 120 degrees from the robot."""
+    if not isinstance(bounded, BoundedOrientation) or bounded.policy != BOUNDED_ORIENTATION_POLICY:
+        raise ValueError("opposite-face planning requires the legacy bounded orientation policy")
     normal = _number(selected_normal_rad, "selected normal")
     robot_side = _number(robot_side_rad, "observing robot side")
     reserve = _number(robot_side_uncertainty_rad, "observing side uncertainty")
@@ -85,7 +101,8 @@ def validate_opposite_orientation(bounded, *, selected_normal_rad, robot_side_ra
 
 def validate_bounded_endpoint(payload, *, selected_normal_rad, stand_x_m, stand_y_m, stand_uncertainty_m,
                               target_x_m, target_y_m, expected_sample_count=None,
-                              observing_robot_x_m=None, observing_robot_y_m=None):
+                              observing_robot_x_m=None, observing_robot_y_m=None,
+                              allow_coarse_front=False):
     """Analytically bound incidence for one endpoint, including arrival error.
 
     This certifies viewing geometry only. The caller must also validate the
@@ -93,7 +110,11 @@ def validate_bounded_endpoint(payload, *, selected_normal_rad, stand_x_m, stand_
     """
     normal = _number(selected_normal_rad, "selected normal")
     bounded = validated_bounded_orientation(payload, expected_axis_rad=normal - math.pi / 2.0,
-                                            expected_sample_count=expected_sample_count)
+                                            expected_sample_count=expected_sample_count,
+                                            allow_coarse_front=allow_coarse_front)
+    coarse_front = bounded.policy == COARSE_FRONT_ORIENTATION_POLICY
+    maximum_view = (COARSE_FRONT_MAXIMUM_QR_VIEW_OBLIQUITY_RAD if coarse_front
+                    else MAXIMUM_QR_VIEW_OBLIQUITY_RAD)
     dx = _number(target_x_m, "target x") - _number(stand_x_m, "stand x")
     dy = _number(target_y_m, "target y") - _number(stand_y_m, "stand y")
     distance = math.hypot(dx, dy)
@@ -106,7 +127,7 @@ def validate_bounded_endpoint(payload, *, selected_normal_rad, stand_x_m, stand_
     radial_error = abs(_angle(math.atan2(dy, dx) - normal))
     position_reserve = math.asin(total_reserve / distance)
     worst = radial_error + bounded.half_width_rad + position_reserve
-    if worst > MAXIMUM_QR_VIEW_OBLIQUITY_RAD + 1e-12:
+    if worst > maximum_view + 1e-12:
         raise BoundedOrientationViewUnavailableError("bounded orientation endpoint exceeds QR viewing obliquity for plausible angles")
     if (observing_robot_x_m is None) != (observing_robot_y_m is None):
         raise ValueError("bounded orientation observing robot requires both coordinates")
@@ -120,10 +141,12 @@ def validate_bounded_endpoint(payload, *, selected_normal_rad, stand_x_m, stand_
             bounded, selected_normal_rad=normal, robot_side_rad=math.atan2(source_dy, source_dx),
             robot_side_uncertainty_rad=math.asin(stand_uncertainty / source_distance),
         )
-    return {"policy": BOUNDED_ORIENTATION_POLICY, "bounded_orientation": bounded.payload(),
+    return {"policy": bounded.policy, "bounded_orientation": bounded.payload(),
             "all_plausible_angles_supported": True, "actual_endpoint_checked": True,
             "worst_case_view_obliquity_rad": worst,
-            "maximum_view_obliquity_rad": MAXIMUM_QR_VIEW_OBLIQUITY_RAD,
+            "maximum_view_obliquity_rad": maximum_view,
+            **({"maximum_orientation_half_width_rad": COARSE_FRONT_MAXIMUM_ORIENTATION_HALF_WIDTH_RAD}
+               if coarse_front else {}),
             "terminal_position_reserve_m": TERMINAL_POSITION_RESERVE_M,
             "stand_center_uncertainty_m": stand_uncertainty,
             "total_position_reserve_m": total_reserve,

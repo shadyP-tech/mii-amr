@@ -2,8 +2,9 @@
 
 This path does not estimate a stand angle or authorize a facing approach. Its
 optional same-stop grace requires a new, source-fresh associated decode after
-that delay; by default one current decode suffices. Old identity latches cannot
-substitute for a current decode. The certified opposite branch binds text by an
+that delay. A current bounded front head receives at most five seconds to
+gather its seven-frame interval; without that proof one current decode suffices.
+Old identity latches cannot substitute for a current decode. The certified opposite branch binds text by an
 exclusive current crop and finishes immediately without corners or a new fit.
 """
 
@@ -11,6 +12,7 @@ from dataclasses import asdict, dataclass
 import math
 import time
 
+from scripts.aufgabe04.artifacts.bounded_orientation import COARSE_FRONT_ORIENTATION_POLICY
 from scripts.aufgabe04.artifacts.qr_verified_observation_pose import (
     SOURCE_GATES, build_qr_verified_observation_pose,
 )
@@ -18,6 +20,9 @@ from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
 from scripts.aufgabe04.real_robot.configuration.profile import (
     camera_calibration_sha256, real_robot_profile_sha256,
 )
+
+
+FRONT_BOUNDED_OPPORTUNITY_SEC = 5.0
 
 
 @dataclass(frozen=True)
@@ -69,12 +74,20 @@ class QrObservationPoseFallback:
         self.latest_stamp = -math.inf
         self.poisoned = False
         self.effective_delay_sec = self.delay_sec
+        self.front_started_monotonic_sec = None
+        self.front_first_sensor_stamp_sec = None
+
+    def front_grace_pending(self, *, now_monotonic_sec):
+        return (not self.poisoned and self.front_started_monotonic_sec is not None
+                and 0 <= now_monotonic_sec - self.front_started_monotonic_sec < FRONT_BOUNDED_OPPORTUNITY_SEC)
 
     def grace_pending(self, *, now_monotonic_sec):
-        return (not self.poisoned and self.first_monotonic_sec is not None
-                and 0 <= now_monotonic_sec - self.first_monotonic_sec < self.effective_delay_sec)
+        return (self.front_grace_pending(now_monotonic_sec=now_monotonic_sec)
+                or (not self.poisoned and self.first_monotonic_sec is not None
+                    and 0 <= now_monotonic_sec - self.first_monotonic_sec < self.effective_delay_sec))
 
-    def observe(self, current, *, update, observed_at_sec, now_monotonic_sec):
+    def observe(self, current, *, update, observed_at_sec, now_monotonic_sec,
+                front_geometry_eligible=False):
         snapshot = update.snapshot
         context = (snapshot.target_key, snapshot.motion_epoch,
                    current.camera_signature, current.image_shape, current.model_profile_sha256,
@@ -129,11 +142,44 @@ class QrObservationPoseFallback:
         if crop_bound:
             diagnostic.update(delay_sec=0., stand_axis_rad=current.retained_backside_orientation['stand_axis_rad'],
                               orientation_source='certified_backside', current_angle_refit=False)
+        # Reconciliation establishes target identity; it does not replace the
+        # seven current head intervals. One fixed opportunity survives soft
+        # misses but cannot be prolonged by another eligible frame.
+        if not retained and front_geometry_eligible and self.front_started_monotonic_sec is None:
+            self.front_started_monotonic_sec = now_monotonic_sec
+            self.front_first_sensor_stamp_sec = current.stamp_sec
+        if self.front_started_monotonic_sec is not None:
+            pending = self.front_grace_pending(now_monotonic_sec=now_monotonic_sec)
+            diagnostic["front_bounded_opportunity"] = {
+                "pending": pending, "budget_sec": FRONT_BOUNDED_OPPORTUNITY_SEC,
+                "elapsed_sec": max(0., now_monotonic_sec - self.front_started_monotonic_sec),
+                "first_eligible_sensor_stamp_sec": self.front_first_sensor_stamp_sec,
+                "policy": COARSE_FRONT_ORIENTATION_POLICY, "motion_authorized": False,
+            }
+            if pending:
+                return reject("bounded_front_geometry_opportunity_pending")
         if (observed_at_sec - self.first_checked_sec + 1e-9 < delay
                 or now_monotonic_sec - self.first_monotonic_sec + 1e-9 < delay):
             return reject("same_pose_geometry_grace_pending")
         diagnostic.update(ready=True, reason="fresh_qr_observation_pose_ready", qr_id=qr_id)
         return current, update, observed_at_sec
+
+
+def _current_front_geometry_eligible(adapter, current):
+    """Only the exact frame just admitted to the bounded window can start a wait."""
+    head = getattr(adapter, "_pending_bounded_head", None)
+    window = getattr(adapter, "_bounded_head_window", None)
+    if head is None or window is None or current.retained_backside_orientation is not None:
+        return False
+    sample, metadata = head.sample, window.metadata
+    return (sample.face == "front" and sample.qr_id in current.qr_binding.qr_texts_for_evidence
+            and sample.stamp_sec == current.stamp_sec and head.scan_stamp_sec == current.scan_stamp_sec
+            and head.robot_pose == current.robot_pose and sample.camera_signature == current.camera_signature
+            and sample.model_sha256 == current.model_profile_sha256
+            and metadata.get("policy") == COARSE_FRONT_ORIENTATION_POLICY
+            and metadata.get("reason") in {"collecting_bounded_orientation", "bounded_orientation_ready"}
+            and bool(metadata.get("source_stamps_sec"))
+            and metadata["source_stamps_sec"][-1] == current.stamp_sec)
 
 
 def record_qr_observation_pose(adapter, *, update, image_stamp_sec, observed_at_sec):
@@ -148,12 +194,21 @@ def record_qr_observation_pose(adapter, *, update, image_stamp_sec, observed_at_
         fallback = adapter._qr_observation_pose_fallback = QrObservationPoseFallback(
             delay_sec=getattr(adapter.args, "qr_pose_fallback_delay_sec", 0.))
     adapter._qr_observation_pose_ready = fallback.observe(
-        current, update=update, observed_at_sec=observed_at_sec, now_monotonic_sec=time.monotonic())
+        current, update=update, observed_at_sec=observed_at_sec, now_monotonic_sec=time.monotonic(),
+        front_geometry_eligible=_current_front_geometry_eligible(adapter, current))
 
 
 def qr_observation_grace_pending(adapter):
     fallback = getattr(adapter, "_qr_observation_pose_fallback", None)
-    return fallback is not None and fallback.grace_pending(now_monotonic_sec=time.monotonic())
+    if fallback is None:
+        return False
+    evidence = getattr(adapter, "observation_evidence", None)
+    if evidence is None:
+        return False
+    snapshot = evidence.snapshot()
+    return (not snapshot.poisoned and fallback.context is not None
+            and fallback.context[:2] == (snapshot.target_key, snapshot.motion_epoch)
+            and fallback.grace_pending(now_monotonic_sec=time.monotonic()))
 
 
 def commit_qr_observation_pose(adapter):

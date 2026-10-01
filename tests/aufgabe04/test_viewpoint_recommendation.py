@@ -1,3 +1,5 @@
+import copy
+from dataclasses import replace
 import math
 import sys
 import tempfile
@@ -8,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D  # noqa: E402
+from scripts.aufgabe04.artifacts.bounded_orientation import COARSE_FRONT_ORIENTATION_POLICY  # noqa: E402
+from scripts.aufgabe04.real_robot.configuration.recommendation import build_real_viewpoint_recommendation  # noqa: E402
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import (  # noqa: E402
     FaceCandidate,
     MaterialTarget,
@@ -54,6 +58,60 @@ def recommendation() -> SynchronizedViewpointRecommendation:
 
 
 class ViewpointRecommendationModelTest(unittest.TestCase):
+    def _coarse_front(self):
+        return build_real_viewpoint_recommendation(
+            stream_id="stream", stand_id="stand", planning_frame="map",
+            stand_center=Pose2D(0, 0, 0), stand_radius_m=.06, stand_uncertainty_m=.02,
+            robot_pose=Pose2D(.5, 0, math.pi), stand_axis_rad=math.pi / 2,
+            axis_confidence=.435, axis_sample_count=7, sensor_stamp_sec=123,
+            expected_qr_id="QR_002", observed_qr_ids=("QR_002",), target_distance_m=.35,
+            bounded_orientation={"policy": COARSE_FRONT_ORIENTATION_POLICY,
+                "center_rad": math.pi / 2, "half_width_rad": math.radians(19.4), "sample_count": 7},
+        )
+
+    def test_coarse_front_roundtrip_requires_current_resolved_real_hard_qr(self):
+        original = self._coarse_front()
+        payload = recommendation_to_payload(original)
+        loaded = load_recommendation(payload)
+        self.assertEqual(loaded, original)
+        self.assertEqual(loaded.schema_version, 2)
+        self.assertEqual(loaded.bounded_orientation["policy"], COARSE_FRONT_ORIENTATION_POLICY)
+        # Coarse geometry never upgrades confidence or discards its interval.
+        self.assertEqual(loaded.axis_confidence, .435)
+        self.assertEqual(loaded.bounded_orientation["half_width_rad"], math.radians(19.4))
+        for changed in ({"simulation_only": True}, {"source": "sim_synchronized_viewpoint"},
+                        {"axis_state": "unresolved"},
+                        {"side_evidence": replace(original.side_evidence, hard=False)},
+                        {"side_evidence": replace(original.side_evidence, valid=False)},
+                        {"side_evidence": replace(original.side_evidence, kind="qr_observation")},
+                        {"side_evidence": replace(original.side_evidence, provenance="sim_qr_consensus")},
+                        {"material_target": replace(original.material_target, evidence_state="provisional")}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                validate_recommendation(replace(original, **changed))
+        unresolved = copy.deepcopy(payload)
+        for face in unresolved["face_candidates"]:
+            if face["face_id"] == unresolved["material_target"]["face_id"]:
+                face["identity_resolved"] = False
+        with self.assertRaisesRegex(ValueError, "resolved physical face"):
+            load_recommendation(unresolved)
+
+    def test_coarse_front_cannot_be_relabelled_as_legacy_immediate_or_retained(self):
+        original = self._coarse_front()
+        for schema_version in (1, 3, 4, 5):
+            with self.subTest(schema_version=schema_version), self.assertRaises(ValueError):
+                validate_recommendation(replace(original, schema_version=schema_version))
+        with self.assertRaisesRegex(ValueError, "sample count differs"):
+            validate_recommendation(replace(original, axis_sample_count=8))
+
+    def test_coarse_front_preserves_observed_qr_side_for_every_plausible_angle(self):
+        original = self._coarse_front()
+        # Nominally on the selected front side, but part of the complete
+        # interval would put this observation behind the physical face.
+        angle = math.radians(80)
+        with self.assertRaisesRegex(ValueError, "observed QR face for every angle"):
+            validate_recommendation(replace(original, robot_pose=Pose2D(
+                .5 * math.cos(angle), .5 * math.sin(angle), math.pi)))
+
     def test_round_trip_path_and_mapping(self):
         payload = recommendation_to_dict(recommendation())
         loaded_mapping = load_viewpoint_recommendation(payload)

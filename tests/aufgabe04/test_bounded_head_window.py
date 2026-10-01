@@ -8,6 +8,9 @@ import unittest
 from scripts.aufgabe04.real_robot.observer.bounded_head_window import (
     BoundedHeadSample, BoundedHeadWindow, enclose_intervals,
 )
+from scripts.aufgabe04.artifacts.bounded_orientation import (
+    BOUNDED_ORIENTATION_POLICY, COARSE_FRONT_ORIENTATION_POLICY,
+)
 
 
 def update(*, accepted=True, epoch=0, poisoned=False, target="stand", qr=True):
@@ -37,14 +40,15 @@ class BoundedHeadWindowTests(unittest.TestCase):
         self.assertIsNone(self.feed(window, range(6)))
         receipt = self.feed(window, (6,))
         self.assertEqual(receipt["sample_count"], 7)
+        self.assertEqual(receipt["policy"], COARSE_FRONT_ORIENTATION_POLICY)
         self.assertAlmostEqual(receipt["half_width_rad"], math.radians(9))
         self.assertFalse(window.metadata["motion_authorized"])
 
     def test_all_intervals_are_retained_not_averaged_or_outlier_filtered(self):
         window = BoundedHeadWindow()
         self.feed(window, range(6))
-        self.assertIsNone(self.feed(window, (6,), axis_center_rad=math.radians(30)))
-        self.assertGreater(window.metadata["half_width_rad"], math.radians(15))
+        self.assertIsNone(self.feed(window, (6,), axis_center_rad=math.radians(60)))
+        self.assertGreater(window.metadata["half_width_rad"], math.radians(30))
         self.assertIsNone(self.feed(window, range(7, 13)))
         self.assertIsNotNone(self.feed(window, (13,)))
 
@@ -56,6 +60,25 @@ class BoundedHeadWindowTests(unittest.TestCase):
         self.assertEqual(window.metadata["reason"], "head_border_choice_unstable")
         self.assertIsNone(self.feed(window, range(7, 13)))
         self.assertIsNotNone(self.feed(window, (13,)))
+
+    def test_front_coarse_interval_does_not_widen_backside_policy(self):
+        window = BoundedHeadWindow()
+        front = self.feed(window, range(7), half_width_rad=math.radians(20))
+        self.assertEqual(front["policy"], COARSE_FRONT_ORIENTATION_POLICY)
+        self.assertAlmostEqual(front["half_width_rad"], math.radians(20))
+        for half_width in (20, 15):
+            window.reset()
+            result = None
+            for index in range(7):
+                current = sample(index, face="backside", qr_id=None,
+                                 half_width_rad=math.radians(half_width))
+                result = window.observe(current, update=update(qr=False),
+                                        observed_at_sec=current.stamp_sec + .1)
+            if half_width == 20:
+                self.assertIsNone(result)
+                self.assertEqual(window.metadata["reason"], "orientation_range_requires_view_adjustment")
+            else:
+                self.assertEqual(result["policy"], BOUNDED_ORIENTATION_POLICY)
 
     def test_common_image_projection_shift_is_not_a_border_switch(self):
         window = BoundedHeadWindow()

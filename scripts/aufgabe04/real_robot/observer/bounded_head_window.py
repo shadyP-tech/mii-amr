@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from itertools import combinations
 import math
 
-from scripts.aufgabe04.artifacts.bounded_orientation import MAXIMUM_ORIENTATION_HALF_WIDTH_RAD
+from scripts.aufgabe04.artifacts.bounded_orientation import (
+    BOUNDED_ORIENTATION_POLICY, COARSE_FRONT_ORIENTATION_POLICY,
+    MAXIMUM_ORIENTATION_HALF_WIDTH_RAD, COARSE_FRONT_MAXIMUM_ORIENTATION_HALF_WIDTH_RAD,
+)
 
 
 def axial(value):
@@ -124,12 +127,17 @@ class BoundedHeadWindow:
                            for a, b in zip(first, second)), default=0.)
         # This only limits the artifact's representable range. The planner
         # must separately check its actual terminal pose and route.
+        front = sample.face == "front"
+        policy = COARSE_FRONT_ORIENTATION_POLICY if front else BOUNDED_ORIENTATION_POLICY
+        maximum_half_width = (COARSE_FRONT_MAXIMUM_ORIENTATION_HALF_WIDTH_RAD if front
+                              else MAXIMUM_ORIENTATION_HALF_WIDTH_RAD)
         ready = (len(self._samples) >= self.required_samples and interval is not None
-                 and interval[1] <= MAXIMUM_ORIENTATION_HALF_WIDTH_RAD and corner_jump <= .04)
+                 and interval[1] <= maximum_half_width and corner_jump <= .04)
         self.metadata = {
+            "policy": policy, "maximum_half_width_rad": maximum_half_width,
             "ready": ready, "reason": ("bounded_orientation_ready" if ready else
                 "head_border_choice_unstable" if corner_jump > .04 else
-                "orientation_range_requires_view_adjustment" if interval is None or interval[1] > MAXIMUM_ORIENTATION_HALF_WIDTH_RAD
+                "orientation_range_requires_view_adjustment" if interval is None or interval[1] > maximum_half_width
                 else "collecting_bounded_orientation"),
             "sample_count": len(self._samples), "required_samples": self.required_samples,
             "source_stamps_sec": [s.stamp_sec for s in self._samples],
@@ -142,5 +150,5 @@ class BoundedHeadWindow:
         }
         if not ready:
             return None
-        return {"policy": "current_head_noise_expanded_interval", "center_rad": interval[0],
+        return {"policy": policy, "center_rad": interval[0],
                 "half_width_rad": interval[1], "sample_count": len(self._samples)}

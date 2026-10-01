@@ -138,6 +138,76 @@ class TourObstacleNavigationTest(unittest.TestCase):
         self.writer.assert_not_called()
         self.assertFalse((self.root / "arrival.json").exists())
 
+    def _start_handoff(self):
+        fixture = source_fixture.StartReturnTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        config, completed = fixture.completed("Start")
+        stored = load_stored_admitted_poses(completed, config)["Start"]
+        return stored, config
+
+    def _verify_handoff(self, stored, config, effects, *, output_root=None):
+        return navigation.execute_tour_obstacle_navigation(stored, config, effects,
+            tour_session_id="tour1", visit_index=0, output_root=output_root or self.root,
+            obstacle_map=self.map, capture_scan=self.scan, verify_start_handoff=True)
+
+    def test_camera_start_handoff_reprojects_pose_and_never_dispatches_motion(self):
+        stored, config = self._start_handoff()
+        effects = StoredPoseNavigationEffects(Mock(return_value=self.frame(.8, .1, map_x=.5)),
+            Mock(), plan_route=Mock(), load_route_uncertainty_readiness=Mock())
+        result = self._verify_handoff(stored, config, effects)
+        self.assertEqual(result["status"], "already_at_target")
+        self.assertEqual(result["initial_start_policy"], "verify_camera_return")
+        self.assertEqual(result["qr_id"], "Start")
+        self.assertTrue(result["arrival_verified"])
+        self.assertFalse(result["motion_published"])
+        self.assertEqual(result["leg_count"], 0)
+        self.assertAlmostEqual(result["arrival_target_pose"]["x_m"], .8)
+        effects.admit_planning_frame.assert_called_once()
+        effects.plan_route.assert_not_called()
+        effects.run_motion_leg.assert_not_called()
+        effects.load_route_uncertainty_readiness.assert_not_called()
+        self.scan.assert_not_called()
+        self.map.update_from_capture.assert_not_called()
+        self.writer.assert_not_called()
+        self.assertTrue(json.loads((self.root / "arrival.json").read_text())["arrival_verified"])
+
+    def test_camera_start_handoff_rejects_position_heading_and_frame_mismatch(self):
+        stored, config = self._start_handoff()
+        cases = (self.frame(.5, .1), self.frame(.7, .5), replace(self.frame(.7, .1), odom_frame="changed"))
+        for index, frame in enumerate(cases):
+            with self.subTest(frame=frame):
+                root = self.root / str(index)
+                effects = StoredPoseNavigationEffects(Mock(return_value=frame), Mock(), plan_route=Mock())
+                with self.assertRaises((RuntimeError, ValueError)):
+                    self._verify_handoff(stored, config, effects, output_root=root)
+                effects.run_motion_leg.assert_not_called()
+                effects.plan_route.assert_not_called()
+                self.assertFalse((root / "arrival.json").exists())
+                self.assertFalse(json.loads((root / "failure.json").read_text())["arrival_verified"])
+        self.scan.assert_not_called()
+
+    def test_camera_start_handoff_rejects_failed_localization_and_changed_sources(self):
+        stored, config = self._start_handoff()
+        effects = StoredPoseNavigationEffects(Mock(side_effect=RuntimeError("stale localization")), Mock())
+        with self.assertRaisesRegex(RuntimeError, "stale localization"):
+            self._verify_handoff(stored, config, effects, output_root=self.root / "stale")
+        Path(stored.evidence["source_artifacts"][0]["path"]).write_text("changed")
+        effects.admit_planning_frame.reset_mock()
+        with self.assertRaisesRegex(ValueError, "source artifact hash mismatch"):
+            self._verify_handoff(stored, config, effects, output_root=self.root / "changed")
+        effects.admit_planning_frame.assert_not_called()
+        effects.run_motion_leg.assert_not_called()
+
+    def test_handoff_verification_cannot_replace_a_later_visit_or_other_qr(self):
+        stored, config = self._start_handoff()
+        for target, visit in ((self.stored, 0), (stored, 1)):
+            with self.subTest(visit=visit), self.assertRaisesRegex(ValueError, "initial Start"):
+                navigation.execute_tour_obstacle_navigation(target, config, Mock(),
+                    tour_session_id="tour1", visit_index=visit, output_root=self.root,
+                    obstacle_map=self.map, capture_scan=self.scan, verify_start_handoff=True)
+        self.assertFalse(self.root.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

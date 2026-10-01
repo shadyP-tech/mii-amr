@@ -33,6 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Production visits requested from the random-plan API (3–100).")
     parser.add_argument("--server-plan-only", action="store_true",
                         help="Omit supplemental visits to stands absent from the server plan.")
+    parser.add_argument("--drive-to-start", action="store_true",
+                        help="Allow a new initial approach if the camera runner's automatic return to Start failed or the robot moved; default: verify already at Start.")
     parser.add_argument("--tour-id", default=None)
     parser.add_argument("--output-root", type=Path,
                         default=Path("results/aufgabe04/real/station_tours"))
@@ -98,7 +100,10 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
 
     effects = build_navigation_effects(session.profile, output_root)
     effects.admit_planning_frame(output_root / "preflight/before_authorization.json")
-    print("Unloaded stand tour: saved Start pose first, then the server's randomized targets.")
+    drive_to_start = args.drive_to_start
+    print("Unloaded stand tour: verify the camera exploration's arrival at Start, then request the server plan."
+          if not drive_to_start else
+          "Unloaded stand tour: approach saved Start if needed, then request the server plan.")
     print("Travel limits: 0.15 m/s and 0.60 rad/s; slower near corners and final poses.")
     print("LiDAR obstacles enter a temporary map; blocked routes stop and replan at most twice per visit.")
     print("Server actions use timed waits only; this runner does not manipulate physical cargo.")
@@ -122,12 +127,15 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
         return capture_tour_scan(session.profile, tour_id=tour_id, output_path=path)
 
     def navigate(qr_id, visit_index):
-        print(f"Visit {visit_index}: driving to saved {qr_id} pose", flush=True)
+        verify_handoff = visit_index == 0 and not drive_to_start
+        print("Visit 0: verifying stopped arrival at Start after camera exploration"
+              if verify_handoff else f"Visit {visit_index}: navigating to saved {qr_id} pose", flush=True)
         return execute_tour_obstacle_navigation(
             session.poses_by_qr[qr_id], config, effects,
             obstacle_map=obstacle_map, capture_scan=capture_scan,
             tour_session_id=tour_id, visit_index=visit_index,
             output_root=output_root / "visits" / f"{visit_index:03d}",
+            verify_start_handoff=verify_handoff,
         )
 
     client = StationTourClient(base_url=args.server_base_url,
@@ -189,6 +197,7 @@ def main(argv=None) -> int:
                      "stored_pose": asdict(saved.pose), "source_frame": saved.source_frame.to_evidence()}
                 for qr, saved in sorted(session.poses_by_qr.items())
             },
+            "initial_start_policy": "drive_if_needed" if args.drive_to_start else "verify_camera_return",
             "mode": "execute" if args.execute else "artifact_preview",
             "odom_continuity_asserted": args.confirm_odom_continuity,
             "unloaded_asserted": args.confirm_unloaded,

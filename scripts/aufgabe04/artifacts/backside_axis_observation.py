@@ -143,6 +143,7 @@ class BacksideAxisObservation:
             bounded = validated_bounded_orientation(
                 self.bounded_orientation, expected_axis_rad=self.stand_axis_rad,
                 expected_sample_count=self.axis_sample_count,
+                allow_coarse_front=False,
             )
             validate_opposite_orientation(bounded, selected_normal_rad=selected, robot_side_rad=robot_side)
         return selected
@@ -263,6 +264,7 @@ def validated_backside_axis_observation(
         validated_bounded_orientation(
             bounded_payload, expected_axis_rad=payload.get("stand_axis_rad"),
             expected_sample_count=axis_sample_count,
+            allow_coarse_front=False,
         )
     qr_absent_sample_count = payload.get("qr_absent_sample_count")
     if (

@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Collection, Mapping, Sequence
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
-from scripts.aufgabe04.artifacts.bounded_orientation import validate_bounded_endpoint, validated_bounded_orientation
+from scripts.aufgabe04.artifacts.bounded_orientation import (
+    COARSE_FRONT_ORIENTATION_POLICY, validate_bounded_endpoint, validated_bounded_orientation,
+)
 from scripts.aufgabe04.artifacts.current_head_front_observation import (
     CURRENT_HEAD_FRONT_POLICY, validated_current_head_front_evidence,
 )
@@ -130,6 +132,10 @@ def validate_recommendation(
     if recommendation.schema_version == BOUNDED_RECOMMENDATION_SCHEMA_VERSION and recommendation.bounded_orientation is None:
         raise ValueError("schema-2 viewpoint recommendation requires bounded orientation")
     retained = recommendation.schema_version in (RETAINED_FACING_RECOMMENDATION_SCHEMA_VERSION, PROJECTED_RETAINED_FACING_SCHEMA_VERSION)
+    coarse_front = (isinstance(recommendation.bounded_orientation, Mapping)
+                    and recommendation.bounded_orientation.get("policy") == COARSE_FRONT_ORIENTATION_POLICY)
+    if coarse_front and recommendation.schema_version != BOUNDED_RECOMMENDATION_SCHEMA_VERSION:
+        raise ValueError("coarse front orientation requires a schema-2 current front recommendation")
     projected_retained = recommendation.schema_version == PROJECTED_RETAINED_FACING_SCHEMA_VERSION
     if not projected_retained and isinstance(recommendation.axis_measurement, Mapping) and recommendation.axis_measurement.get("policy") == "projected_retained_backside_current_qr_facing":
         raise ValueError("retained projection requires schema 5")
@@ -276,6 +282,7 @@ def validate_recommendation(
                 or not recommendation.side_evidence.hard or not recommendation.side_evidence.valid
                 or recommendation.side_evidence.kind != ("qr_observation" if retained else "qr_consensus")
                 or recommendation.side_evidence.provenance != ("real/onboard_camera_qr_observation" if retained else "real/onboard_camera_qr_consensus")
+                or (coarse_front and target.evidence_state != "hard_qr")
                 or not matching_face.identity_resolved):
             raise ValueError("bounded orientation requires committed real onboard QR face evidence")
         validate_bounded_endpoint(
@@ -285,8 +292,10 @@ def validate_recommendation(
             stand_uncertainty_m=recommendation.stand.uncertainty_m,
             target_x_m=target.pose.x_m, target_y_m=target.pose.y_m,
             expected_sample_count=recommendation.axis_sample_count,
+            allow_coarse_front=coarse_front,
         )
-        bounded = validated_bounded_orientation(recommendation.bounded_orientation)
+        bounded = validated_bounded_orientation(recommendation.bounded_orientation,
+                                                allow_coarse_front=coarse_front)
         observed_side = math.atan2(recommendation.robot_pose.y_m - recommendation.stand.center.y_m,
                                    recommendation.robot_pose.x_m - recommendation.stand.center.x_m)
         observed_distance = math.hypot(recommendation.robot_pose.y_m - recommendation.stand.center.y_m,

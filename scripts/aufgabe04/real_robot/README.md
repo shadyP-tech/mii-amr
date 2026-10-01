@@ -28,11 +28,18 @@ packages do not publish `/cmd_vel`; certified navigation remains behind the
 existing navigation runner and its physical-run gates.
 
 For a separate server-driven tour after exploration, use
-`entrypoints/run_server_station_tour.py`. It loads the saved QR pose evidence,
-drives to Start, requests a random plan from `http://10.42.0.1:8000`, and follows
-the server targets without starting camera exploration. Temporary LiDAR
+`entrypoints/run_server_station_tour.py` after the camera runner finishes its
+automatic return to Start. The standalone script does not launch or control the
+camera runner. Its initial Start visit verifies a fresh stopped pose against the
+reprojected saved target within 0.08 m and 0.15 rad, without route planning,
+obstacle-scan capture or motion. Failure stops before any server call. Use
+`--drive-to-start` to allow an initial approach if the return failed or the robot
+moved; later final and supplemental Start visits still navigate normally.
+After verification, it requests a random plan from `http://10.42.0.1:8000` and
+follows the server targets. Temporary LiDAR
 occupancy, forward route monitoring and bounded stopped A* replanning support
 detours to the same saved target. The default is an offline artifact preview.
+`inputs.json` records the selected `initial_start_policy`.
 See the [standalone tour instructions](../../../docs/setups/aufgabe04_server_station_tour.md)
 for execution flags, odometry continuity and output evidence.
 

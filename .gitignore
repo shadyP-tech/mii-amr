@@ -204,3 +204,12 @@ tests/aufgabe04/fixtures/target_support_20260930/*
 !tests/aufgabe04/fixtures/target_support_20260930/inputs.json
 !tests/aufgabe04/fixtures/target_support_20260930/manifest.json
 !tests/aufgabe04/fixtures/target_support_20260930/README.md
+!tests/aufgabe04/fixtures/coarse_front_facing_20261001/
+tests/aufgabe04/fixtures/coarse_front_facing_20261001/*
+!tests/aufgabe04/fixtures/coarse_front_facing_20261001/inputs.json
+!tests/aufgabe04/fixtures/coarse_front_facing_20261001/README.md
+!tests/aufgabe04/fixtures/start_return_20261001/
+tests/aufgabe04/fixtures/start_return_20261001/*
+!tests/aufgabe04/fixtures/start_return_20261001/inputs.json
+!tests/aufgabe04/fixtures/start_return_20261001/candidate_snapshot.json
+!tests/aufgabe04/fixtures/start_return_20261001/README.md

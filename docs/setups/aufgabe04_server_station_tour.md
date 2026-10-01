@@ -4,7 +4,8 @@
 tour using the completed camera exploration's stored stand poses. It does not
 start exploration, capture images or decode QR codes. Both geometry-validated
 facing poses and admitted QR-only observation poses are supported, including
-their saved heading.
+their saved heading. Start this standalone script after the camera runner has
+finished its automatic return to Start; it does not launch or control that runner.
 
 Use the original exploration directory and hardware profile on the workstation
 inside the same ROS environment. Source artifacts retain their absolute paths
@@ -42,6 +43,17 @@ Use the same command with:
 --execute --confirm-unloaded --confirm-odom-continuity
 ```
 
+By default, the initial Start visit only verifies a fresh stopped pose against
+the saved Start pose reprojected into the current localization frame. Arrival
+must be within **0.08 m and 0.15 rad**. This check does not plan a route, capture
+an obstacle-scan cohort or dispatch motion. A failed check stops the tour before
+any server call.
+
+Add `--drive-to-start` if the camera runner's automatic return failed or the
+robot moved afterward. This explicitly allows an initial approach when needed,
+using the usual planning and motion gates. Later final and supplemental returns
+to Start continue to navigate normally with either initial policy.
+
 The robot must still use the exploration's continuous odometry frame: no base
 restart, odometry reset or replacement of its frame origin. Historical discovery
 artifacts do not record an odometry reset identifier, so the runner requires this
@@ -56,7 +68,8 @@ clearance and velocity-ownership checks remain active.
 
 The sequence is:
 
-1. Drive to the admitted pose for exact QR `Start` and verify stopped arrival.
+1. Verify the camera runner's stopped arrival at the admitted pose for exact QR
+   `Start`; with `--drive-to-start`, approach first if needed.
 2. Request a random plan from
    `POST /api/v1/robots/{robot_id}/plan/randomize` on
    `http://10.42.0.1:8000`, using `qr_count` from the saved numbered QRs and
@@ -83,11 +96,11 @@ operate a charger. An arrival report identifies a previously observed QR at a
 verified saved pose; it is not presented as a fresh camera observation.
 
 Travel uses the admitted-pose policy of up to **0.15 m/s and 0.60 rad/s**, slowing
-to **0.055 m/s and 0.18 rad/s** at corners and near the final pose. Each visit
-plans around the complete stored candidate pool and may use up to four fresh,
+to **0.055 m/s and 0.18 rad/s** at corners and near the final pose. Travel plans
+use the complete stored candidate pool and may use up to four fresh,
 independently admitted route stages when uncertainty prevents a single leg.
 Temporary obstacles are handled by a tour-local LiDAR occupancy grid and stopped
-global replanning. Before every execution, three fresh stationary scans are
+global replanning. Before each motion leg, three fresh stationary scans are
 transformed at their source timestamps into the continuous odometry frame. Their
 occupied cells are projected into the fresh map frame, combined with the static
 map and all saved stand keepouts, and used by A* and the child clearance checks.
@@ -116,7 +129,9 @@ optimizer. Each new obstacle detour includes a deliberate stopped admission.
 ## Evidence and failures
 
 Each tour gets a new output directory. `inputs.json` records source identities,
-poses and invocation choices; `visits/` contains routes, stopped localization,
+poses and invocation choices, including `initial_start_policy`:
+`verify_camera_return` by default or `drive_if_needed` with `--drive-to-start`.
+`visits/` contains routes, stopped localization,
 permits, temporary obstacle snapshots, stationary scan cohorts, authenticated
 terminal outcomes and measured arrivals; `server/` records the frozen plan and an append-only
 request/response journal. The normal child-run evidence bundles are also kept.

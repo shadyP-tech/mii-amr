@@ -17,17 +17,24 @@ from scripts.aufgabe04.real_robot.mission.tour_navigation_leg import plan_tour_l
 def execute_tour_obstacle_navigation(
     stored, config, effects, *, obstacle_map, capture_scan,
     tour_session_id: str, visit_index: int, output_root: Path,
+    verify_start_handoff: bool = False,
 ):
     """Reach the original stored pose with at most two stopped obstacle detours.
 
     ``obstacle_map`` is shared across visits in one tour. Its published snapshots
     are frozen per execution; observations, clearing and expiry occur only here,
     while stopped. Each attempt gets its own route, permit and consumption slot.
+    ``verify_start_handoff`` accepts the camera runner's already-completed
+    return only after fresh stopped pose verification; it never dispatches motion.
     """
     if (not isinstance(tour_session_id, str) or ".." in tour_session_id
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", tour_session_id)):
         raise ValueError("stored pose tour requires a safe tour session ID")
     tour_mission_leg_index(visit_index, 0)
+    if type(verify_start_handoff) is not bool:
+        raise ValueError("verify_start_handoff must be boolean")
+    if verify_start_handoff and (visit_index != 0 or stored.evidence.get("qr_id") != "Start"):
+        raise ValueError("Start handoff verification is restricted to initial Start")
     if obstacle_map.tour_id != tour_session_id or obstacle_map.map_bundle_sha256 != config.plan.map_bundle_sha256:
         raise ValueError("temporary occupancy belongs to a different tour or map")
     root = Path(output_root)
@@ -35,6 +42,8 @@ def execute_tour_obstacle_navigation(
     summary = {"status": "failed_closed", "tour_id": tour_session_id, "visit_index": visit_index,
         "target_pose_reached": False, "arrival_verified": False, "motion_authorized": False,
         "motion_published": False, "leg_count": 0, "replan_count": 0, "legs": []}
+    if verify_start_handoff:
+        summary["initial_start_policy"] = "verify_camera_return"
     try:
         qr_id = stored.evidence["qr_id"]
         if not isinstance(qr_id, str) or not qr_id:
@@ -58,6 +67,13 @@ def execute_tour_obstacle_navigation(
             # admitted execution, even if localization now places it near target.
             if execution == 0 and distance <= .08 and heading <= .15:
                 break
+            if verify_start_handoff:
+                raise RuntimeError(
+                    "camera exploration Start handoff is not at the stored pose "
+                    f"(position error {distance:.3f} m, heading error {heading:.3f} rad); "
+                    "finish the automatic return before starting the tour, or use "
+                    "--drive-to-start to authorize a new approach"
+                )
             capture_path = Path(capture_scan(leg_root / "scan_capture.json"))
             obstacle_map.update_from_capture(capture_path)
             overlay_path = obstacle_map.write_projection(leg_root / "temporary_obstacles.json", frame)

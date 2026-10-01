@@ -18,6 +18,7 @@ import cv2
 import numpy
 
 from scripts.aufgabe04.artifacts.backside_axis_observation import validated_backside_axis_observation
+from scripts.aufgabe04.artifacts.bounded_orientation import COARSE_FRONT_ORIENTATION_POLICY
 from scripts.aufgabe04.artifacts.candidate_inspection_observation import load_candidate_inspection_observation
 from scripts.aufgabe04.navigation.approach.viewpoint_recommendation import load_recommendation
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
@@ -32,7 +33,8 @@ from scripts.aufgabe04.real_robot.observer.current_head_association import assoc
 from scripts.aufgabe04.real_robot.observer.current_head_qr_binding import bind_qr_to_current_head
 from scripts.aufgabe04.real_robot.observer.head_observation_confidence import HeadConfidenceInput
 from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
-from scripts.aufgabe04.real_robot.observer.qr_target_binding import QrTargetBinding
+from scripts.aufgabe04.real_robot.observer.qr_target_binding import QrTargetBinding, bind_qr_observations_to_target
+from scripts.aufgabe04.real_robot.observer.qr_observation_pose import prepare_qr_observation_pose
 from scripts.aufgabe04.real_robot.observer.tracked_head_registration import register_current_tracked_head, tracked_head_selection
 from scripts.aufgabe04.real_robot.candidate.inspection_policy import candidate_view_options
 from tests.aufgabe04.test_bounded_head_detection import bounded_detection
@@ -90,7 +92,7 @@ class BoundedHeadObservationTests(unittest.TestCase):
         self.adapter.args.status_json = self.root / "status.json"
         for name, digest in (("real_robot_profile_sha256", "a" * 64),
                              ("camera_calibration_sha256", "b" * 64)):
-            for module in ("bounded_head_observation", "node"):
+            for module in ("bounded_head_observation", "node", "qr_observation_pose"):
                 mocked = patch("scripts.aufgabe04.real_robot.observer." + module + "." + name,
                                return_value=digest)
                 mocked.start()
@@ -99,7 +101,8 @@ class BoundedHeadObservationTests(unittest.TestCase):
     def frame(self, stamp, *, face="front", associated=True, complete=True,
               marker=None, marker_seen=None, age=.1, scan_stamp=None,
               scan_for_proof=None, qr_id="QR_003", qr_conflict=False,
-              pose=None, publish=True, no_appearance=False, reconcile=False, fragmented=False):
+              pose=None, publish=True, no_appearance=False, reconcile=False, fragmented=False,
+              qr_decoded=True):
         marker = face == "front" if marker is None else marker
         marker_seen = marker if marker_seen is None else marker_seen
         scan_stamp = stamp if scan_stamp is None else scan_stamp
@@ -178,8 +181,18 @@ class BoundedHeadObservationTests(unittest.TestCase):
                 options, center=(sum(p.u_px for p in current.estimate.corners) / 4, 80.))
             observations = tuple(replace(item, text=qr_id) for item in observations)
             binding = replace(binding, qr_texts_for_evidence=(qr_id,))
+            if association.target_reconciliation is not None:
+                binding = bind_qr_observations_to_target(
+                    observations, roi=current.attempt.roi,
+                    camera_registration_accepted=association.accepted,
+                    target_reconciliation=association.target_reconciliation,
+                    **{key: options[key] for key in ("intrinsics", "scan_from_camera", "scan",
+                        "map_bearing_rad", "cone_half_angle_rad", "accepted_range_m", "now_sec",
+                        "max_scan_age_sec", "min_cluster_sample_count", "max_camera_map_bearing_delta_rad")})
             binding = bind_qr_to_current_head(binding, observations,
                 head_corners=current.estimate.corners, head_association=association)
+            if not qr_decoded:
+                observations, binding = (), QrTargetBinding(False, "no_decoded_qr_geometry")
         metadata = {}
         self.adapter._pending_bounded_head = prepare_bounded_head(
             estimate=current.estimate, debug=current.debug, association=association,
@@ -200,6 +213,13 @@ class BoundedHeadObservationTests(unittest.TestCase):
         texts = binding.qr_texts_for_evidence
         if qr_conflict:
             texts = ("QR_003", "QR_004")
+        if self.adapter.args.qr_observation_pose_json is not None:
+            self.adapter._pending_qr_observation_pose = prepare_qr_observation_pose(
+                qr_binding=binding, qr_observations=observations if face == "front" else (),
+                observed_qr_texts=texts, image_stamp_sec=stamp, scan_stamp_sec=scan_stamp,
+                robot_pose=pose, target_key=self.adapter._target_evidence_key(),
+                camera_signature=(640., 640., 400., 300.), image_shape=(600, 800, 3),
+                roi=current.attempt.roi, model_profile_sha256=self.profile.sha256, metadata=metadata)
         update = self.adapter._record_observation_frame(
             robot_pose=pose, image_stamp_sec=stamp, scan_stamp_sec=scan_stamp,
             observed_at_sec=stamp+age, lidar_associated=associated,
@@ -250,6 +270,64 @@ class BoundedHeadObservationTests(unittest.TestCase):
         self.assertIsNone(update.axis_consensus)
         self.assertIsNone(update.resolved_qr_id)
         self.assertIsNone(self.payload("front"))
+
+    def test_coarse_front_gets_seven_frames_before_reconciled_zero_delay_qr_fallback(self):
+        self.current, self.proof = bounded_detection()
+        self.assertGreater(math.degrees(self.proof.half_width_rad), 15.)
+        # Prime the real stopped-scan reconciliation, then begin a new camera
+        # accumulator without borrowing any of those earlier head samples.
+        for stamp in (99.4, 99.6, 99.8):
+            self.frame(stamp, reconcile=True, publish=False)
+        self.adapter._reset_observation_evidence()
+        self.adapter.profile.scan_frame = "base_scan"
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.adapter.args.qr_pose_fallback_delay_sec = 0.
+        for index in range(7):
+            stamp = 100. + index * .2
+            with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=stamp):
+                update, metadata = self.frame(stamp, reconcile=True)
+            self.assertIsNotNone(self.adapter._pending_qr_observation_pose.qr_binding.target_reconciliation)
+            self.assertFalse(self.adapter.args.qr_observation_pose_json.exists(), metadata)
+            if index < 6:
+                self.assertIsNone(self.payload("front"))
+                self.assertEqual(metadata["qr_observation_pose_fallback"]["reason"],
+                                 "bounded_front_geometry_opportunity_pending")
+        recommendation = load_recommendation(self.payload("front"))
+        self.assertEqual(recommendation.bounded_orientation["policy"], COARSE_FRONT_ORIENTATION_POLICY)
+        self.assertEqual(recommendation.axis_sample_count, 7)
+        self.assertAlmostEqual(recommendation.bounded_orientation["half_width_rad"], self.proof.half_width_rad)
+        self.assertFalse(update.axis_sample_accepted)
+        self.assertIsNone(update.axis_consensus)
+        self.assertTrue(self.adapter.completed)
+
+    def test_front_opportunity_expires_without_extending_on_soft_misses_or_using_qr_latch(self):
+        self.current, self.proof = bounded_detection()
+        self.adapter.profile.scan_frame = "base_scan"
+        self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
+        self.adapter.args.qr_pose_fallback_delay_sec = 0.
+        for stamp, changes in ((100., {}), (101., {"complete": False}),
+                               (104.9, {"complete": False}), (105., {"qr_decoded": False})):
+            with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=stamp):
+                self.frame(stamp, **changes)
+            self.assertFalse(self.adapter.args.qr_observation_pose_json.exists())
+            self.assertFalse(self.adapter.completed)
+        self.assertEqual(self.adapter._qr_observation_pose_fallback.front_started_monotonic_sec, 100.)
+        # An expired deadline still cannot publish a source-stale decode.
+        with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=105.1):
+            self.frame(105.1, age=.6)
+        self.assertFalse(self.adapter.args.qr_observation_pose_json.exists())
+        # Fresh bounds after expiry cannot restart the fixed opportunity.
+        with patch("scripts.aufgabe04.real_robot.observer.qr_observation_pose.time.monotonic", return_value=106.):
+            _, metadata = self.frame(106.)
+        qr = json.loads(self.adapter.args.qr_observation_pose_json.read_text())
+        self.assertEqual(qr["sensor_stamp_sec"], 106.)
+        self.assertFalse(qr["facing_ready"])
+        self.assertIsNone(qr["stand_axis_rad"])
+        self.assertIsNone(self.payload("front"))
+        opportunity = metadata["qr_observation_pose_fallback"]["front_bounded_opportunity"]
+        self.assertFalse(opportunity["pending"])
+        self.assertEqual(opportunity["budget_sec"], 5.)
+        self.assertEqual(opportunity["first_eligible_sensor_stamp_sec"], 100.)
 
     def test_reconciled_backside_retains_metric_center_without_diagnostic_lookup(self):
         for index in range(7):

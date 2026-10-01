@@ -53,6 +53,7 @@ class StationTourRuntimeTest(unittest.TestCase):
             self.assertEqual(inputs["randomize_request"], {"qr_count": 4, "stations": 3})
             self.assertTrue(inputs["cover_all_stands"])
             self.assertFalse(inputs["physical_cargo_actions"])
+            self.assertEqual(inputs["initial_start_policy"], "verify_camera_return")
 
     def test_execute_requires_unloaded_and_continuous_odom_before_loading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,6 +98,15 @@ class StationTourRuntimeTest(unittest.TestCase):
             self.assertEqual(execute.call_args.args[2:], ((root / "tours/tour_test").resolve(), "tour_test"))
 
     def test_execute_wires_real_orchestrator_to_new_authorization_and_all_saved_poses(self):
+        self._assert_execute_start_policy(drive_to_start=False)
+
+    def test_explicit_drive_to_start_allows_initial_navigation(self):
+        self._assert_execute_start_policy(drive_to_start=True)
+
+    def test_unverified_start_handoff_prevents_all_server_requests(self):
+        self._assert_execute_start_policy(drive_to_start=False, fail_handoff=True)
+
+    def _assert_execute_start_policy(self, *, drive_to_start, fail_handoff=False):
         from tests.aufgabe04.test_station_tour import FakeClient
         from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
             MissionLegKind, load_mission_leg_motion_authorization,
@@ -108,12 +118,13 @@ class StationTourRuntimeTest(unittest.TestCase):
             session.profile = SimpleNamespace(robot_id="robot", resolved_runtime=lambda: SimpleNamespace(
                 namespace="robot", cmd_vel_topic="/robot/cmd_vel", odom_frame="odom"))
             args = SimpleNamespace(server_base_url="http://fixture.invalid", server_robot_id="robot",
-                                   http_timeout_sec=5., stations=3, server_plan_only=False)
+                                   http_timeout_sec=5., stations=3, server_plan_only=False,
+                                   drive_to_start=drive_to_start)
             client = FakeClient([])
             effects = Mock()
             maps = []
             def arrived(stored, config, received_effects, *, tour_session_id, visit_index, output_root,
-                        obstacle_map, capture_scan):
+                        obstacle_map, capture_scan, verify_start_handoff):
                 self.assertIs(received_effects, effects)
                 maps.append(obstacle_map)
                 self.assertEqual(obstacle_map.tour_id, tour_session_id)
@@ -121,6 +132,11 @@ class StationTourRuntimeTest(unittest.TestCase):
                 self.assertEqual(config.mission_leg_motion_authorization_json, root / "motion_authorization/tour.json")
                 qr_id = next(qr for qr, value in session.poses_by_qr.items() if value is stored)
                 self.assertEqual(output_root, root / "visits" / f"{visit_index:03d}")
+                self.assertEqual(verify_start_handoff, visit_index == 0 and not drive_to_start)
+                if fail_handoff:
+                    self.assertEqual(qr_id, "Start")
+                    self.assertTrue(verify_start_handoff)
+                    raise RuntimeError("Start handoff is not at the stored pose")
                 return {"arrival_verified": True, "qr_id": qr_id}
             # Give each QR a distinguishable immutable saved-target object.
             session.poses_by_qr = {qr: SimpleNamespace(qr_id=qr) for qr in session.poses_by_qr}
@@ -129,6 +145,13 @@ class StationTourRuntimeTest(unittest.TestCase):
                  patch("scripts.aufgabe04.task_client.station_tour_client.StationTourClient", return_value=client), \
                  patch("scripts.aufgabe04.real_robot.mission.tour_obstacle_navigation.execute_tour_obstacle_navigation",
                        side_effect=arrived) as navigate, redirect_stdout(io.StringIO()):
+                if fail_handoff:
+                    with self.assertRaisesRegex(RuntimeError, "Start handoff"):
+                        runtime.execute_tour(session, args, root, "tour_test")
+                    self.assertEqual(client.events, [])
+                    self.assertEqual(client.reported, [])
+                    self.assertEqual(navigate.call_count, 1)
+                    return
                 result = runtime.execute_tour(session, args, root, "tour_test")
             self.assertTrue(result["all_saved_stands_visited"])
             self.assertTrue(result["server_mission_finished"])
@@ -139,6 +162,12 @@ class StationTourRuntimeTest(unittest.TestCase):
             self.assertEqual(authorization.session_id, "tour_test")
             self.assertEqual(authorization.allowed_leg_kinds, (MissionLegKind.STORED_POSE_TOUR,))
             self.assertEqual(session.config.mission_leg_motion_authorization_json, Path("old-exploration-authorization"))
+
+    def test_cli_start_handoff_is_verify_only_unless_opted_into_driving(self):
+        parser = runtime.build_parser()
+        arguments = self.arguments(Path("/tmp/tour"))
+        self.assertFalse(parser.parse_args(arguments).drive_to_start)
+        self.assertTrue(parser.parse_args([*arguments, "--drive-to-start"]).drive_to_start)
 
     def test_navigation_adapter_never_requests_camera_readiness(self):
         module = "scripts.aufgabe04.real_robot.autonomous_runner.runtime"
