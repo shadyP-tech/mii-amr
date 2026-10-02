@@ -72,10 +72,16 @@ Usable geometry, retained orientation, or a QR observation takes priority over
 optional centering advice. Any executed turn requires a fresh stopped capture.
 A verified, bounded centering tolerance miss allows one capture with further
 centering disabled for that view; unsafe or unverified motion still fails.
-For an initial observation approach only, visibility-related missing LiDAR
-support can retain the bounded survey target. The full candidate pool remains
-in route keepouts. Precision and opposite-side motion retain their stronger
-current-target requirements.
+Initial observation approaches select from the validated survey candidates
+using safe route cost and current localization. A distant scan is not required
+to resolve the small head before travel. The selected survey point is bound to
+the snapshot, map, coverage plan and admitted planning frame; localization
+reseals preserve that observation-only scope. After arrival, one fresh LiDAR
+cohort may refine the target. Weak support leaves camera inspection available,
+and an optional refinement cannot newly reject an otherwise admissible passive
+view. Static-map and morphology admission still apply, and the full candidate
+pool remains in route keepouts. Precision and opposite-side motion retain
+their stronger current-target requirements.
 
 `candidate/qr_goal_progress.py` records each bounded inspection episode and
 finishes at five distinct, candidate-bound QR identities. The preferred outcome

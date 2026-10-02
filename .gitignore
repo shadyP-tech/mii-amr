@@ -222,3 +222,4 @@ tests/aufgabe04/fixtures/opposite_head_identity_20261001/*
 !tests/aufgabe04/fixtures/opposite_head_identity_20261001/frame_000005.jpg
 !tests/aufgabe04/fixtures/opposite_head_identity_20261001/frame_000016.jpg
 !tests/aufgabe04/fixtures/opposite_head_identity_20261001/frame_000031.jpg
+!tests/aufgabe04/fixtures/station_tour_uncertainty_20261002.json

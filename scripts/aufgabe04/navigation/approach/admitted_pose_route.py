@@ -22,6 +22,10 @@ from scripts.aufgabe04.navigation.approach.admitted_return_uncertainty import (
     build_return_prefix, evaluate_admitted_return_stage_uncertainty,
     executable_return_poses, return_route_geometry, select_admitted_return_prefix,
 )
+from scripts.aufgabe04.navigation.approach.stored_pose_route_alternatives import (
+    AlternativeGeometryRejected, RouteAlternativesExhausted, StoredPoseRouteGeometry,
+    select_stored_pose_route_alternative, validate_alternative_evidence,
+)
 from scripts.aufgabe04.navigation.approach.candidate_route_uncertainty_selection import (
     CandidateRouteUncertaintyContext,
 )
@@ -62,15 +66,15 @@ from scripts.aufgabe04.navigation.foundation.models import (
 from scripts.aufgabe04.navigation.planning.certified_exact_start_route import (
     certify_and_smooth_exact_start_route,
 )
-from scripts.aufgabe04.navigation.planning.costmap import Costmap
+from scripts.aufgabe04.navigation.planning.costmap import CELL_SOURCE_INFLATED, Costmap
 from scripts.aufgabe04.navigation.planning.temporary_obstacle_overlay import apply_bound_temporary_obstacles
 from scripts.aufgabe04.navigation.planning.global_planner import PlanRouteResult, plan_route
 from scripts.aufgabe04.navigation.planning.exact_start_connector import (
-    prepend_certified_exact_start,
+    prepend_certified_exact_start, _segment_clearance_evidence,
 )
 from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.navigation.planning.route_smoothing import (
-    RouteSmoothingSummary, segment_is_collision_free,
+    RouteSmoothingSummary, segment_is_collision_free, supercover_segment_cells,
 )
 from scripts.aufgabe04.navigation.planning.waypoint_csv import SelectedRouteLeg, load_route_leg
 from scripts.aufgabe04.stations.candidate_snapshot import (
@@ -299,6 +303,87 @@ def _plan_certified_stored_goal(*, base, static, planning, start, target, inflat
     raise ValueError("exact stored target is blocked; no continuously certified terminal connector")
 
 
+def _plan_admitted_pose_geometry(*, base, snapshot, radius, inflation, collision,
+                                  candidate_uid, evidence, start, target, plan, active,
+                                  purpose, stationary_turn):
+    """Pure geometric candidate after map, source and frame authentication."""
+    static, planning = _stored_pose_costmaps(
+        base, snapshot=snapshot, radius=radius, inflation=inflation,
+        collision=collision, candidate_uid=candidate_uid, evidence=evidence,
+    )
+
+    def validate_clearance(checked_poses):
+        _validate_candidate_clearance(
+            checked_poses, snapshot=snapshot, candidate_uid=candidate_uid,
+            transit_radius=radius, active_standoff=active, target_evidence=evidence,
+            collision_standoff=collision,
+        )
+
+    goal_connector = None
+    target_blocked = not segment_is_collision_free(planning, target, target)
+    if target_blocked:
+        # Keep every planning cell intact. Only automatic Start return may
+        # append a bounded, separately certified metric terminal segment.
+        if stationary_turn or purpose != ADMITTED_POSE_ROUTE_PURPOSE:
+            raise ValueError("exact stored target is blocked; goal snapping is forbidden")
+        result, connector, smoothing, goal_connector = _plan_certified_stored_goal(
+            base=base, static=static, planning=planning, start=start, target=target,
+            inflation=inflation, snap_radius=plan.config.snap_radius_m,
+            validate_clearance=validate_clearance,
+        )
+        goal_connector.update(map_bundle_sha256=snapshot.map_bundle_sha256,
+                              candidate_snapshot_sha256=candidate_snapshot_sha256(snapshot))
+    elif stationary_turn:
+        # A stationary heading correction uses the actual saved point twice;
+        # no grid-center excursion or fabricated translation is introduced.
+        cell = planning.world_to_grid(target)
+        result = PlanRouteResult(
+            route=Route(
+                points=(RoutePoint(0, cell, start), RoutePoint(1, cell, target)),
+                requested_start=start, requested_goal=target,
+                snapped_start=start, snapped_goal=target, length_m=0.,
+            ),
+            diagnostics=PlanningDiagnostics(
+                status="ok", start_cell=cell, goal_cell=cell,
+                snapped_start_cell=cell, snapped_goal_cell=cell, path_cell_count=2,
+            ),
+        )
+    else:
+        result = plan_route(
+            planning, start, target, snap_radius_m=plan.config.snap_radius_m,
+        )
+    if result.route is None:
+        raise ValueError(f"stored target route is unreachable: {result.diagnostics.reason}")
+    if goal_connector is None:
+        anchor = result.route.points[-1].pose
+        if not segment_is_collision_free(planning, anchor, target):
+            raise ValueError("exact stored target connector is blocked")
+        result = _append_exact_target(result, planning=planning, target=target)
+    if stationary_turn:
+        result, connector = prepend_certified_exact_start(
+            result, base_costmap=base, start=start,
+            required_clearance_m=inflation,
+        )
+        smoothing = RouteSmoothingSummary(
+            enabled=False, input_point_count=2, output_point_count=2,
+            input_length_m=0., output_length_m=0., optimized=False,
+            skipped_reason="stationary_turn_preserves_heading_handoff",
+        )
+    elif goal_connector is None:
+        result, connector, smoothing = certify_and_smooth_exact_start_route(
+            result, base_costmap=base, planning_costmap=planning,
+            exact_start=start, required_clearance_m=inflation,
+        )
+    assert result.route is not None
+    if len(result.route.points) < 2:
+        raise ValueError("stored Start pose already reached; no travel route required")
+    poses = tuple(p.pose for p in result.route.points)
+    validate_clearance(poses)
+    full_poses = (start, *poses[1:-1], target)
+    return StoredPoseRouteGeometry(result, planning, connector, smoothing, full_poses), goal_connector
+
+
+
 def plan_admitted_pose_route(
     *, map_yaml: Path, semantic_map_id: str, plan: CoverageSurveyPlan,
     snapshot: CandidateSnapshot, snapshot_path: Path, candidate_uid: str,
@@ -370,6 +455,7 @@ def plan_admitted_pose_route(
         target_evidence, snapshot=snapshot, candidate_uid=candidate_uid,
         target=target, start=start, purpose=purpose,
     )
+    _measured_center(target_evidence)  # Malformed input is never a retryable geometry failure.
     stationary_turn = (target.x_m, target.y_m) == (start.x_m, start.y_m)
     if stationary_turn and _same_pose(start, target):
         raise ValueError("stored Start pose already reached; no travel route required")
@@ -384,92 +470,52 @@ def plan_admitted_pose_route(
         "map_bundle_sha256": bundle.bundle_sha256, "planning_frame": plan.planning_frame,
         "planning_frame_admission": target_evidence["planning_frame_admission"],
     })
-    static, planning = _stored_pose_costmaps(
-        base, snapshot=snapshot, radius=radius, inflation=inflation_radius_m,
-        collision=collision, candidate_uid=candidate_uid, evidence=target_evidence,
-    )
-
-    def validate_clearance(checked_poses):
-        _validate_candidate_clearance(
-            checked_poses, snapshot=snapshot, candidate_uid=candidate_uid,
-            transit_radius=radius, active_standoff=active, target_evidence=target_evidence,
-            collision_standoff=collision,
-        )
-
-    goal_connector = None
-    target_blocked = not segment_is_collision_free(planning, target, target)
-    if target_blocked:
-        # Keep every planning cell intact. Only automatic Start return may
-        # append a bounded, separately certified metric terminal segment.
-        if stationary_turn or purpose != ADMITTED_POSE_ROUTE_PURPOSE:
-            raise ValueError("exact stored target is blocked; goal snapping is forbidden")
-        result, connector, smoothing, goal_connector = _plan_certified_stored_goal(
-            base=base, static=static, planning=planning, start=start, target=target,
-            inflation=inflation_radius_m, snap_radius=plan.config.snap_radius_m,
-            validate_clearance=validate_clearance,
-        )
-        goal_connector.update(map_bundle_sha256=bundle.bundle_sha256,
-                              candidate_snapshot_sha256=snapshot_hash)
-    elif stationary_turn:
-        # A stationary heading correction uses the actual saved point twice;
-        # no grid-center excursion or fabricated translation is introduced.
-        cell = planning.world_to_grid(target)
-        result = PlanRouteResult(
-            route=Route(
-                points=(RoutePoint(0, cell, start), RoutePoint(1, cell, target)),
-                requested_start=start, requested_goal=target,
-                snapped_start=start, snapped_goal=target, length_m=0.,
-            ),
-            diagnostics=PlanningDiagnostics(
-                status="ok", start_cell=cell, goal_cell=cell,
-                snapped_start_cell=cell, snapped_goal_cell=cell, path_cell_count=2,
-            ),
-        )
-    else:
-        result = plan_route(
-            planning, start, target, snap_radius_m=plan.config.snap_radius_m,
-        )
-    if result.route is None:
-        raise ValueError(f"stored target route is unreachable: {result.diagnostics.reason}")
-    if goal_connector is None:
-        anchor = result.route.points[-1].pose
-        if not segment_is_collision_free(planning, anchor, target):
-            raise ValueError("exact stored target connector is blocked")
-        result = _append_exact_target(result, planning=planning, target=target)
-    if stationary_turn:
-        result, connector = prepend_certified_exact_start(
-            result, base_costmap=base, start=start,
-            required_clearance_m=inflation_radius_m,
-        )
-        smoothing = RouteSmoothingSummary(
-            enabled=False, input_point_count=2, output_point_count=2,
-            input_length_m=0., output_length_m=0., optimized=False,
-            skipped_reason="stationary_turn_preserves_heading_handoff",
-        )
-    elif goal_connector is None:
-        result, connector, smoothing = certify_and_smooth_exact_start_route(
-            result, base_costmap=base, planning_costmap=planning,
-            exact_start=start, required_clearance_m=inflation_radius_m,
-        )
-    assert result.route is not None
-    if len(result.route.points) < 2:
-        raise ValueError("stored Start pose already reached; no travel route required")
-    poses = tuple(p.pose for p in result.route.points)
-    validate_clearance(poses)
-
     evidence_json = json.dumps(
         dict(target_evidence), indent=2, sort_keys=True, allow_nan=False,
     ) + "\n"
-    full_poses = (start, *poses[1:-1], target)
-    stage = None
-    stage_target = target
-    if route_uncertainty_context is not None:
-        stage = select_admitted_return_prefix(
-            full_poses=full_poses, base_costmap=base,
-            uncertainty=route_uncertainty_context,
-            target_evidence_sha256=hashlib.sha256(evidence_json.encode()).hexdigest(),
-            minimum_prefix_vertex_index=1 if connector.required else 0,
-        )
+    target_sha256 = hashlib.sha256(evidence_json.encode()).hexdigest()
+    alternative_evidence = None
+    goal_connector = None
+    geometry_args = dict(base=base, snapshot=snapshot, radius=radius, collision=collision,
+        candidate_uid=candidate_uid, evidence=target_evidence, start=start, target=target,
+        plan=plan, active=active, purpose=purpose, stationary_turn=stationary_turn)
+    use_alternatives = navigation is not None and not stationary_turn and route_uncertainty_context is not None
+    if use_alternatives:
+        def build_candidate(inflation):
+            # Only this pure geometry boundary may yield a retryable rejection.
+            # Source files, frame admission and overlay replay were checked above.
+            try:
+                geometry, _ = _plan_admitted_pose_geometry(**geometry_args, inflation=inflation)
+            except ValueError as exc:
+                raise AlternativeGeometryRejected(str(exc)) from exc
+            return geometry
+        try:
+            geometry, stage, inflation_radius_m, alternative_evidence = select_stored_pose_route_alternative(
+                build_candidate, base_radius_m=inflation_radius_m, base_costmap=base,
+                uncertainty=route_uncertainty_context, target_evidence_sha256=target_sha256,
+                identity={"map_bundle_sha256": bundle.bundle_sha256, "candidate_snapshot_sha256": snapshot_hash,
+                    "candidate_uid": candidate_uid, **tour_identity,
+                    "temporary_obstacle_overlay_sha256": overlay_binding["temporary_obstacle_overlay_sha256"]},
+            )
+        except RouteAlternativesExhausted as exc:
+            failure_path = Path(output_dir).with_name(Path(output_dir).name + "_alternatives_failure.json")
+            failure_path.parent.mkdir(parents=True, exist_ok=True)
+            with failure_path.open("x") as handle:
+                json.dump(exc.evidence, handle, indent=2, sort_keys=True, allow_nan=False)
+                handle.write("\n")
+            raise
+    else:
+        geometry, goal_connector = _plan_admitted_pose_geometry(**geometry_args, inflation=inflation_radius_m)
+        stage = (None if route_uncertainty_context is None else select_admitted_return_prefix(
+            full_poses=geometry.full_poses, base_costmap=base,
+            uncertainty=route_uncertainty_context, target_evidence_sha256=target_sha256,
+            minimum_prefix_vertex_index=1 if geometry.connector.required else 0,
+        ))
+    result, planning, connector, smoothing = (geometry.result, geometry.planning_costmap,
+                                             geometry.connector, geometry.smoothing)
+    full_poses = geometry.full_poses
+    poses, stage_target = full_poses, target
+    if stage is not None:
         if not stage.is_final_stage and return_stage_index == MAX_RETURN_TO_START_LEGS - 1:
             raise ValueError("return stage limit exhausted before exact Start target")
         if goal_connector is not None and not stage.is_final_stage and stage.end_segment_index >= len(full_poses) - 2:
@@ -501,6 +547,12 @@ def plan_admitted_pose_route(
         paths["temporary_obstacle_overlay_json"] = output_dir / "temporary_obstacle_overlay.json"
         shutil.copyfile(overlay_binding["temporary_obstacle_overlay_json"], paths["temporary_obstacle_overlay_json"])
         overlay_binding["temporary_obstacle_overlay_json"] = str(paths["temporary_obstacle_overlay_json"])
+    alternative_binding = {}
+    if alternative_evidence is not None:
+        paths["route_alternatives_json"] = output_dir / "route_alternatives.json"
+        paths["route_alternatives_json"].write_text(json.dumps(alternative_evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        alternative_binding = {"route_alternatives_json": str(paths["route_alternatives_json"]),
+                               "route_alternatives_sha256": file_sha256(paths["route_alternatives_json"])}
     stage_metadata = None
     if stage is not None:
         paths["full_return_route_json"] = output_dir / "full_return_route.json"
@@ -515,7 +567,7 @@ def plan_admitted_pose_route(
             "exact_goal_connector": goal_connector,
             **return_route_geometry(full_poses),
             **({"route_purpose": purpose, **tour_identity} if tour_identity else {}),
-            **overlay_binding,
+            **overlay_binding, **alternative_binding,
         }
         paths["full_return_route_json"].write_text(json.dumps(full_evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
         paths["uncertainty_selection_json"].write_text(json.dumps(stage.evidence, indent=2, sort_keys=True, allow_nan=False) + "\n")
@@ -559,7 +611,7 @@ def plan_admitted_pose_route(
         "stationary_turn": stationary_turn,
         "route_purpose": purpose, "motion_authorized": True,
         **tour_identity,
-        **overlay_binding,
+        **overlay_binding, **alternative_binding,
         "planning_frame": snapshot.planning_frame, "physical_clearance_enforced": True,
         "physical_clearance": dict(physical_clearance), "inflation_radius_m": inflation_radius_m,
         "candidate_transit_radius_m": radius, "candidate_snapshot_json": str(paths["candidate_snapshot"]),
@@ -626,7 +678,8 @@ def _validate_return_stage(
         for key in ("route_purpose", "tour_id", "visit_index", "qr_id"):
             if full.get(key) != metadata.get(key):
                 raise ValueError(f"full stored-pose tour {key} mismatch")
-        for key in ("tour_navigation", "temporary_obstacle_overlay_json", "temporary_obstacle_overlay_sha256"):
+        for key in ("tour_navigation", "temporary_obstacle_overlay_json", "temporary_obstacle_overlay_sha256",
+                    "route_alternatives_json", "route_alternatives_sha256"):
             if full.get(key) != metadata.get(key):
                 raise ValueError(f"full stored-pose tour {key} mismatch")
     for key, expected in (
@@ -697,6 +750,26 @@ def _validate_return_stage(
     )
     if not admission.decision.accepted or payload_sha256(admission.evidence) != payload_sha256(selection["selected_admission"]):
         raise ValueError("return selected uncertainty evidence mismatch or rejected")
+    if metadata.get("tour_navigation") is not None and not metadata.get("stationary_turn"):
+        path = Path(metadata["route_alternatives_json"])
+        if file_sha256(path) != metadata.get("route_alternatives_sha256"):
+            raise ValueError("route alternatives hash mismatch")
+        alternatives = json.loads(path.read_text())
+        validate_alternative_evidence(alternatives, selected_radius_m=metadata["inflation_radius_m"],
+            full_poses=full_poses, selection=selection, target_sha256=metadata["target_evidence_sha256"],
+            identity={"map_bundle_sha256": metadata["map_bundle_sha256"],
+                "candidate_snapshot_sha256": metadata["candidate_snapshot_sha256"],
+                "candidate_uid": metadata["selected_candidate_stand_id"],
+                **{key: metadata[key] for key in ("tour_id", "visit_index", "qr_id", "tour_navigation")},
+                "temporary_obstacle_overlay_sha256": metadata["temporary_obstacle_overlay_sha256"]})
+        if (alternatives["map_resolution_m"] != base.resolution
+            or alternatives["robot_radius_m"] != config.robot_radius_m):
+            raise ValueError("route alternatives map resolution or robot footprint mismatch")
+        validate_physical_clearance(metadata["physical_clearance"],
+            inflation_radius_m=alternatives["base_inflation_radius_m"],
+            candidate_transit_radius_m=metadata["candidate_transit_radius_m"])
+    elif any(key in metadata for key in ("route_alternatives_json", "route_alternatives_sha256")):
+        raise ValueError("route alternatives require a travelling dynamic tour")
     validate_exact_start_route_binding(metadata, tuple((p.x_m, p.y_m) for p in full_poses))
     return full_poses
 
@@ -718,6 +791,21 @@ def _validate_exact_goal_connector(metadata, full_poses, *, snapshot, evidence,
         base, snapshot=snapshot, radius=radius, inflation=metadata["inflation_radius_m"],
         collision=collision, candidate_uid=candidate_uid, evidence=evidence,
     )
+    if metadata.get("route_alternatives_json") is not None:
+        connector = metadata["exact_start_connector"]
+        start = _pose(connector["exact_start"], "exact start")
+        anchor = _pose(connector["anchor"], "exact start anchor")
+        recomputed = _segment_clearance_evidence(base, start, anchor,
+            required_clearance_m=metadata["inflation_radius_m"])
+        if payload_sha256(recomputed.to_metadata()) != payload_sha256(connector):
+            raise ValueError("route alternatives exact-start clearance proof mismatch")
+        for index, (first, second) in enumerate(zip(full_poses, full_poses[1:])):
+            if index == 0 and connector["required"]:
+                if any(not planning.is_traversable(cell) and planning.cell_sources.get(cell) != CELL_SOURCE_INFLATED
+                       for cell in supercover_segment_cells(planning, first, second)):
+                    raise ValueError("route alternatives connector intersects live keepout")
+            elif not segment_is_collision_free(planning, first, second):
+                raise ValueError("route alternatives geometry violates selected inflation")
     recorded = metadata.get("exact_goal_connector")
     if recorded is None:
         if not segment_is_collision_free(planning, stored_target, stored_target):

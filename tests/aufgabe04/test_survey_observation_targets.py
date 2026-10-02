@@ -1,4 +1,4 @@
-"""Missing visibility permits observation routes, never precise target motion."""
+"""Survey hypotheses grant observation approaches; local scans refine arrival."""
 from dataclasses import replace
 import json
 import math
@@ -17,16 +17,18 @@ from scripts.aufgabe04.navigation.localization.odom_execution_certificate import
 from scripts.aufgabe04.perception.lidar_scan_metadata import LidarScanMetadata
 from scripts.aufgabe04.real_robot.candidate import approach
 from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import (
-    HASH_FIELD, assess_current_lidar_targets, capture_current_lidar_targets,
-    load_current_lidar_assessment, permits_survey_observation,
+    capture_current_lidar_targets,
 )
 from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import capture_candidate_lidar_view
 from scripts.aufgabe04.real_robot.candidate.lidar_head_capture import HASH_FIELD as CAPTURE_HASH, head_capture_payload
 from scripts.aufgabe04.real_robot.candidate.target_admission import (
-    SURVEY_OBSERVATION_POLICY, bind_survey_observation_target, require_frame_target,
+    SURVEY_OBSERVATION_POLICY, SURVEY_OBSERVATION_HASH_FIELD,
+    bind_survey_observation_target, load_survey_observation_support,
+    require_frame_target, write_survey_observation_support,
 )
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
-from tests.aufgabe04.test_current_lidar_targets import fixture, raw_scans
+from tests.aufgabe04.test_current_lidar_targets import raw_scans
+from tests.aufgabe04.test_autonomous_candidate_runtime_recovery import _runtime_stop, _outcome
 from tests.aufgabe04 import test_current_lidar_approach_integration as integration_fixtures
 from tests.aufgabe04 import test_lidar_inspection_planning as planning_fixtures
 
@@ -43,7 +45,7 @@ def integration():
         helper.doCleanups()
 
 
-def capture_support(config, planning, root, *, kind="occluded"):
+def capture_support(config, planning, root, *, kind="occluded", lateral_shift=0.):
     """Real immutable acquisition/replay; only the ROS sensor is substituted."""
     transform = planning.map_from_odom
     assert transform.yaw_rad == 0.
@@ -56,6 +58,15 @@ def capture_support(config, planning, root, *, kind="occluded"):
         for scan in scans:
             scan["scan_pose_odom"] = {"x_m": scan_x, "y_m": base_y, "yaw_rad": 0.}
             scan["base_pose_odom"] = {"x_m": base_x, "y_m": base_y, "yaw_rad": 0.}
+            if lateral_shift:
+                assert kind == "stand"
+                distance_x = target_x-scan_x
+                scan["ranges"] = [distance_x/math.cos(angle) if
+                    abs(distance_x*math.tan(angle)-lateral_shift) <= .036 else None
+                    for angle in (scan["angle_min"]+i*scan["angle_increment"]
+                                  for i in range(len(scan["ranges"])))]
+                scan["scan_metadata"] = LidarScanMetadata(.5, 0., .1, "linear", (),
+                    tuple("nan" if value is None else None for value in scan["ranges"])).to_mapping()
             if kind == "missing":
                 scan["ranges"] = [None]*len(scan["ranges"])
                 scan["ranges"][0] = 2.  # Healthy sensor; only the target cone is empty.
@@ -75,53 +86,50 @@ def capture_support(config, planning, root, *, kind="occluded"):
         planning, set(config.snapshot.candidate_uids), root)
 
 
-def source(integration, *, kind="occluded"):
+def source(integration):
     config = integration.config()
     config = replace(config, camera_calibration=replace(config.camera_calibration, base_frame="base_footprint"))
     planning = integration.frame(-.04)
     artifacts = approach._materialize_candidate_frame_projection(source_config=config,
         source_registry=integration.registry(config), planning_frame=planning,
         output_root=integration.root / "source_projection")
-    _, support = capture_support(artifacts.config, planning, integration.root / "support", kind=kind)
+    path = integration.root / "support" / "survey_observation.json"
+    support = write_survey_observation_support(path, config=artifacts.config,
+        planning_frame=planning, candidate_uid="candidate_0")
     frame = approach._CandidateObservationFrame(artifacts.config, artifacts.config.snapshot.candidates[0],
         planning, artifacts.camera_decision_binding(), observation_pose=planning.current_pose)
-    return config, bind_survey_observation_target(frame, evidence_path=Path(support["evidence_path"])), support
+    return config, bind_survey_observation_target(frame, evidence_path=path), path, support
 
 
-@pytest.mark.parametrize("kind,eligible", [("occluded", True), ("wall", False),
-    ("absent", False), ("ambiguous", False), ("stand", False)])
-def test_only_missing_visibility_allows_survey_route(kind, eligible):
-    _, evidence = assess_current_lidar_targets(**fixture(kinds=[kind]*8))
-    assert permits_survey_observation(evidence["candidate_decisions"]["candidate_1"]) is eligible
+def test_survey_proof_needs_no_scan_and_preserves_observation_only_authority(integration):
+    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError("survey proof rescan")):
+        _, frame, path, proof = source(integration)
+    replay = load_survey_observation_support(path, candidate_uid="candidate_0", snapshot=frame.config.snapshot)
+    assert replay == proof
+    assert replay["source_kind"] == "survey_candidate_snapshot"
+    assert replay["purpose"] == "observation_only"
+    assert replay["precise_motion_authorized"] is False
+    assert replay["keepouts_changed"] is False
 
 
-def test_competing_candidate_and_unstable_or_incomplete_support_never_fall_back():
-    _, evidence = assess_current_lidar_targets(**fixture(kinds=["occluded"]*8))
-    decision = evidence["candidate_decisions"]["candidate_1"]
-    for reason in ("competing_candidate", "ambiguous_clusters", "non_stand_cluster", "unsupported"):
-        changed = {**decision, "scans": [{**decision["scans"][0], "reason": reason}, *decision["scans"][1:]]}
-        assert not permits_survey_observation(changed)
-    assert not permits_survey_observation({**decision, "scans": decision["scans"][:-1]})
-    for reason in ("current_cluster_centers_unstable", "current_target_geometry_exceeds_bound",
-                   "laser_plane_not_inside_measured_head"):
-        assert not permits_survey_observation({**decision, "reasons": [*decision["reasons"], reason]})
-
-
-@pytest.mark.parametrize("kind", ["occluded", "missing"])
-def test_real_missing_cohort_replays_and_camera_arrival_uses_executed_survey_target(integration, kind):
-    config, frame, support = source(integration, kind=kind)
-    path = Path(support["evidence_path"])
+@pytest.mark.parametrize("kind", ["occluded", "missing", "absent", "wall", "ambiguous"])
+def test_weak_local_cohort_preserves_survey_target_and_still_starts_camera(integration, kind):
+    config, frame, path, _ = source(integration)
     original = path.read_bytes()
-    estimates, replay = load_current_lidar_assessment(path, snapshot=frame.config.snapshot)
-    assert not estimates and permits_survey_observation(replay["candidate_decisions"]["candidate_0"])
-    cameras = []
+    order = []
     effects = integration.effects(capture_observation=lambda request: cameras.append(request) or
         approach.CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None))
-    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError("passive arrival rescan")):
+    cameras = []
+    def capture(cfg, effects, planning, uids, root):
+        order.append("scan")
+        assert len(order) == 1
+        return capture_support(cfg, planning, root, kind=kind)
+    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture) as scans:
         _, arrived = approach._capture_candidate_camera_result(observation_frame=frame,
             source_config=config, effects=effects, source_registry=integration.registry(config),
             candidate_root=integration.root / "arrival", candidate_run_id="survey_observation", candidate_index=0)
     assert len(cameras) == 1
+    scans.assert_called_once()
     assert arrived.camera_target_geometry == arrived.candidate.geometry
     assert arrived.retained_survey_target == frame.retained_survey_target
     assert arrived.retained_lidar_target is None and arrived.current_lidar_target_path is None
@@ -129,10 +137,18 @@ def test_real_missing_cohort_replays_and_camera_arrival_uses_executed_survey_tar
     proof = json.loads(arrived.camera_target_geometry_evidence_path.read_text())
     assert proof["source_kind"] == SURVEY_OBSERVATION_POLICY
     assert proof["retained_survey_target"]["precise_motion_authorized"] is False
+    # A later passive arrival refresh keeps the same target without another
+    # opportunity to scan or refine it, even while it remains survey-bound.
+    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError("passive refresh rescan")):
+        refreshed = approach._admit_camera_arrival_geometry(source_config=config,
+            effects=integration.effects(), source_registry=integration.registry(config), candidate_uid="candidate_0",
+            candidate_root=integration.root / "passive_refresh", observation_attempt_index=0,
+            target_source_frame=arrived)
+    assert refreshed.retained_survey_target == arrived.retained_survey_target
 
 
 def test_survey_target_reprojects_original_geometry_and_rejects_tampering(integration):
-    config, frame, support = source(integration)
+    config, frame, path, _ = source(integration)
     for index, angle in enumerate((.4, -.25)):
         tf = PlanarTransform2D(.2, -.1, angle)
         planning = CandidatePlanningFrame(Pose2D(.2+.3*math.cos(angle), -.1+.3*math.sin(angle), angle), tf)
@@ -148,12 +164,44 @@ def test_survey_target_reprojects_original_geometry_and_rejects_tampering(integr
     altered = replace(frame, camera_target_geometry=replace(frame.camera_target_geometry, x_m=.2))
     with pytest.raises(ValueError, match="geometry/provenance"):
         require_frame_target(altered, evidence_path=integration.root / "bad.json", attempt_index=0)
-    path = Path(support["evidence_path"])
-    payload = json.loads(path.read_text()); payload.pop(HASH_FIELD)
-    payload["candidate_decisions"]["candidate_0"]["scans"][0]["reason"] = "unsupported"
-    path.unlink(); write_content_hashed_json(path, payload, hash_field=HASH_FIELD)
-    with pytest.raises(ValueError, match="source replay"):
+    payload = json.loads(path.read_text()); payload.pop(SURVEY_OBSERVATION_HASH_FIELD)
+    payload["planning_frame"]["current_pose"]["x_m"] += .01
+    path.unlink(); write_content_hashed_json(path, payload, hash_field=SURVEY_OBSERVATION_HASH_FIELD)
+    with pytest.raises(ValueError, match="source binding"):
         require_frame_target(frame, evidence_path=integration.root / "tampered.json", attempt_index=0)
+
+
+def test_valid_local_point_outside_acquisition_cone_cannot_veto_reached_camera_view(integration):
+    config, source_frame, _, _ = source(integration)
+    cameras, supports = [], []
+    def capture(cfg, effects, planning, uids, output):
+        result = capture_support(cfg, planning, output, kind="stand", lateral_shift=.12)
+        assert "candidate_0" in result[0]
+        supports.append(result[1])
+        return result
+    def turn(**kwargs):
+        pytest.fail("optional target refinement must not cause a turn")
+    effects = integration.effects(admit_planning_frame=lambda _: integration.frame(.5),
+        run_centering_turn=turn, capture_observation=lambda request: cameras.append(request) or
+            approach.CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None))
+    root = integration.root / "lateral_refinement"
+    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture) as scans:
+        _, arrived = approach._capture_candidate_camera_result(observation_frame=source_frame,
+            source_config=config, effects=effects, source_registry=integration.registry(config),
+            candidate_root=root, candidate_run_id="lateral_refinement", candidate_index=0)
+    scans.assert_called_once()
+    assert len(cameras) == 1
+    assert arrived.camera_target_geometry == arrived.candidate.geometry
+    assert arrived.retained_survey_target is source_frame.retained_survey_target
+    assert arrived.retained_lidar_target is None
+    evidence = json.loads((root / "candidate_arrival_admission.json").read_text())
+    refinement = evidence["survey_target_refinement"]
+    assert evidence["accepted"] and refinement["accepted"]
+    assert refinement["adopted_for_camera_arrival"] is False
+    rejection = refinement["arrival_rejection"]
+    assert rejection["reasons"] == ["bearing_error_above_maximum"]
+    assert rejection["measurements"]["absolute_bearing_error_rad"] > math.radians(10.)
+    assert Path(supports[0]["evidence_path"]).is_file()
 
 
 def test_sparse_refinement_preserves_both_route_candidates_and_all_keepouts(tmp_path):
@@ -185,13 +233,23 @@ def test_sparse_refinement_preserves_both_route_candidates_and_all_keepouts(tmp_
     assert set(selection.to_evidence()["candidate_target_admission"]["eligible_candidate_uids"]) == set(snapshot.candidate_uids)
 
 
-def test_occluded_selection_seals_existing_safe_observation_route(integration):
+def test_explicit_survey_selection_suppresses_existing_precise_lidar_hints(tmp_path):
+    kwargs, _ = planning_fixtures.LidarInspectionPlanningTest().fixture(tmp_path)
+    assert kwargs["lidar_inspection_hints"]
+    kwargs["current_target_estimates"] = {}
+    selection = plan_and_select_camera_candidate(**kwargs)
+    plan = selection.selected_plan
+    assert plan.approach_bearing_mode == "robot-to-stand"
+    assert plan.validated_target_center is None
+    assert plan.camera_alignment is None
+
+
+def test_survey_selection_seals_safe_observation_route_without_fresh_head_support(integration):
     config = integration.config()
     config = replace(config, camera_calibration=replace(config.camera_calibration, base_frame="base_footprint"))
     effects = integration.effects(admit_planning_frame=lambda _: integration.frame(-.04),
         select_initial_preapproach=approach._select_initial_preapproach)
-    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=lambda cfg, effects, frame, uids, root:
-               capture_support(cfg, frame, root)):
+    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError("initial selection rescan")):
         selected_config, start, selection, planning = approach._select_initial_candidate_with_localization_refresh(
             config=config, effects=effects, source_registry=integration.registry(config), candidate_index=0,
             eligible={"candidate_0"}, exact_two_support_by_uid=None)
@@ -202,7 +260,7 @@ def test_occluded_selection_seals_existing_safe_observation_route(integration):
         integration.root / "route", config.approach_offset_m, config.inflation_radius_m,
         config.candidate_transit_radius_m, config.physical_clearance,
         prepared_plan=selection.prepared_plan, selection_evidence=selection.evidence,
-        survey_observation_support_path=Path(selection.evidence["current_lidar_support"]["evidence_path"]))
+        survey_observation_support_path=Path(selection.evidence["survey_observation_support_path"]))
     sealed = approach._plan_preapproach_from_request(request)
     assert Path(sealed["route_csv"]).is_file()
     assert (request.output_dir / "preapproach_execution" / "route_certificate.json").is_file()
@@ -216,7 +274,8 @@ def test_occluded_selection_seals_existing_safe_observation_route(integration):
     assert completed[0].retained_survey_target is not None
     for forbidden in (replace(request, approach_normal_rad=0.),
                       replace(request, axis_observation_path=integration.root / "axis.json"),
-                      replace(request, start=Pose2D(.2, 0., 0.))):
+                      replace(request, start=Pose2D(.2, 0., 0.)),
+                      replace(request, plan=replace(request.plan, survey_id="different_survey"))):
         with pytest.raises(ValueError):
             approach._plan_preapproach_from_request(forbidden)
     with pytest.raises(ValueError, match="precise or opposite"):
@@ -226,22 +285,29 @@ def test_occluded_selection_seals_existing_safe_observation_route(integration):
             candidate_index=0, target_id="candidate_0", plan_planning_frame=planning)
 
 
-@pytest.mark.parametrize("replacement_kind", ["occluded", "stand", "absent", "wall", "ambiguous"])
-def test_replacement_uses_its_own_fresh_target_and_never_reuses_the_old_survey_receipt(integration, replacement_kind):
-    config, frame, old_support = source(integration)
-    config = replace(config, max_startup_reseals_per_leg=1)
-    planned_config = replace(frame.config, max_startup_reseals_per_leg=1)
+@pytest.mark.parametrize("owner", ["startup", "runtime", "startup_runtime"])
+def test_survey_reseal_refreshes_frame_proof_without_scan_or_precise_target_promotion(integration, owner):
+    config, frame, old_path, _ = source(integration)
+    authorization = integration.root / "authorization.json"
+    authorization.write_text("{}")
+    changes = dict(max_startup_reseals_per_leg=1,
+        max_runtime_localization_reseals_per_leg=0 if owner == "startup" else 1,
+        mission_motion_authorization_json=authorization)
+    config = replace(config, **changes)
+    planned_config = replace(frame.config, **changes)
     fresh = CandidatePlanningFrame(Pose2D(.26, 0., 0.), PlanarTransform2D(.2, 0., 0.))
     root = integration.root / "replacement"
-    plans, completed_frames, captures = [], [], []
-    def capture(cfg, effects, planning, uids, output):
-        result = capture_support(cfg, planning, output, kind=replacement_kind)
-        captures.append(result[1])
-        return result
+    plans, completed_frames, replacements = [], [], []
     def admit(path):
         path.parent.mkdir(parents=True, exist_ok=True); path.write_text("{}")
         return fresh
     def initial(request):
+        if owner == "runtime":
+            stopped = _runtime_stop(root, request.run_id)
+            return replace(stopped,
+                mission_leg_motion_permit_path=stopped.startup_reseal_motion_permit_path,
+                mission_leg_motion_permit_sha256=stopped.startup_reseal_motion_permit_sha256,
+                startup_reseal_motion_permit_path=None, startup_reseal_motion_permit_sha256="")
         return MotionLegOutcome(run_id=request.run_id, status="stopped",
             stop_reason="pose outside certified startup segment",
             stop_details={"source": "execution_route_certificate", "phase": "before_motion_confirmation",
@@ -250,59 +316,67 @@ def test_replacement_uses_its_own_fresh_target_and_never_reuses_the_old_survey_r
             motion_published=False, returncode=1, semantic_log_path=root / "initial.jsonl")
     def plan(request):
         plans.append(request)
-        if replacement_kind == "occluded":
-            approach._validate_survey_observation_request(request, fresh)
+        approach._validate_survey_observation_request(request, fresh)
+        assert request.prepared_plan is None
+        assert request.inspection_view_path is None
+        assert request.axis_observation_path is None
         return {"route_csv": "replacement.csv"}
+    def replacement(request, attempt):
+        replacements.append(request)
+        if owner == "startup_runtime" and len(replacements) == 1:
+            return _runtime_stop(root, request.run_id)
+        if owner == "startup":
+            return integration.fixtures._startup_completed(request)
+        return _outcome(root, run_id=request.run_id, status="completed", motion_published=True,
+            permit_name="runtime_replacement.json", permit_digest="d" * 64)
     effects = integration.effects(admit_planning_frame=admit, run_motion_leg=initial,
-        plan_preapproach=plan,
-        run_startup_reseal_motion_leg=lambda request, attempt: integration.fixtures._startup_completed(request),
+        plan_preapproach=plan, run_startup_reseal_motion_leg=replacement,
+        admit_runtime_localization=lambda path: fresh.current_pose,
+        run_runtime_localization_reseal_motion_leg=replacement,
         wait_for_lidar_reacquisition=lambda _: None)
     request = approach.CandidatePreapproachRequest(planned_config.map_yaml, planned_config.semantic_map_id,
         planned_config.plan, planned_config.snapshot, planned_config.snapshot_path, "candidate_0", frame.planning_frame.current_pose,
         root / "initial_route", config.approach_offset_m, config.inflation_radius_m,
         config.candidate_transit_radius_m, config.physical_clearance,
-        survey_observation_support_path=Path(old_support["evidence_path"]))
+        survey_observation_support_path=old_path)
     kwargs = dict(config=planned_config, effects=effects, candidate_root=root, plan_request=request,
         initial_sealed={"route_csv": "initial.csv"}, run_id="survey_replacement",
         leg_kind=MissionLegKind.CANDIDATE_PREAPPROACH, candidate_index=0, target_id="candidate_0",
         frame_source_config=config, source_registry=integration.registry(config),
         plan_planning_frame=frame.planning_frame, completed_frame_sink=completed_frames.append)
-    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture):
-        if replacement_kind in {"absent", "wall", "ambiguous"}:
-            from scripts.aufgabe04.real_robot.candidate.recovery_failure import CandidateStartupRecoveryError
-            with pytest.raises(CandidateStartupRecoveryError):
-                approach._execute_candidate_motion(**kwargs)
-            assert not plans and not completed_frames
-            return
+    with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError("survey reseal rescan")):
         outcome = approach._execute_candidate_motion(**kwargs)
-    assert outcome.status == "completed" and len(plans) == len(completed_frames) == 1
+    assert outcome.status == "completed" and len(completed_frames) == 1
+    assert len(plans) == (2 if owner == "startup_runtime" else 1)
     completed = completed_frames[0]
     assert completed.planning_frame == fresh
     assert completed.camera_target_geometry.x_m == pytest.approx(1.2)
-    if replacement_kind == "occluded":
-        assert plans[0].survey_observation_support_path == Path(captures[0]["evidence_path"])
-        assert completed.retained_survey_target.evidence_path != Path(old_support["evidence_path"])
-        assert completed.retained_survey_target.source_snapshot == plans[0].snapshot
-        assert completed.retained_lidar_target is None
-    else:
-        assert plans[0].survey_observation_support_path is None
-        assert completed.retained_survey_target is None
-        assert completed.retained_lidar_target.evidence_path == Path(captures[0]["evidence_path"])
+    assert completed.retained_survey_target.evidence_path != old_path
+    assert completed.retained_survey_target.evidence_path == plans[-1].survey_observation_support_path
+    assert completed.retained_survey_target.source_snapshot == plans[-1].snapshot
+    assert completed.retained_lidar_target is None
+    assert len({item.survey_observation_support_path for item in plans}) == len(plans)
 
 
-def test_full_phase_preserves_occluded_candidate_until_camera_observation(integration):
+@pytest.mark.parametrize("kind", ["occluded", "absent", "wall"])
+def test_full_phase_keeps_survey_candidate_until_camera_despite_weak_local_scans(integration, kind):
     config = integration.config()
     config = replace(config, camera_calibration=replace(config.camera_calibration, base_frame="base_footprint"))
     frames = iter((integration.frame(-.04), integration.frame(.3)))
     order = []
     def capture(cfg, effects, planning, uids, output):
         order.append("scan")
-        return capture_support(cfg, planning, output)
+        assert order == ["select", "motion", "scan"]
+        return capture_support(cfg, planning, output, kind=kind)
+    def select(request):
+        order.append("select")
+        assert request.current_target_estimates == {}
+        return approach._select_initial_preapproach(request)
     def camera(request):
         order.append("camera")
         return approach.CandidateObservation(request.output_dir / "recommendation.json", "QR_A", None)
     effects = integration.effects(admit_planning_frame=lambda _: next(frames),
-        select_initial_preapproach=approach._select_initial_preapproach,
+        select_initial_preapproach=select,
         plan_preapproach=approach._plan_preapproach_from_request,
         run_motion_leg=lambda request: order.append("motion") or integration.fixtures._completed(request),
         capture_observation=camera,
@@ -310,5 +384,5 @@ def test_full_phase_preserves_occluded_candidate_until_camera_observation(integr
         commit_decision=lambda request: None)
     with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture):
         result = approach.execute_candidate_approach_phase(config, effects)
-    assert result.stand_count == 1 and order == ["scan", "motion", "camera"]
+    assert result.stand_count == 1 and order == ["select", "motion", "scan", "camera"]
     assert not any(event.get("event") == "camera_candidate_target_deferred" for event in integration.events)

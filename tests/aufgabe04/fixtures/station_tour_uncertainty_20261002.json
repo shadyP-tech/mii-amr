@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "description": "Offline Oct 2 stored-pose-tour replay: raw temporary occupancy and stopped localization are frozen across geometric inflation alternatives. No motion authority.",
+  "tour_id": "station_tour_20261002T135327_234789Z",
+  "candidate_uid": "survey_candidate_0005",
+  "static_map_fixture": "start_return_uncertainty_20260923.json",
+  "map_bundle_sha256": "a0dc0d4c73e96f113ec262640bcdece2bfc2e1f68e8394701ecafd5e569ae17a",
+  "map_yaml_sha256": "ecee04cbed7ede8ec70f942790c01298ea368561d21393a561d1042c5f8c6d4d",
+  "map_image_sha256": "2430be49e6ab1d6f258ee018dadd1943b16349d6dd2a4a38036c9acba754e0d1",
+  "provenance": {
+    "workstation_evidence_file_sha256": "81e0adab925f335886c4c74e3aeae7a3bae4a6a36132ced177ab2eb2f1e54974",
+    "replay_file_sha256": "cf161f93f3d30a1f5f97c8804bbf7396c0a56e4816837e8c53dfcd60504d7090",
+    "scan_capture_file_sha256": "9c483e23e51aeba07d15e44204b8ec3dad4b3904b54e3c87c42d36bd7e5e9431",
+    "temporary_overlay_file_sha256": "09b9511b11ab83d869248b8868544585d6b35098b69b58268df1484081a84e17",
+    "projected_candidate_snapshot_file_sha256": "8579c7c02e106227d2297120c85550c8a0121712b0dbf145569f16ab631de26a",
+    "preflight_file_sha256": "9dcfb2ecd35828a86f698111677223ce6eb4c8d62b4bf2aefdff962ceefe414d",
+    "projection_method": "Production apply_bound_overlay, validated against recorded scan capture with only its absolute file path relocated into a temporary directory; all 126 added cells retained."
+  },
+  "temporary_obstacle_cells": [
+    [20, 15], [21, 15], [22, 15], [23, 15], [24, 15], [27, 15], [28, 15], [29, 15],
+    [32, 15], [33, 15], [34, 15], [35, 15], [36, 15], [37, 15], [38, 15], [39, 15],
+    [40, 15], [41, 15], [42, 15], [43, 15], [44, 15], [45, 15], [46, 15], [47, 15],
+    [48, 15], [49, 15], [50, 15], [51, 15], [52, 15], [53, 15], [54, 15], [55, 15],
+    [56, 15], [57, 15], [58, 15], [59, 15], [60, 15], [61, 15], [62, 15], [63, 15],
+    [64, 15], [65, 15], [66, 15], [17, 16], [18, 16], [41, 16], [42, 16], [46, 16],
+    [47, 16], [53, 16], [54, 16], [55, 16], [56, 16], [57, 16], [58, 16], [59, 16],
+    [60, 16], [65, 16], [66, 16], [46, 17], [47, 17], [47, 19], [48, 19], [47, 20],
+    [48, 20], [33, 22], [34, 22], [33, 23], [34, 23], [35, 23], [17, 24], [34, 24],
+    [35, 24], [17, 25], [34, 25], [35, 25], [17, 26], [17, 27], [25, 51], [26, 51],
+    [17, 52], [18, 52], [19, 52], [20, 52], [21, 52], [22, 52], [23, 52], [24, 52],
+    [25, 52], [26, 52], [27, 52], [28, 52], [29, 52], [30, 52], [31, 52], [32, 52],
+    [33, 52], [34, 52], [35, 52], [36, 52], [37, 52], [43, 52], [44, 52], [45, 52],
+    [46, 52], [47, 52], [48, 52], [49, 52], [50, 52], [51, 52], [52, 52], [53, 52],
+    [57, 52], [58, 52], [61, 52], [62, 52], [63, 52], [64, 52], [65, 52], [66, 52],
+    [67, 52], [68, 52], [69, 52], [70, 52], [72, 52], [73, 52]
+  ],
+  "expected_augmented_costmap": {
+    "width": 113,
+    "height": 71,
+    "resolution_m": 0.05,
+    "origin": [
+      -2.82,
+      -1.69,
+      0.0
+    ],
+    "blocked_cell_count": 5235,
+    "blocked_source_counts": {
+      "arena_boundary": 4625,
+      "static_occupied": 484,
+      "temporary_obstacle": 126
+    },
+    "blocked_geometry_sha256": "5eeb3bfd26a40e407ac293e17ee5ffa29fbf1ce27913c9117e884759005fd0dc"
+  },
+  "start": {
+    "x_m": -1.551259059585579,
+    "y_m": -0.4393424663502934,
+    "yaw_rad": -0.04894661211186
+  },
+  "target": {
+    "x_m": 1.0643339819035815,
+    "y_m": 0.16827362247128985,
+    "yaw_rad": 1.29404226165199
+  },
+  "covariance_m2": {
+    "xx_m2": 0.0029822143478532284,
+    "xy_m2": 0.0,
+    "yy_m2": 0.0029822143478532284
+  },
+  "admission_config": {
+    "braking_latency_distance_m": 0.075,
+    "collision_margin_m": 0.01,
+    "empirical_odom_drift_bound_m": 0.02,
+    "fixed_odom_tracking_bound_m": 0.03,
+    "heading_lever_arm_m": 0.105,
+    "heading_reference_x_m": -1.551259059585579,
+    "heading_reference_y_m": -0.4393424663502934,
+    "heading_sigma_rad": 0.05044064680870206,
+    "localization_sigma_multiplier": 2.0,
+    "robot_radius_m": 0.105,
+    "sampling_spacing_m": 0.005
+  },
+  "candidate_geometries": [
+    {
+      "candidate_uid": "survey_candidate_0001",
+      "geometry": {
+        "keepout_radius_m": 0.33999999999999997,
+        "radius_m": 0.06,
+        "uncertainty_m": 0.02,
+        "x_m": -1.1317351419105068,
+        "y_m": -0.4079464749760185
+      }
+    },
+    {
+      "candidate_uid": "survey_candidate_0002",
+      "geometry": {
+        "keepout_radius_m": 0.33999999999999997,
+        "radius_m": 0.06,
+        "uncertainty_m": 0.02,
+        "x_m": -0.5832077316648262,
+        "y_m": 0.5460705453968684
+      }
+    },
+    {
+      "candidate_uid": "survey_candidate_0003",
+      "geometry": {
+        "keepout_radius_m": 0.33999999999999997,
+        "radius_m": 0.06,
+        "uncertainty_m": 0.02,
+        "x_m": 0.02999695848302486,
+        "y_m": -0.7847858572414823
+      }
+    },
+    {
+      "candidate_uid": "survey_candidate_0004",
+      "geometry": {
+        "keepout_radius_m": 0.33999999999999997,
+        "radius_m": 0.06,
+        "uncertainty_m": 0.02,
+        "x_m": 0.4032841143471355,
+        "y_m": -0.9690280844058546
+      }
+    },
+    {
+      "candidate_uid": "survey_candidate_0005",
+      "geometry": {
+        "keepout_radius_m": 0.33999999999999997,
+        "radius_m": 0.06,
+        "uncertainty_m": 0.02,
+        "x_m": 1.2197895657888607,
+        "y_m": 0.6698578274067931
+      }
+    },
+    {
+      "candidate_uid": "survey_candidate_0006",
+      "geometry": {
+        "keepout_radius_m": 0.33999999999999997,
+        "radius_m": 0.06,
+        "uncertainty_m": 0.02,
+        "x_m": 1.4780008674875873,
+        "y_m": -0.39535460704278813
+      }
+    }
+  ],
+  "physical_clearance": {
+    "minimum_active_standoff_m": 0.33000000000000007,
+    "minimum_candidate_transit_radius_m": 0.33999999999999997,
+    "minimum_collision_standoff_m": 0.2751873375215418,
+    "minimum_lidar_standoff_m": 0.33000000000000007,
+    "minimum_static_inflation_m": 0.25,
+    "stand_base_circumscribed_radius_m": 0.10818733752154176,
+    "stand_collision_radius_m": 0.11018733752154176,
+    "stand_lidar_radius_m": 0.06,
+    "stand_model_tolerance_m": 0.002
+  },
+  "snap_radius_m": 0.3,
+  "cases": [
+    {
+      "inflation_radius_m": 0.25,
+      "full_poses": [
+        {
+          "x_m": -1.551259059585579,
+          "y_m": -0.4393424663502934,
+          "yaw_rad": -0.04894661211186
+        },
+        {
+          "x_m": -1.4449999999999998,
+          "y_m": -0.1649999999999998,
+          "yaw_rad": 0.0
+        },
+        {
+          "x_m": -1.2949999999999997,
+          "y_m": -0.06499999999999995,
+          "yaw_rad": 0.0
+        },
+        {
+          "x_m": -0.5949999999999998,
+          "y_m": 0.08500000000000019,
+          "yaw_rad": 0.0
+        },
+        {
+          "x_m": 1.0643339819035815,
+          "y_m": 0.16827362247128985,
+          "yaw_rad": 1.29404226165199
+        }
+      ],
+      "minimum_prefix_vertex_index": 0,
+      "expected_full_minimum_margin_m": -0.06325241386143382,
+      "expected_selection": {
+        "accepted": false,
+        "error": "return uncertainty budget exhausted: no meaningful admitted prefix"
+      }
+    },
+    {
+      "inflation_radius_m": 0.325,
+      "full_poses": [
+        {
+          "x_m": -1.551259059585579,
+          "y_m": -0.4393424663502934,
+          "yaw_rad": -0.04894661211186
+        },
+        {
+          "x_m": -1.4949999999999997,
+          "y_m": -0.21499999999999986,
+          "yaw_rad": 0.0
+        },
+        {
+          "x_m": -1.3949999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_rad": 0.0
+        },
+        {
+          "x_m": -1.1949999999999998,
+          "y_m": -0.014999999999999902,
+          "yaw_rad": 0.0
+        },
+        {
+          "x_m": 1.0643339819035815,
+          "y_m": 0.16827362247128985,
+          "yaw_rad": 1.29404226165199
+        }
+      ],
+      "minimum_prefix_vertex_index": 0,
+      "expected_full_minimum_margin_m": -0.04307882230455107,
+      "expected_selection": {
+        "accepted": true,
+        "is_final_stage": false,
+        "stage_target_pose": {
+          "x_m": -1.3949999999999998,
+          "y_m": -0.06499999999999995,
+          "yaw_rad": 0.9827937232473294
+        }
+      },
+      "expected_selected_minimum_margin_m": 0.005971132855023875
+    }
+  ]
+}

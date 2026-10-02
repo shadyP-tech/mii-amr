@@ -1,4 +1,4 @@
-"""Current-scan target gating through the actual approach/reseal orchestration.
+"""Survey approach and local target refinement through real orchestration.
 
 Only the sensor support capture/replay boundary is substituted. Real frame
 projection, registry preservation, selection handoff, arrival and both recovery
@@ -37,6 +37,9 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import Candidat
 from scripts.aufgabe04.real_robot.candidate.qr_goal_progress import CandidateQrGoalIncompleteError
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import CandidateStartupRecoveryError
 from scripts.aufgabe04.real_robot.candidate.runtime_recovery import CandidateRuntimeRecoveryError
+from scripts.aufgabe04.real_robot.candidate.target_admission import (
+    SURVEY_OBSERVATION_POLICY, load_survey_observation_support,
+)
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
 from tests.aufgabe04 import test_autonomous_candidate_approach as fixtures
 from tests.aufgabe04.test_autonomous_candidate_runtime_recovery import _runtime_stop, _outcome
@@ -105,11 +108,17 @@ class CurrentLidarApproachIntegrationTests(unittest.TestCase):
 
     def real_support(self, config, planning_frame, output_dir, *, shift=.12):
         """Produce and replay the actual accepted eight-scan support artifact."""
+        transform = planning_frame.map_from_odom
+        self.assertEqual(transform.yaw_rad, 0.)
+        base_x = planning_frame.current_pose.x_m-transform.x_m
+        base_y = planning_frame.current_pose.y_m-transform.y_m
+        scan_x = base_x+.04
+        target_x = config.snapshot.candidates[0].geometry.x_m-transform.x_m+shift
         def capture(request):
-            scans = raw_scans(shifts=[shift]*8)
+            scans = raw_scans(shifts=[target_x-scan_x-1.]*8)
             for scan in scans:
-                scan["scan_pose_odom"] = {"x_m": 0., "y_m": 0., "yaw_rad": 0.}
-                scan["base_pose_odom"] = {"x_m": -.04, "y_m": 0., "yaw_rad": 0.}
+                scan["scan_pose_odom"] = {"x_m": scan_x, "y_m": base_y, "yaw_rad": 0.}
+                scan["base_pose_odom"] = {"x_m": base_x, "y_m": base_y, "yaw_rad": 0.}
             payload = head_capture_payload(scans, tour_id=request.viewpoint_id,
                 odom_frame="odom", base_frame=request.base_frame, scan_frame=request.scan_frame,
                 captured_at_unix_sec=100.71)
@@ -136,49 +145,56 @@ class CurrentLidarApproachIntegrationTests(unittest.TestCase):
             planning_frame, artifacts.camera_decision_binding(), observation_pose=planning_frame.current_pose)
         return config, bind_current_lidar_target(frame, evidence_path=Path(evidence["evidence_path"])), evidence
 
-    def test_fresh_capture_precedes_selection_and_filters_only_target_eligibility(self):
+    def test_survey_selection_keeps_all_candidates_without_distant_lidar_gating(self):
         config = self.config(count=2)
         order, requests = [], []
-        estimate = self.target(2.06)
-        def capture(cfg, effects, frame, uids, output):
-            order.append("scan")
-            self.assertEqual(uids, set(config.snapshot.candidate_uids))
-            return self.support(cfg, frame, uids, output, {"candidate_1": estimate})
+        registry_path = config.survey_root / "stand_registry.json"
+        original_registry, original_snapshot = registry_path.read_bytes(), config.snapshot_path.read_bytes()
         def select(request):
             order.append("select")
             requests.append(request)
             return approach.CameraCandidateInitialSelection("candidate_1",
-                SimpleNamespace(candidate_uid="candidate_1", validated_target_center=estimate),
+                SimpleNamespace(candidate_uid="candidate_1", validated_target_center=None,
+                                camera_alignment=None, approach_bearing_mode="robot-to-stand"),
                 {"selected_candidate_uid": "candidate_1", "motion_authorized": False})
         effects = self.effects(select_initial_preapproach=select)
-        with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture):
-            _, _, selection, _ = approach._select_initial_candidate_with_localization_refresh(
+        with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError(
+                "initial survey selection must not require visible head returns")) as capture:
+            planned_config, _, selection, planning = approach._select_initial_candidate_with_localization_refresh(
                 config=config, effects=effects, source_registry=self.registry(config), candidate_index=0,
                 eligible=set(config.snapshot.candidate_uids), exact_two_support_by_uid=None)
-        self.assertEqual(order, ["scan", "select"])
-        self.assertEqual(requests[0].unresolved, frozenset({"candidate_1"}))
-        self.assertEqual(requests[0].current_target_estimates, {"candidate_1": estimate})
+        capture.assert_not_called()
+        self.assertEqual(order, ["select"])
+        self.assertEqual(requests[0].unresolved, frozenset(config.snapshot.candidate_uids))
+        self.assertEqual(requests[0].current_target_estimates, {})
         self.assertEqual(requests[0].config.snapshot.candidate_uids, config.snapshot.candidate_uids)
         self.assertEqual(requests[0].config.snapshot.candidate_for("candidate_0").geometry,
                          config.snapshot.candidate_for("candidate_0").geometry)
-        self.assertEqual(selection.evidence["current_lidar_support"]["excluded_candidate_uids"], ["candidate_0"])
+        self.assertNotIn("current_lidar_support", selection.evidence)
+        self.assertEqual(selection.evidence["observation_target_source"], SURVEY_OBSERVATION_POLICY)
+        proof = load_survey_observation_support(Path(selection.evidence["survey_observation_support_path"]),
+            candidate_uid="candidate_1", snapshot=planned_config.snapshot)
+        self.assertEqual(proof["planning_frame"], planning.to_evidence())
+        self.assertFalse(proof["precise_motion_authorized"])
+        self.assertEqual(registry_path.read_bytes(), original_registry)
+        self.assertEqual(config.snapshot_path.read_bytes(), original_snapshot)
         effects.run_motion_leg.assert_not_called()
         effects.capture_observation.assert_not_called()
 
-    def test_supported_selection_cannot_drop_or_replace_the_measured_target(self):
+    def test_survey_selection_cannot_claim_a_precise_target_or_alignment(self):
         config = self.config()
-        estimate = self.target()
+        survey = SimpleNamespace(candidate_uid="candidate_0", validated_target_center=None,
+                                 camera_alignment=None, approach_bearing_mode="robot-to-stand")
         for index, prepared in enumerate((None,
-                SimpleNamespace(candidate_uid="candidate_0", validated_target_center=None),
-                SimpleNamespace(candidate_uid="candidate_0", validated_target_center=self.target(1.10)))):
+                SimpleNamespace(**{**vars(survey), "validated_target_center": self.target()}),
+                SimpleNamespace(**{**vars(survey), "camera_alignment": {"untrusted": True}}),
+                SimpleNamespace(**{**vars(survey), "approach_bearing_mode": "candidate-inspection-view"}))):
             with self.subTest(case=index):
                 current = replace(config, session_root=self.root / f"bad_selection_{index}")
-                def capture(cfg, effects, frame, uids, output):
-                    return self.support(cfg, frame, uids, output, {"candidate_0": estimate})
                 effects = self.effects(select_initial_preapproach=Mock(return_value=
                     approach.CameraCandidateInitialSelection("candidate_0", prepared,
                         {"selected_candidate_uid": "candidate_0", "motion_authorized": False})))
-                with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture):
+                with patch(SENSOR + ".capture_current_lidar_targets", side_effect=AssertionError("selection rescan")):
                     with self.assertRaises(RuntimeError):
                         approach._select_initial_candidate_with_localization_refresh(
                             config=current, effects=effects, source_registry=self.registry(current), candidate_index=0,
@@ -198,29 +214,6 @@ class CurrentLidarApproachIntegrationTests(unittest.TestCase):
                    return_value=({}, {})), patch(MODULE + ".plan_and_select_camera_candidate", return_value=planned) as planner:
             approach._select_initial_preapproach(request)
         self.assertEqual(planner.call_args.kwargs["current_target_estimates"], {"candidate_0": estimate})
-
-    def test_all_unsupported_stops_before_planning_motion_and_camera_with_incomplete_progress(self):
-        config = self.config(count=2)
-        effects = self.effects()
-        registry_path = config.survey_root / "stand_registry.json"
-        original_registry, original_snapshot = registry_path.read_bytes(), config.snapshot_path.read_bytes()
-        def capture(cfg, effects, frame, uids, output):
-            return self.support(cfg, frame, uids, output, {})
-        with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture):
-            with self.assertRaises(CandidateQrGoalIncompleteError) as rejected:
-                approach.execute_candidate_approach_phase(config, effects)
-        for effect in (effects.select_initial_preapproach, effects.plan_preapproach,
-                       effects.run_motion_leg, effects.capture_observation):
-            effect.assert_not_called()
-        progress = rejected.exception.progress
-        self.assertFalse(progress["goal_completed"])
-        self.assertEqual(progress["confirmed_stand_count"], 0)
-        self.assertEqual(progress["keepout_candidate_uids"], list(config.snapshot.candidate_uids))
-        self.assertTrue(all(item["disposition"] == "target_reconciliation_required"
-                            for item in progress["candidate_dispositions"]))
-        self.assertEqual(registry_path.read_bytes(), original_registry)
-        self.assertEqual(config.snapshot_path.read_bytes(), original_snapshot)
-        self.assertEqual(self.events[-1]["event"], "camera_candidates_current_lidar_unavailable")
 
     def test_enabled_gate_fails_closed_when_sensor_or_frame_dependencies_are_missing(self):
         config, effects = self.config(), self.effects()
@@ -275,22 +268,24 @@ class CurrentLidarApproachIntegrationTests(unittest.TestCase):
         self.assertEqual(admitted.current_lidar_target_path, Path(support["evidence_path"]))
         effects.run_motion_leg.assert_not_called()
 
-    def test_full_phase_carries_the_preapproach_receipt_to_camera_arrival(self):
+    def test_full_phase_selects_and_moves_before_local_refinement_and_camera(self):
         config = self.config()
         config = replace(config, camera_calibration=replace(config.camera_calibration, base_frame="base_footprint"))
         frames = iter((self.frame(-.04), self.frame(.3)))
         order, support_records = [], []
         def capture(cfg, effects, planning_frame, uids, output):
             order.append("scan")
-            self.assertFalse(support_records, "camera arrival must not add a second LiDAR admission")
+            self.assertEqual(order, ["select", "motion", "scan"])
+            self.assertEqual(planning_frame.current_pose, self.frame(.3).current_pose)
+            self.assertFalse(support_records, "local refinement must use one cohort")
             estimates, evidence = self.real_support(cfg, planning_frame, output)
             support_records.append(evidence)
             return estimates, evidence
         def select(request):
             order.append("select")
-            estimate = request.current_target_estimates["candidate_0"]
-            plan = SimpleNamespace(candidate_uid="candidate_0", validated_target_center=estimate,
-                approach_bearing_mode="candidate-inspection-view", approach_bearing_rad=0., camera_alignment=None)
+            self.assertEqual(request.current_target_estimates, {})
+            plan = SimpleNamespace(candidate_uid="candidate_0", validated_target_center=None,
+                approach_bearing_mode="robot-to-stand", approach_bearing_rad=0., camera_alignment=None)
             return approach.CameraCandidateInitialSelection("candidate_0", plan,
                 {"selected_candidate_uid": "candidate_0", "motion_authorized": False})
         def motion(request):
@@ -307,7 +302,7 @@ class CurrentLidarApproachIntegrationTests(unittest.TestCase):
         with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture) as scans:
             result = approach.execute_candidate_approach_phase(config, effects)
         self.assertEqual(result.stand_count, 1)
-        self.assertEqual(order, ["scan", "select", "motion", "camera"])
+        self.assertEqual(order, ["select", "motion", "scan", "camera"])
         scans.assert_called_once()
         self.assertEqual(support_records[0]["candidate_decisions"]["candidate_0"]["supported_scan_count"], 8)
 

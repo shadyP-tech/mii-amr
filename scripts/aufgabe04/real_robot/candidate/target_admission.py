@@ -13,18 +13,24 @@ from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import
     load_backside_axis_planning_observation,
 )
 from scripts.aufgabe04.navigation.approach.candidate_target_admission import (
-    evaluate_candidate_target_admission, load_candidate_target_costmap,
+    CandidateTargetAdmission, evaluate_candidate_target_admission, load_candidate_target_costmap,
 )
+from scripts.aufgabe04.navigation.coverage.stand_candidate_population_retention import classify_static_map_population_retention
+from scripts.aufgabe04.navigation.coverage.stand_candidate_static_map_admission import (
+    STATIC_MAP_CLEARANCE_BELOW_REQUIRED, StandCandidateStaticMapEvidence,
+)
+from scripts.aufgabe04.navigation.coverage.stand_coverage_survey import coverage_survey_plan_sha256
+from scripts.aufgabe04.artifacts.candidate_perception_advisory import MORPHOLOGY_CONFLICT
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationUnavailableError,
 )
 from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import (
     HASH_FIELD as LIDAR_TARGET_HASH_FIELD, POLICY as LIDAR_TARGET_POLICY,
-    load_current_lidar_target, load_current_lidar_assessment, permits_survey_observation,
+    load_current_lidar_target,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot, candidate_geometry_sha256, candidate_snapshot_sha256,
-    validate_candidate_geometry,
+    validate_candidate_geometry, validate_candidate_snapshot,
 )
 
 
@@ -41,6 +47,13 @@ class RetainedLidarTargetBinding:
 
 
 SURVEY_OBSERVATION_POLICY = "retained_survey_observation_only"
+SURVEY_OBSERVATION_HASH_FIELD = "survey_observation_support_sha256"
+_SURVEY_OBSERVATION_FIELDS = frozenset({
+    "schema_version", "policy", "source_kind", "candidate_uid",
+    "candidate_snapshot_sha256", "candidate_geometry_sha256", "map_bundle_sha256",
+    "coverage_plan_sha256", "planning_frame", "target_admission", "purpose",
+    "precise_motion_authorized", "motion_authorized", "keepouts_changed",
+})
 
 
 @dataclass(frozen=True)
@@ -55,14 +68,93 @@ class RetainedSurveyTargetBinding:
     source_planning_frame: CandidatePlanningFrame
 
 
+def write_survey_observation_support(path, *, config, planning_frame, candidate_uid):
+    """Bind a surveyed hypothesis to a stopped observation approach, without scans."""
+    validate_candidate_snapshot(config.snapshot)
+    candidate = config.snapshot.candidate_for(candidate_uid)
+    if (candidate is None or not isinstance(planning_frame, CandidatePlanningFrame)
+            or planning_frame.map_frame != config.snapshot.planning_frame):
+        raise ValueError("survey observation candidate/planning frame mismatch")
+    decision = evaluate_target(config, candidate)
+    if not decision.accepted:
+        raise CandidateObservationUnavailableError(
+            candidate_uid=candidate_uid, observation_attempt_index=0,
+            reason="candidate_target_ineligible",
+            process_evidence={"observer_started": False, "motion_authorized": False},
+            status_evidence=decision.to_evidence(),
+        )
+    evidence = {
+        "schema_version": 1, "policy": SURVEY_OBSERVATION_POLICY,
+        "source_kind": "survey_candidate_snapshot", "candidate_uid": candidate_uid,
+        "candidate_snapshot_sha256": candidate_snapshot_sha256(config.snapshot),
+        "candidate_geometry_sha256": candidate_geometry_sha256(candidate.geometry),
+        "map_bundle_sha256": config.snapshot.map_bundle_sha256,
+        "coverage_plan_sha256": coverage_survey_plan_sha256(config.plan),
+        "planning_frame": planning_frame.to_evidence(), "target_admission": decision.to_evidence(),
+        "purpose": "observation_only", "precise_motion_authorized": False,
+        "motion_authorized": False, "keepouts_changed": False,
+    }
+    write_content_hashed_json(path, evidence, hash_field=SURVEY_OBSERVATION_HASH_FIELD)
+    return load_survey_observation_support(path, candidate_uid=candidate_uid, snapshot=config.snapshot)
+
+
+def _survey_admission_from_clearance(candidate, clearance):
+    """Check the saved decision's internal contract; live consumers recheck the map."""
+    if type(clearance) not in (int, float):
+        raise ValueError("survey observation static clearance must be numeric")
+    geometry = candidate.geometry
+    retention = classify_static_map_population_retention(clearance_m=clearance,
+        candidate_radius_m=geometry.radius_m, candidate_uncertainty_m=geometry.uncertainty_m)
+    static = StandCandidateStaticMapEvidence(
+        stand_id=candidate.candidate_uid, x_m=geometry.x_m, y_m=geometry.y_m,
+        confidence=candidate.confidence, hit_count=candidate.hit_count,
+        source_observation_ids=candidate.source.observation_ids, static_map_clearance_m=clearance,
+        required_clearance_m=geometry.radius_m+geometry.uncertainty_m,
+        clearance_shortfall_m=retention.clearance_shortfall_m, disposition=retention.disposition,
+        population_retained=retention.population_retained, boundary_provisional=retention.boundary_provisional,
+        admitted=retention.strictly_admitted,
+        reasons=() if retention.strictly_admitted else (STATIC_MAP_CLEARANCE_BELOW_REQUIRED,),
+    )
+    if (not retention.population_retained
+            or any(item.kind == MORPHOLOGY_CONFLICT for item in candidate.source.perception_advisories)):
+        raise ValueError("survey observation target admission is rejected")
+    geometry_hash = candidate_geometry_sha256(geometry)
+    return CandidateTargetAdmission(candidate.candidate_uid, True, (), geometry_hash,
+        geometry_hash, static, ()).to_evidence()
+
+
 def load_survey_observation_support(path, *, candidate_uid, snapshot):
-    """Require replayable missing-visibility evidence for this survey target."""
-    _, evidence = load_current_lidar_assessment(path, snapshot=snapshot)
-    decision = evidence["candidate_decisions"].get(candidate_uid, {})
-    if (snapshot.candidate_for(candidate_uid) is None
-            or decision.get("candidate_uid") != candidate_uid
-            or not permits_survey_observation(decision)):
-        raise ValueError("survey observation requires missing current visibility")
+    """Read a scan-free observation proof bound to one immutable survey snapshot."""
+    validate_candidate_snapshot(snapshot)
+    evidence = load_content_hashed_json(path, hash_field=SURVEY_OBSERVATION_HASH_FIELD)
+    candidate = snapshot.candidate_for(candidate_uid)
+    if (set(evidence) != _SURVEY_OBSERVATION_FIELDS
+            or type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1
+            or evidence.get("policy") != SURVEY_OBSERVATION_POLICY
+            or evidence.get("source_kind") != "survey_candidate_snapshot"
+            or evidence.get("purpose") != "observation_only"
+            or any(evidence.get(key) is not False for key in (
+                "precise_motion_authorized", "motion_authorized", "keepouts_changed"))
+            or candidate is None or evidence.get("candidate_uid") != candidate_uid
+            or evidence.get("candidate_snapshot_sha256") != candidate_snapshot_sha256(snapshot)
+            or evidence.get("map_bundle_sha256") != snapshot.map_bundle_sha256
+            or evidence.get("candidate_geometry_sha256") != candidate_geometry_sha256(candidate.geometry)):
+        raise ValueError("survey observation proof candidate/policy/snapshot mismatch")
+    plan_hash = evidence["coverage_plan_sha256"]
+    if (not isinstance(plan_hash, str) or len(plan_hash) != 64
+            or any(char not in "0123456789abcdef" for char in plan_hash)):
+        raise ValueError("survey observation coverage plan binding is invalid")
+    planning = CandidatePlanningFrame.from_evidence(evidence["planning_frame"])
+    if planning.map_frame != snapshot.planning_frame:
+        raise ValueError("survey observation planning frame differs from snapshot")
+    decision = evidence["target_admission"]
+    try:
+        expected = _survey_admission_from_clearance(candidate,
+            decision["static_map_evidence"]["static_map_clearance_m"])
+    except (KeyError, TypeError) as exc:
+        raise ValueError("survey observation target admission is malformed") from exc
+    if payload_sha256(decision) != payload_sha256(expected):
+        raise ValueError("survey observation target admission differs from bound candidate")
     return evidence
 
 
@@ -151,14 +243,15 @@ def _require_retained_lidar_geometry(frame):
     return original_geometry
 
 
-def _load_retained_survey_geometry(binding):
+def _load_retained_survey_geometry(binding, *, plan=None):
     if not isinstance(binding, RetainedSurveyTargetBinding):
         raise ValueError("invalid retained survey target binding")
     proof = load_survey_observation_support(binding.evidence_path,
         candidate_uid=binding.candidate_uid, snapshot=binding.source_snapshot)
     if (payload_sha256(proof) != binding.evidence_sha256
             or candidate_snapshot_sha256(binding.source_snapshot) != binding.source_snapshot_sha256
-            or proof["planning_frame"] != binding.source_planning_frame.to_evidence()):
+            or proof["planning_frame"] != binding.source_planning_frame.to_evidence()
+            or plan is not None and proof["coverage_plan_sha256"] != coverage_survey_plan_sha256(plan)):
         raise ValueError("retained survey target original source binding changed")
     return binding.source_snapshot.candidate_for(binding.candidate_uid).geometry
 
@@ -169,18 +262,22 @@ def bind_survey_observation_target(frame, *, evidence_path: Path):
         raise ValueError("survey observation requires an admitted planning frame")
     proof = load_survey_observation_support(evidence_path,
         candidate_uid=frame.candidate.candidate_uid, snapshot=frame.config.snapshot)
+    if proof["coverage_plan_sha256"] != coverage_survey_plan_sha256(frame.config.plan):
+        raise ValueError("survey observation coverage plan binding changed")
     binding = RetainedSurveyTargetBinding(frame.candidate.candidate_uid, Path(evidence_path),
         payload_sha256(proof), frame.config.snapshot,
         candidate_snapshot_sha256(frame.config.snapshot), frame.planning_frame)
-    geometry = _load_retained_survey_geometry(binding)
+    geometry = _load_retained_survey_geometry(binding, plan=frame.config.plan)
     target = _lidar_geometry_in_frame(binding, geometry, frame)
+    if frame.camera_target_geometry is not None and frame.camera_target_geometry != target:
+        raise ValueError("survey observation differs from selected camera target")
     return replace(frame, camera_target_geometry=target, camera_alignment=None,
         current_lidar_target_path=None, retained_lidar_target=None, retained_survey_target=binding)
 
 
 def _require_retained_survey_geometry(frame):
     binding = frame.retained_survey_target
-    original = _load_retained_survey_geometry(binding)
+    original = _load_retained_survey_geometry(binding, plan=frame.config.plan)
     expected = _lidar_geometry_in_frame(binding, original, frame)
     if (frame.camera_target_geometry != expected
             or frame.current_lidar_target_path is not None
@@ -223,6 +320,8 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
         raise ValueError("retained camera target planning frame mismatch")
     if survey_binding is not None:
         original_geometry = _require_retained_survey_geometry(source)
+        if coverage_survey_plan_sha256(source.config.plan) != coverage_survey_plan_sha256(arrival.config.plan):
+            raise ValueError("retained survey target coverage plan binding changed")
         target = _lidar_geometry_in_frame(survey_binding, original_geometry, arrival)
         projected_alignment = None
         kind = SURVEY_OBSERVATION_POLICY

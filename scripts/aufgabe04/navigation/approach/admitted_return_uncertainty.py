@@ -30,6 +30,30 @@ MINIMUM_REMAINING_ROUTE_M = .15
 MAXIMUM_SAMPLED_CUTS = 32
 
 
+class ReturnUncertaintyExhausted(ValueError):
+    """A valid route exhausted the unchanged budget; retain audit-only evidence."""
+    def __init__(self, message, evidence):
+        super().__init__(message)
+        self.evidence = evidence
+
+
+def _attempt_diagnostic(poses, admission, *, final):
+    decision = admission.decision
+    entries = decision.segment_decisions
+    limiting = next((d for d in entries if d.segment_id == decision.limiting_segment_id), None)
+    first = next((d for d in entries if not d.accepted), None)
+    ids = {d.segment_id for d in (limiting, first) if d is not None}
+    samples = [s for s in admission.evidence.get("sampling", {}).get("segments", ())
+               if f"segment:{s['canonical_index']:04d}:{s['subsegment_index']:04d}" in ids]
+    return {"final_stage": final, "endpoint": asdict(poses[-1]),
+        "route_geometry_sha256": payload_sha256(return_route_geometry(poses)),
+        "accepted": decision.accepted, "remaining_margin_m": decision.remaining_margin_m,
+        "limiting_segment_id": decision.limiting_segment_id,
+        "limiting_segment": None if limiting is None else limiting.to_evidence_dict(),
+        "first_rejected_segment": None if first is None else first.to_evidence_dict(),
+        "limiting_samples": samples}
+
+
 @dataclass(frozen=True)
 class ReturnRouteStage:
     poses: tuple[Pose2D, ...]
@@ -166,13 +190,17 @@ def select_admitted_return_prefix(
         full_poses[0].x_m, full_poses[0].y_m
     ) == (full_poses[1].x_m, full_poses[1].y_m)
 
+    attempt_diagnostics = []
+
     def evaluate(poses, *, final):
         executable = executable_return_poses(poses)
-        return evaluate_admitted_return_stage_uncertainty(
+        admission = evaluate_admitted_return_stage_uncertainty(
             base_costmap, executable, uncertainty.covariance, config,
             start_pose=start, target_evidence_sha256=target_evidence_sha256,
             is_final_stage=final,
         )
+        attempt_diagnostics.append(_attempt_diagnostic(poses, admission, final=final))
+        return admission
 
     whole = evaluate(full_poses, final=True)
     evidence = {
@@ -196,7 +224,7 @@ def select_admitted_return_prefix(
     if whole.decision.accepted:
         return selected(full_poses, len(full_poses) - 2, 1., whole, True)
     if stationary:
-        raise ValueError("stationary return uncertainty budget exhausted")
+        raise ReturnUncertaintyExhausted("stationary return uncertainty budget exhausted", attempt_diagnostics)
     lengths = [math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) for a, b in zip(full_poses, full_poses[1:])]
     if any(length <= 0. for length in lengths):
         raise ValueError("return travel route requires positive segment lengths")
@@ -232,4 +260,4 @@ def select_admitted_return_prefix(
                 if choice is not None:
                     return choice
                 break
-    raise ValueError("return uncertainty budget exhausted: no meaningful admitted prefix")
+    raise ReturnUncertaintyExhausted("return uncertainty budget exhausted: no meaningful admitted prefix", attempt_diagnostics)

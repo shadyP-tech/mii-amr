@@ -93,9 +93,9 @@ from scripts.aufgabe04.real_robot.candidate.target_admission import (
     RetainedLidarTargetBinding, bind_current_lidar_target, evaluate_target,
     require_target, retain_camera_target_geometry,
     RetainedSurveyTargetBinding, bind_survey_observation_target,
-    load_survey_observation_support, SURVEY_OBSERVATION_POLICY,
+    load_survey_observation_support, write_survey_observation_support,
+    SURVEY_OBSERVATION_POLICY,
 )
-from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import permits_survey_observation
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     exact_two_camera_handoff_sha256,
     load_exact_two_camera_handoff,
@@ -189,14 +189,6 @@ from scripts.aufgabe04.stations.station_identity_registry import (
 SealedRoute = Mapping[str, str]
 
 
-class NoCurrentLidarTargetsError(RuntimeError):
-    """The stopped scan supports no remaining approach; keep all obstacles."""
-
-    def __init__(self, evidence):
-        super().__init__("no unresolved candidate has current unique LiDAR support")
-        self.evidence = evidence
-
-
 class CandidateApproachPoseError(RuntimeError):
     """Fail closed when a live pose effect violates the pure pose contract."""
 
@@ -279,8 +271,8 @@ class CandidateApproachConfig:
     lidar_scan_frame: str | None = None
     lidar_scan_topic: str | None = None
     measured_stand_model: StandModelProfile | None = None
-    # Require fresh target support for selection/new translations. Passive
-    # camera arrival retains the executed target with fresh localization.
+    # Survey observation travel uses a bound survey target. Nearby LiDAR may
+    # refine it after arrival; further precise translations require support.
     require_current_lidar_support: bool = False
 
 
@@ -1044,20 +1036,13 @@ def _validate_survey_observation_request(request, planning_frame=None):
         raise ValueError("survey target is only available to an unaligned observation approach")
     support = load_survey_observation_support(request.survey_observation_support_path,
         candidate_uid=request.candidate_uid, snapshot=request.snapshot)
+    if support["coverage_plan_sha256"] != coverage_survey_plan_sha256(request.plan):
+        raise ValueError("survey observation coverage plan changed")
     source_frame = CandidatePlanningFrame.from_evidence(support["planning_frame"])
     if source_frame.current_pose != request.start or (
             planning_frame is not None and source_frame != planning_frame):
         raise ValueError("survey observation route differs from its stopped support frame")
     return support
-
-
-def _survey_observation_candidates(support):
-    return {uid for uid in support["excluded_candidate_uids"]
-            if permits_survey_observation(support["candidate_decisions"][uid])}
-
-
-def _observation_route_candidates(support):
-    return set(support["eligible_candidate_uids"]) | _survey_observation_candidates(support)
 
 
 def _select_initial_preapproach(
@@ -1072,7 +1057,9 @@ def _select_initial_preapproach(
     from scripts.aufgabe04.navigation.approach.lidar_head_observability import lidar_head_model_admission
     model_review = lidar_head_model_admission(config.measured_stand_model)
     hint_diagnostics = {**hint_diagnostics, "model_admission": model_review}
-    if not model_review["accepted"]:
+    if not model_review["accepted"] or config.require_current_lidar_support:
+        # Initial travel observes the surveyed hypothesis. A historical axis
+        # cannot turn it into a precise head-aligned approach.
         hints = {}
     planned = plan_and_select_camera_candidate(
         map_yaml=config.map_yaml,
@@ -1374,6 +1361,7 @@ def _admit_camera_arrival_geometry(
     allow_centering_acquisition: bool = False,
     retained_backside_axis_path: Path | None = None,
     target_source_frame: _CandidateObservationFrame | None = None,
+    refine_survey_target: bool = False,
 ) -> _CandidateObservationFrame:
     """Reproject once more while stopped and gate camera startup geometry."""
 
@@ -1425,6 +1413,8 @@ def _admit_camera_arrival_geometry(
         "minimum_active_standoff_m",
     )
     current_target = None
+    refinement_evidence = None
+    survey_arrival_frame = None
     arrival_axis_path = None
     target_frame = _CandidateObservationFrame(
         config=artifacts.config, candidate=candidate, planning_frame=planning_frame,
@@ -1465,46 +1455,62 @@ def _admit_camera_arrival_geometry(
                 alignment_uncertainty=uncertainty,
             )
         target_geometry = target_frame.camera_target_geometry or candidate.geometry
-    # Passive camera observation uses the target of the executed route. Sparse
-    # arrival scans cannot veto it, and cannot send it back to a stale centroid.
+    # One nearby scan may improve a surveyed observation target after travel.
+    # Failure to resolve its small head does not veto passive camera startup.
+    if (refine_survey_target and source_config.require_current_lidar_support
+            and retained_backside_axis_path is None
+            and target_frame.retained_survey_target is not None):
+        from scripts.aufgabe04.real_robot.candidate.survey_target_refinement import (
+            refine_survey_observation_target,
+        )
+        survey_arrival_frame = target_frame
+        target_frame, refinement_evidence = refine_survey_observation_target(
+            target_frame, effects=effects,
+            output_dir=arrival_path.parent / "survey_target_refinement",
+            attempt_index=observation_attempt_index,
+        )
+        target_geometry = target_frame.camera_target_geometry
     # A new translation still acquires its own current-target evidence.
     if (getattr(source_config, "require_current_lidar_support", False)
             and retained_backside_axis_path is None
             and target_frame.camera_target_geometry is None):
         raise ValueError("camera arrival lacks the executed route's retained target")
-    target_admission = evaluate_target(artifacts.config, candidate, target_geometry=target_geometry)
-    decision, calibrated_evidence = _camera_arrival_decision(
-        robot_pose=planning_frame.current_pose,
-        target_x_m=target_geometry.x_m,
-        target_y_m=target_geometry.y_m,
-        calibration=source_config.camera_calibration,
-        config=CandidateArrivalAdmissionConfig(
+    arrival_config = CandidateArrivalAdmissionConfig(
             min_range_m=minimum_range_m,
-            max_range_m=(
-                source_config.approach_offset_m
-                + source_config.camera_arrival_range_slack_m
-            ),
-            max_bearing_error_rad=(
-                source_config.camera_arrival_max_bearing_error_rad
-            ),
-        ),
-    )
-    strict_decision = decision
-    if allow_centering_acquisition and effects.run_centering_turn is not None:
-        # Admission to passive acquisition is distinct from being centered.
-        # The observer must still associate a current head before proposing
-        # separately certified turns. Their per-step limit does not limit this
-        # passive view; no map-only correction is authorized.
-        decision, calibrated_evidence = _camera_arrival_decision(
+            max_range_m=source_config.approach_offset_m + source_config.camera_arrival_range_slack_m,
+            max_bearing_error_rad=source_config.camera_arrival_max_bearing_error_rad)
+
+    def view_admission(geometry):
+        kwargs = dict(
             robot_pose=planning_frame.current_pose,
-            target_x_m=target_geometry.x_m,
-            target_y_m=target_geometry.y_m,
-            calibration=source_config.camera_calibration,
-            config=replace(strict_decision.config, max_bearing_error_rad=max(
-                strict_decision.config.max_bearing_error_rad,
-                PASSIVE_CAMERA_ACQUISITION_MAX_BEARING_ERROR_RAD,
-            )),
-        )
+            target_x_m=geometry.x_m, target_y_m=geometry.y_m,
+            calibration=source_config.camera_calibration)
+        strict, calibrated = _camera_arrival_decision(**kwargs, config=arrival_config)
+        admitted = strict
+        if allow_centering_acquisition and effects.run_centering_turn is not None:
+            # Passive acquisition is not a centering or motion certificate.
+            admitted, calibrated = _camera_arrival_decision(**kwargs,
+                config=replace(arrival_config, max_bearing_error_rad=max(
+                    arrival_config.max_bearing_error_rad,
+                    PASSIVE_CAMERA_ACQUISITION_MAX_BEARING_ERROR_RAD)))
+        return strict, admitted, calibrated
+
+    strict_decision, decision, calibrated_evidence = view_admission(target_geometry)
+    if survey_arrival_frame is not None and refinement_evidence["accepted"]:
+        refinement_evidence = {**refinement_evidence,
+            "adopted_for_camera_arrival": True}
+        if not decision.accepted:
+            original = view_admission(survey_arrival_frame.camera_target_geometry)
+            if original[1].accepted:
+                # Optional refinement must not newly exclude a reached passive
+                # view. Keep the fresh point as advisory; subsequent motion
+                # still needs its own precise target and route admission.
+                refinement_evidence.update(adopted_for_camera_arrival=False,
+                    arrival_rejection=decision.to_evidence_dict())
+                target_frame = survey_arrival_frame
+                target_geometry = target_frame.camera_target_geometry
+                strict_decision, decision, calibrated_evidence = original
+    target_admission = evaluate_target(artifacts.config, candidate, target_geometry=target_geometry)
     if not target_admission.accepted:
         decision = replace(decision, accepted=False, decision="arrival_geometry_rejected",
                            reasons=decision.reasons + target_admission.reasons)
@@ -1513,6 +1519,7 @@ def _admit_camera_arrival_geometry(
         **calibrated_evidence,
         "validated_target_center": current_target,
         "current_lidar_support": None,
+        "survey_target_refinement": refinement_evidence,
         "retained_current_lidar_target_path": (
             None if target_frame.current_lidar_target_path is None
             else str(target_frame.current_lidar_target_path)),
@@ -1869,31 +1876,12 @@ def _execute_candidate_motion(
         if survey_support_path is not None:
             if fresh_planning_frame is None:
                 raise RuntimeError("survey observation reseal requires a fresh planning frame")
-            try:
-                estimate, support = _require_current_lidar_target(
-                    config=replacement_config, effects=effects, planning_frame=fresh_planning_frame,
-                    candidate_uid=plan_request.candidate_uid,
-                    output_dir=source_root / "current_lidar_target", attempt_index=0)
-            except CandidateObservationUnavailableError as exc:
-                support = exc.status_evidence.get("current_lidar_support")
-                if (exc.reason != "candidate_target_ineligible" or support is None
-                        or plan_request.candidate_uid not in _survey_observation_candidates(support)):
-                    raise
-                survey_support_path = Path(support["evidence_path"])
-            else:
-                # A newly visible target replaces the survey point for this
-                # replacement route; arrival retains the route that completed.
-                inspection_view_path = source_root / "current_lidar_observation_view.json"
-                write_candidate_inspection_view(inspection_view_path,
-                    snapshot=replacement_snapshot, candidate_uid=plan_request.candidate_uid,
-                    start=fresh_start_pose,
-                    view_normal_rad=math.atan2(fresh_start_pose.y_m-estimate["y_m"],
-                                               fresh_start_pose.x_m-estimate["x_m"]),
-                    purpose="current_lidar_target", view_index=0,
-                    source_observation_path=Path(support["evidence_path"]),
-                    validated_target_center=estimate,
-                    current_lidar_targets_path=Path(support["evidence_path"]))
-                survey_support_path = None
+            # Rebind the observation route to its newly admitted localization
+            # epoch without demanding a distant head return during resealing.
+            survey_support_path = source_root / "survey_observation_support.json"
+            write_survey_observation_support(survey_support_path,
+                config=replacement_config, planning_frame=fresh_planning_frame,
+                candidate_uid=plan_request.candidate_uid)
         if inspection_view_path is not None and plan_request.survey_observation_support_path is None:
             def confirm_retained_target(estimate, support):
                 if retained_backside_axis_path is None:
@@ -2698,24 +2686,16 @@ def _select_initial_candidate_with_localization_refresh(
                     "candidate route uncertainty readiness must return "
                     "CandidateRouteUncertaintyContext"
                 )
-        current_targets = None
-        current_support = None
-        selection_eligible = eligible
-        if config.require_current_lidar_support:
-            from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import capture_current_lidar_targets
-            current_targets, current_support = capture_current_lidar_targets(
-                planning_config, effects, selection_planning_frame, eligible,
-                config.session_root / "current_lidar_targets" / f"selection_{candidate_index:03d}{epoch_suffix}",
-            )
-            selection_eligible = _observation_route_candidates(current_support)
-            if not selection_eligible:
-                raise NoCurrentLidarTargetsError(current_support)
+        # Survey detections nominate observation targets. At several metres a
+        # real head may occupy less than one LiDAR beam, so current visibility
+        # cannot select the pool. Map/morphology and route gates still apply.
+        current_targets = {} if config.require_current_lidar_support else None
         try:
             selection = effects.select_initial_preapproach(
                 CameraCandidateSelectionRequest(
                     config=planning_config,
                     current_pose=current,
-                    unresolved=frozenset(selection_eligible),
+                    unresolved=frozenset(eligible),
                     support_class_by_uid=exact_two_support_by_uid,
                     route_uncertainty_context=route_uncertainty_context,
                     source_registry=source_registry,
@@ -2739,7 +2719,6 @@ def _select_initial_candidate_with_localization_refresh(
                 "eligible_candidate_uids": sorted(eligible),
                 "localization_refresh_exhausted": refresh_enabled and epoch == 1,
                 "motion_authorized": False,
-                "current_lidar_support": current_support,
             }
             if not refresh_enabled or epoch == 1:
                 raise NoUncertaintyAdmittedCameraCandidateError(failure_evidence) from exc
@@ -2755,22 +2734,24 @@ def _select_initial_candidate_with_localization_refresh(
                 },
             )
             continue
-        except (NoEligibleCameraTargetError, NoFeasibleCameraCandidateError) as exc:
-            exc.current_lidar_support = current_support
-            raise
-        if current_support is not None:
+        if config.require_current_lidar_support:
             prepared = selection.prepared_plan
-            survey_only = selection.candidate_uid in _survey_observation_candidates(current_support)
-            if (prepared is None or selection.candidate_uid not in selection_eligible
-                    or not survey_only and prepared.validated_target_center != current_targets[selection.candidate_uid]
-                    or survey_only and (prepared.validated_target_center is not None
-                        or prepared.camera_alignment is not None
-                        or prepared.approach_bearing_mode != "robot-to-stand")):
-                raise RuntimeError("camera route does not use its freshly supported LiDAR target")
+            if (prepared is None or selection.candidate_uid not in eligible
+                    or prepared.validated_target_center is not None
+                    or prepared.camera_alignment is not None
+                    or prepared.approach_bearing_mode != "robot-to-stand"):
+                raise RuntimeError("survey target requires an unaligned observation route")
+            support_path = (config.session_root / "survey_observation_targets"
+                            / f"selection_{candidate_index:03d}{epoch_suffix}.json")
+            support = write_survey_observation_support(support_path,
+                config=planning_config, planning_frame=selection_planning_frame,
+                candidate_uid=selection.candidate_uid)
             selection = replace(selection, evidence={**selection.evidence,
-                "current_lidar_support": current_support,
-                "survey_observation_candidate_uids": sorted(_survey_observation_candidates(current_support)),
-                "observation_target_source": SURVEY_OBSERVATION_POLICY if survey_only else "current_stopped_lidar_surface"})
+                "survey_observation_support_path": str(support_path),
+                "survey_observation_support_sha256": payload_sha256(support),
+                "observation_target_source": SURVEY_OBSERVATION_POLICY,
+                "current_lidar_reacquisition_required": False,
+                "head_alignment_verified": False, "precise_motion_authorized": False})
         if frame_projection_artifacts is not None:
             selection = replace(
                 selection,
@@ -2921,17 +2902,6 @@ def execute_candidate_approach_phase(
                 candidate_index=candidate_index, eligible=eligible,
                 exact_two_support_by_uid=exact_two_support_by_uid,
             )
-        except NoCurrentLidarTargetsError as exc:
-            for uid in eligible:
-                goal.mark_unavailable(uid, disposition="target_reconciliation_required",
-                                      evidence=exc.evidence["candidate_decisions"][uid])
-            goal_store.write(goal)
-            effects.event_sink(selection_log_path, {
-                "event": "camera_candidates_current_lidar_unavailable",
-                "timestamp_unix_sec": effects.clock(), **exc.evidence,
-                "motion_authorized": False, "keepouts_changed": False,
-            })
-            raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts) from exc
         except NoEligibleCameraTargetError as exc:
             defer_ineligible_targets(exc.to_evidence()["candidate_target_admission"], eligible)
             if unresolved:
@@ -2944,9 +2914,6 @@ def execute_candidate_approach_phase(
             NoFeasibleCameraCandidateError,
             NoUncertaintyAdmittedCameraCandidateError,
         ) as exc:
-            support = getattr(exc, "current_lidar_support", None) or exc.to_evidence().get("current_lidar_support")
-            if support is not None:
-                eligible.intersection_update(_observation_route_candidates(support))
             admission = getattr(exc, "target_admission_evidence", None) or exc.to_evidence().get("candidate_target_admission")
             excluded = defer_ineligible_targets(admission, eligible)
             disposition = (
@@ -2977,14 +2944,6 @@ def execute_candidate_approach_phase(
         excluded = defer_ineligible_targets(selection.evidence.get("candidate_target_admission"), eligible)
         eligible.difference_update(excluded)
         support = selection.evidence.get("current_lidar_support")
-        if support is not None:
-            # These candidates can be observed again after a supported target
-            # moves the robot to a different view. No ghost-directed motion.
-            for uid in set(support["excluded_candidate_uids"]) - _survey_observation_candidates(support):
-                goal.mark_unavailable(uid, disposition="target_reconciliation_required",
-                                      evidence=support["candidate_decisions"][uid])
-            goal_store.write(goal)
-            eligible.intersection_update(_observation_route_candidates(support))
         _validate_initial_selection(
             selection,
             unresolved=eligible,
@@ -3041,8 +3000,9 @@ def execute_candidate_approach_phase(
             prepared_plan=selection.prepared_plan,
             selection_evidence=selection.evidence,
             inspection_view_path=initial_inspection_view_path,
-            survey_observation_support_path=(Path(support["evidence_path"])
-                if support is not None and candidate.candidate_uid in _survey_observation_candidates(support)
+            survey_observation_support_path=(
+                Path(selection.evidence["survey_observation_support_path"])
+                if selection.evidence.get("observation_target_source") == SURVEY_OBSERVATION_POLICY
                 else None),
         )
         effects.event_sink(

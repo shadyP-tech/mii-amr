@@ -350,12 +350,15 @@ def execute_local_candidate_inspection(
             completed = replace(completed, retained_backside_axis_path=frame.retained_backside_axis_path)
         return completed
 
-    def admit(root, fallback_frame, index):
+    def admit(root, fallback_frame, index, *, refine_survey_target=False):
         with phase("arrival_admission", root, index):
             result = admit_arrival(
                 source_config=source_config, effects=effects, source_registry=source_registry,
                 candidate_uid=candidate_uid, candidate_root=root, observation_attempt_index=0,
                 allow_centering_acquisition=effects.run_centering_turn is not None,
+                **({"refine_survey_target": True}
+                   if refine_survey_target and fallback_frame.retained_survey_target is not None
+                   else {}),
                 **({"target_source_frame": fallback_frame}
                    if (getattr(fallback_frame, "camera_alignment", None) is not None
                        or getattr(fallback_frame, "camera_target_geometry", None) is not None)
@@ -652,9 +655,9 @@ def execute_local_candidate_inspection(
                 return admit(root / "arrival", updated, index)
 
     try:
-        # Passive camera admission/centering takes priority at the first arrival.
-        # LiDAR support is optional recovery after the observer gets this view.
-        initial = (admit(candidate_root, observation_frame, 0)
+        # Refine the reached survey target once. Weak support leaves passive
+        # camera acquisition available; further precision moves are separate.
+        initial = (admit(candidate_root, observation_frame, 0, refine_survey_target=True)
                    if source_config.camera_calibration is not None
                    else admit_corrected(candidate_root, observation_frame, 0))
     except CandidateInspectionRouteUnavailableError as exc:

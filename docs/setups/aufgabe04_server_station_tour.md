@@ -108,6 +108,22 @@ Travel uses the admitted-pose policy of up to **0.15 m/s and 0.60 rad/s**, slowi
 to **0.055 m/s and 0.18 rad/s** at corners and near the final pose. Travel plans
 use the complete stored candidate pool and may use up to four fresh,
 independently admitted route stages when uncertainty prevents a single leg.
+Each travelling leg first tries the configured minimum planning clearance. If
+its route and stopped prefixes fail uncertainty admission, it tries up to four
+wider search clearances, increasing by half a map cell each time. For the
+current 0.05 m map and 0.25 m starting clearance, the bounded choices are
+0.250, 0.275, 0.300, 0.325 and 0.350 m. The first passing choice is used;
+the next leg starts again at the minimum. This minimizes the additional buffer
+among these tested choices, without claiming a globally shortest or minimum-clearance route.
+
+The physical robot radius is **0.105 m**. The separate **0.25 m configured
+planning minimum** also accounts for the 0.20 m LiDAR stop distance, 0.02 m scan
+allowance and 0.03 m tracking allowance. The uncertainty check measures clearance
+from the robot center to raw obstacles and counts the body radius once; it does
+not add the search inflation again. Covariance, tracking and braking reserves
+remain active for every alternative. Using the body radius alone as the planning
+boundary would discard these allowances.
+
 Temporary obstacles are handled by a tour-local LiDAR occupancy grid and stopped
 global replanning. Before each motion leg, three fresh stationary scans are
 transformed at their source timestamps into the continuous odometry frame. Their
@@ -140,10 +156,17 @@ optimizer. Each new obstacle detour includes a deliberate stopped admission.
 Each tour gets a new output directory. `inputs.json` records source identities,
 poses and invocation choices, including `initial_start_policy`:
 `verify_camera_return` by default or `drive_if_needed` with `--drive-to-start`.
+It also records `clearance_policy`, separating the body radius, configured
+minimum and initial planning clearance.
 `visits/` contains routes, stopped localization,
 permits, temporary obstacle snapshots, stationary scan cohorts, authenticated
 terminal outcomes and measured arrivals; `server/` records the frozen plan and an append-only
 request/response journal. The normal child-run evidence bundles are also kept.
+Successful travelling routes include hash-bound `route_alternatives.json` with
+the tried clearances, rejected geometry or uncertainty budgets, and selected
+option. Exhausting the bounded search writes a sibling
+`route_alternatives_failure.json` diagnostic without a route certificate or
+motion permit. Source authentication errors fail immediately, before route retries.
 
 HTTP requests have bounded timeouts. A rejected or ambiguous arrival report,
 changed plan/mapping, missing pose, failed navigation or inconsistent terminal
@@ -164,6 +187,8 @@ overridden. Changing the server ID changes which robot-specific plan is created.
 - `tour_obstacle_monitor.py`: local forward-route checks before velocity publication.
 - `tour_navigation_leg.py` and `tour_obstacle_navigation.py`: exact-target planning,
   measured arrival and bounded stopped replanning.
+- `stored_pose_route_alternatives.py`: bounded geometric alternatives and their
+  evidence, using an unchanged stopped uncertainty budget.
 - `tour_replan_binding.py` and `tour_terminal_evidence.py`: new tour authorization,
   single-use execution slots and genuine predecessor outcomes.
 

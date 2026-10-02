@@ -103,6 +103,9 @@ def execute_tour(session, args, output_root: Path, tour_id: str):
           if not drive_to_start else
           "Unloaded stand tour: request the server plan, then approach saved Start if needed.", flush=True)
     print("Travel limits: 0.15 m/s and 0.60 rad/s; slower near corners and final poses.", flush=True)
+    print(f"Robot radius: {session.profile.robot_radius_m:.3f} m; "
+          f"initial planning clearance: {session.config.inflation_radius_m:.3f} m. "
+          "Each leg selects the smallest tested clearance that passes uncertainty admission.", flush=True)
     print("LiDAR obstacles enter a temporary map; blocked routes stop and replan at most twice per visit.", flush=True)
     print("Server actions use timed waits only; this runner does not manipulate physical cargo.", flush=True)
     print("Keep the arena clear, the operator beside the robot and the physical stop ready.", flush=True)
@@ -203,6 +206,13 @@ def main(argv=None) -> int:
             "unloaded_asserted": args.confirm_unloaded,
             "physical_cargo_actions": False,
             "cover_all_stands": not args.server_plan_only,
+            "clearance_policy": {
+                "robot_radius_m": session.profile.robot_radius_m,
+                "configured_minimum_static_inflation_m": session.config.physical_clearance["minimum_static_inflation_m"],
+                "initial_planning_inflation_m": session.config.inflation_radius_m,
+                "selection": "first_admitted_ascending_alternative",
+                "uncertainty_and_braking_reserves_retained": True,
+            },
             "temporary_obstacle_navigation": {
                 "enabled": True, "ttl_sec": 30, "max_replans_per_visit": 2,
                 "policy": "stop, capture stationary LiDAR, replan and certify the same stored target",

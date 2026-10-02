@@ -309,22 +309,6 @@ def capture_current_lidar_targets(config, effects, planning_frame, candidate_uid
     return estimates, {**evidence, "evidence_path": str(path), "evidence_sha256": digest}
 
 
-def permits_survey_observation(decision):
-    """Missing visibility may retain a survey hypothesis for observation only.
-
-    Plain unsupported returns, competing targets, non-stand clusters and any
-    geometry/model rejection are deliberately not absence of visibility.
-    """
-    scans = decision.get("scans", ())
-    return (decision.get("accepted") is False
-            and decision.get("reasons") == ["insufficient_current_lidar_support"]
-            and len(scans) == SCAN_COUNT
-            and all(scan.get("reason") in {
-                "supported", "occluded", "insufficient_visible_returns"} for scan in scans)
-            and any(scan.get("reason") in {
-                "occluded", "insufficient_visible_returns"} for scan in scans))
-
-
 def load_current_lidar_assessment(path, *, snapshot):
     """Replay the original complete assessment, including rejected targets."""
     evidence = load_content_hashed_json(_regular(path), hash_field=HASH_FIELD)

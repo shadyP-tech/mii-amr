@@ -20,6 +20,8 @@ class TourConfig:
     localization_branch_proof_id: str = "branch"
     mission_leg_motion_authorization_json: Path = Path("old-exploration-authorization")
     plan: object = field(default_factory=lambda: SimpleNamespace(map_bundle_sha256="a"*64))
+    inflation_radius_m: float = .25
+    physical_clearance: dict = field(default_factory=lambda: {"minimum_static_inflation_m": .25})
 
 
 class StationTourRuntimeTest(unittest.TestCase):
@@ -28,7 +30,8 @@ class StationTourRuntimeTest(unittest.TestCase):
             source_frame=SimpleNamespace(to_evidence=lambda: {"map_frame": "map"}),
             evidence={"pose_kind": "qr_verified_observation_pose"})
         return SimpleNamespace(poses_by_qr={qr: saved for qr in (
-            "Start", "QR_001", "QR_002", "QR_003", "QR_004")})
+            "Start", "QR_001", "QR_002", "QR_003", "QR_004")},
+            profile=SimpleNamespace(robot_radius_m=.105), config=TourConfig())
 
     def arguments(self, root):
         return ["--exploration-session", str(root / "camera"),
@@ -54,6 +57,9 @@ class StationTourRuntimeTest(unittest.TestCase):
             self.assertTrue(inputs["cover_all_stands"])
             self.assertFalse(inputs["physical_cargo_actions"])
             self.assertEqual(inputs["initial_start_policy"], "verify_camera_return")
+            self.assertEqual(inputs["clearance_policy"]["robot_radius_m"], .105)
+            self.assertEqual(inputs["clearance_policy"]["initial_planning_inflation_m"], .25)
+            self.assertTrue(inputs["clearance_policy"]["uncertainty_and_braking_reserves_retained"])
 
     def test_execute_requires_unloaded_and_continuous_odom_before_loading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -145,7 +151,7 @@ class StationTourRuntimeTest(unittest.TestCase):
             root = Path(directory).resolve()
             session = self.session()
             session.config = TourConfig()
-            session.profile = SimpleNamespace(robot_id="robot", resolved_runtime=lambda: SimpleNamespace(
+            session.profile = SimpleNamespace(robot_id="robot", robot_radius_m=.105, resolved_runtime=lambda: SimpleNamespace(
                 namespace="robot", cmd_vel_topic="/robot/cmd_vel", odom_frame="odom"))
             args = SimpleNamespace(server_base_url="http://fixture.invalid", server_robot_id="robot",
                                    http_timeout_sec=5., stations=3, server_plan_only=False,
