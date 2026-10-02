@@ -89,7 +89,7 @@ def _wait_for_initial_runtime_inputs(node, started_at: float, refresh) -> str:
             failure = sensor_failure or failure
             if not sensor_failure and failure:
                 # A stale first sample may consume only the remaining
-                # cold-acquisition budget. Its already-acquired peer edge
+                # startup-acquisition budget. Its already-acquired peer edge
                 # must still be fresh after the failed lookup and live probes.
                 failure = _recheck_ready_edge_ages(node, state) or failure
         refresh_hold = False

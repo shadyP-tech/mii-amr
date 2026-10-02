@@ -3,10 +3,10 @@
 The shared startup deadline also bounds first sensor delivery. Extra sensor
 acquisition requires never-received inputs and both executors serviced. TF wait
 is available only for never-acquired required TF edges, with fresh sensors and
-a demonstrably serviced TF executor. Within an already-entered cold phase, a
-structurally valid first stale required sample may wait for a fresh replacement
-under the same deadline. This is neither runtime TF recovery nor localization
-resealing; it cannot authorize a command or bypass admission.
+a demonstrably serviced TF executor. A structurally valid first stale required
+sample may wait for a fresh replacement throughout the original startup window,
+including before the extra phase is entered. This is neither runtime TF recovery
+nor localization resealing; it cannot authorize a command or bypass admission.
 """
 
 from __future__ import annotations
@@ -212,12 +212,14 @@ class InitialTfAcquisition:
         Sensor/executor health, zero motion, admission and the absolute deadline
         are checked by ``can_continue``. A later missing sample cannot use this
         exception, nor can the stale history become cold-only reseal evidence.
+        Eligibility does not depend on entering the extra phase first: the
+        first valid-but-stale sample can itself trigger that transition.
         """
 
         context = self.execution_context
         if (
-            role not in ("execution_pose", "global_consistency") or self.phase != "cold_tf_acquisition"
-            or not self.extension_used or not isinstance(context, Mapping)
+            role not in ("execution_pose", "global_consistency")
+            or not isinstance(context, Mapping)
             or set(self.required_edges) != {"execution_pose", "global_consistency"}
             or edge["successful_sample_count"] != 0
             or edge["non_acquisition_failure_count"] != edge["waitable_stale_sample_count"]
