@@ -8,9 +8,17 @@ connects to ROS, launches a process, or writes an artifact.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import math
+from typing import TYPE_CHECKING
 
 from scripts.aufgabe04.real_robot.execution.child_runner import MotionLegOutcome
+from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
+    CandidateObservationUnavailableError,
+)
+
+if TYPE_CHECKING:
+    from scripts.aufgabe04.real_robot.candidate.startup_recovery import CandidateRoutineIdentity
 
 
 _PERMIT_FIELDS = (
@@ -203,8 +211,66 @@ class CandidateStartupRecoveryError(RuntimeError):
         return fields
 
 
+class CandidateStartupTargetUnavailableError(CandidateStartupRecoveryError):
+    """A bound target deferral after every approach child stopped before motion.
+
+    Only the startup coordinator creates this subtype, after validating the
+    stopped child history and closing each child's one-use authority. It does
+    not authorize a replacement or claim a successful camera observation.
+    """
+
+    def __init__(
+        self,
+        *,
+        observation_error: CandidateObservationUnavailableError,
+        initial_identity: CandidateRoutineIdentity,
+        rejected_child: RejectedChildFailure,
+        completed_startup_reseal_count: int,
+        startup_reseal_index: int,
+        startup_target_deferral_evidence: dict[str, object],
+    ) -> None:
+        self.initial_identity = initial_identity
+        self.initial_run_id = initial_identity.run_id
+        self.target_id = initial_identity.target_id
+        self.completed_startup_reseal_count = completed_startup_reseal_count
+        self.startup_reseal_index = startup_reseal_index
+        self._startup_target_deferral_evidence = deepcopy(startup_target_deferral_evidence)
+        # Keep the stopped-child lineage even when the parent persists only
+        # the normal candidate observation deferral contract.
+        self.observation_error = CandidateObservationUnavailableError(
+            candidate_uid=observation_error.candidate_uid,
+            observation_attempt_index=observation_error.observation_attempt_index,
+            reason=observation_error.reason,
+            process_evidence={
+                **observation_error.process_evidence,
+                "candidate_startup_target_deferral": self.startup_target_deferral_evidence,
+            },
+            status_evidence=observation_error.status_evidence,
+        )
+        super().__init__(
+            f"candidate startup target unavailable before motion for {self.target_id}",
+            phase="same_routine_target_admission",
+            rejected_child=rejected_child,
+        )
+
+    @property
+    def startup_target_deferral_evidence(self) -> dict[str, object]:
+        return deepcopy(self._startup_target_deferral_evidence)
+
+    def to_failure_fields(self) -> dict[str, object]:
+        return {
+            **super().to_failure_fields(),
+            "candidate_uid": self.target_id,
+            "candidate_observation_reason": self.observation_error.reason,
+            "observer_process_evidence": self.observation_error.process_evidence,
+            "observer_status_evidence": self.observation_error.status_evidence,
+            "candidate_startup_target_deferral": self.startup_target_deferral_evidence,
+        }
+
+
 __all__ = [
     "CandidateStartupRecoveryError",
+    "CandidateStartupTargetUnavailableError",
     "RejectedChildFailure",
     "issued_motion_permit_evidence",
     "issued_motion_permit_kinds",

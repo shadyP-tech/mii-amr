@@ -44,8 +44,13 @@ from scripts.aufgabe04.real_robot.candidate.recovery_dispatch import (
 )
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
+    CandidateStartupTargetUnavailableError,
     RejectedChildFailure,
+    issued_motion_permit_evidence,
     issued_motion_permit_kinds,
+)
+from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
+    CandidateObservationUnavailableError,
 )
 from scripts.aufgabe04.real_robot.coverage_leg.replanning import (
     is_resealable_startup_mismatch,
@@ -370,7 +375,7 @@ def _close_rejected_authority(
     reseal_index: int,
     artifact_root: Path,
     exhausted: bool = False,
-) -> Path:
+) -> tuple[Path, str]:
     """Close unused authority even when the retry budget prevents replacement."""
 
     try:
@@ -383,6 +388,8 @@ def _close_rejected_authority(
             raise TypeError("permit disposition effect must return a Path")
         if path.is_symlink() or not path.is_file():
             raise ValueError("permit disposition must be a regular evidence file")
+        from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import file_sha256
+        digest = file_sha256(path)
     except Exception as exc:
         raise _fail_callback(
             config, effects, phase="rejected_permit_disposition",
@@ -393,10 +400,122 @@ def _close_rejected_authority(
         "rejected_run_id": outcome.run_id,
         "startup_reseal_index": reseal_index,
         "rejected_permit_disposition_json": str(path),
+        "rejected_permit_disposition_sha256": digest,
         "replacement_budget_exhausted": exhausted,
         "motion_published": False,
     })
-    return path
+    return path, digest
+
+
+def _closed_child_authority(
+    outcome: MotionLegOutcome,
+    identity: CandidateRoutineIdentity,
+    *,
+    reseal_index: int,
+    disposition_path: Path | None,
+    disposition_sha256: str | None,
+    no_permit_disposition_path: Path,
+) -> dict[str, object]:
+    """Read existing one-use claims before abandoning this candidate routine.
+
+    Startup route admission retires an unused permit through its existing
+    effect. Follower startup failures instead require the exact consumed
+    receipt. Missing, altered, unclaimed, or foreign permits stay terminal.
+    This helper never creates or consumes authority.
+    """
+    from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import file_sha256
+
+    issued = issued_motion_permit_evidence(outcome)
+    expected_kind = "routine_mission_leg" if reseal_index == 0 else "startup_reseal"
+    if issued and tuple(issued) != (expected_kind,):
+        raise ValueError("startup target deferral requires the child's exact permit class")
+    if disposition_path is not None:
+        from scripts.aufgabe04.navigation.execution.startup_reseal_permit_retirement import (
+            validate_odom_startup_rejected_permit_disposition,
+        )
+        binding = issued.get(expected_kind)
+        if binding is not None and binding["path"] is None:
+            raise ValueError("startup target deferral permit path is missing")
+        validate_odom_startup_rejected_permit_disposition(
+            disposition_path, expected_sha256=disposition_sha256,
+            permit_path=None if binding is None else Path(binding["path"]),
+            permit_kind=None if binding is None else (
+                "mission_leg" if expected_kind == "routine_mission_leg" else "startup_reseal"),
+            expected_permit_sha256="" if binding is None else binding["sha256"],
+            rejected_semantic_log_path=Path(outcome.semantic_log_path),
+            session_id=identity.session_id, semantic_map_id=identity.semantic_map_id,
+            rejected_run_id=identity.run_id, mission_leg_kind=identity.routine_kind,
+            mission_leg_index=identity.routine_index, target_id=identity.target_id,
+            reseal_index=reseal_index + 1,
+            no_permit_disposition_path=no_permit_disposition_path,
+        )
+        return {"disposition": "closed_by_startup_route_admission",
+                "evidence_path": str(disposition_path),
+                "evidence_sha256": disposition_sha256}
+    if tuple(issued) != (expected_kind,):
+        raise ValueError("startup target deferral requires the child's exact consumed permit")
+    binding = issued[expected_kind]
+    if binding["path"] is None:
+        raise ValueError("startup target deferral permit path is missing")
+    permit_path = Path(binding["path"])
+    if expected_kind == "routine_mission_leg":
+        from scripts.aufgabe04.navigation.execution.mission_leg_motion_consumption import (
+            default_mission_leg_motion_consumption_receipt_path,
+            load_mission_leg_motion_consumption_receipt,
+        )
+        from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import load_mission_leg_motion_permit
+        receipt_path = default_mission_leg_motion_consumption_receipt_path(permit_path)
+        receipt = load_mission_leg_motion_consumption_receipt(receipt_path)
+        permit = load_mission_leg_motion_permit(permit_path)
+        semantic_map_id = permit.semantic_map_id
+        prefix = "mission_leg_motion_permit"
+    else:
+        from scripts.aufgabe04.navigation.execution.startup_reseal_motion_consumption import (
+            default_startup_reseal_motion_consumption_receipt_path,
+            load_startup_reseal_motion_consumption_receipt,
+        )
+        from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import (
+            load_startup_reseal_motion_authorization,
+            load_startup_reseal_motion_permit,
+        )
+        receipt_path = default_startup_reseal_motion_consumption_receipt_path(permit_path)
+        receipt = load_startup_reseal_motion_consumption_receipt(receipt_path)
+        permit = load_startup_reseal_motion_permit(permit_path)
+        semantic_map_id = load_startup_reseal_motion_authorization(
+            Path(permit.master_authorization_path)).semantic_map_id
+        prefix = "startup_reseal_motion_permit"
+        if receipt.reseal_index != reseal_index:
+            raise ValueError("startup target deferral consumed reseal index mismatch")
+    if (
+        receipt.session_id != identity.session_id
+        or receipt.run_id != identity.run_id
+        or receipt.mission_leg_kind.value != identity.routine_kind
+        or receipt.mission_leg_index != identity.routine_index
+        or receipt.target_id != identity.target_id
+        or semantic_map_id != identity.semantic_map_id
+        or getattr(receipt, prefix + "_path") != str(permit_path)
+        or getattr(receipt, prefix + "_sha256") != binding["sha256"]
+    ):
+        raise ValueError("startup target deferral consumed permit binding mismatch")
+    return {"disposition": "consumed_before_motion",
+            "evidence_path": str(receipt_path),
+            "evidence_sha256": file_sha256(receipt_path),
+            "receipt": receipt.to_payload()}
+
+
+def _is_current_target_deferral(
+    exc: Exception, *, identity: CandidateRoutineIdentity, fresh_routine: bool,
+) -> bool:
+    return (
+        fresh_routine
+        and identity.routine_kind == "candidate_preapproach"
+        and isinstance(exc, CandidateObservationUnavailableError)
+        and exc.candidate_uid == identity.target_id
+        and exc.reason == "candidate_target_ineligible"
+        and exc.status_evidence.get("reason") == "current_lidar_target_unavailable"
+        and exc.process_evidence.get("observer_started") is False
+        and exc.process_evidence.get("motion_authorized") is False
+    )
 
 
 def execute_candidate_motion_with_startup_recovery(
@@ -416,6 +535,18 @@ def execute_candidate_motion_with_startup_recovery(
     handoffs. Resuming a handoff never executes the initial child again.
     """
 
+    # A resumed routine can have earlier motion even when its latest child
+    # failed before moving. Only a fresh invocation owns the complete history.
+    fresh_routine = resumed_handoff is None and (
+        recovery_state is None or (
+            recovery_state.startup_reseal_count == 0
+            and recovery_state.runtime_reseal_count == 0
+            and not recovery_state.permits_by_run
+        )
+    )
+    rejected_history: list[
+        tuple[MotionLegOutcome, CandidateRoutineIdentity, int, Path | None, str | None]
+    ] = []
     try:
         if resumed_handoff is None:
             _validate_request_identity(
@@ -652,11 +783,12 @@ def execute_candidate_motion_with_startup_recovery(
             },
         )
         disposition_path = None
+        disposition_sha256 = None
         if (
             recovery_source_kind
             == STARTUP_RESEAL_RECOVERY_SOURCE_ODOM_STARTUP_ROUTE_MISMATCH
         ):
-            disposition_path = _close_rejected_authority(
+            disposition_path, disposition_sha256 = _close_rejected_authority(
                 config, effects, outcome=outcome, identity=expected_identity,
                 reseal_index=reseal_index, artifact_root=attempt_root,
             )
@@ -716,8 +848,80 @@ def execute_candidate_motion_with_startup_recovery(
                 reseal_index=reseal_index,
                 exc=exc,
             ) from exc
+        rejected_history.append((outcome, expected_identity, completed_reseal_count,
+                                 disposition_path, disposition_sha256))
         try:
             replacement_request = effects.replan_same_routine(attempt)
+        except Exception as exc:
+            if _is_current_target_deferral(
+                exc, identity=config.initial_identity, fresh_routine=fresh_routine,
+            ):
+                try:
+                    history = [
+                        {
+                            **RejectedChildFailure.from_outcome(
+                                child, policy_reason="current_lidar_target_unavailable",
+                                preserve_child_reason=True,
+                            ).to_failure_fields(),
+                            "semantic_log_path": str(child.semantic_log_path),
+                            "completed_startup_reseal_count": count,
+                            "closed_motion_authority": _closed_child_authority(
+                                child, identity, reseal_index=count,
+                                disposition_path=disposition,
+                                disposition_sha256=disposition_digest,
+                                no_permit_disposition_path=(
+                                    _attempt_paths(config, count + 1)[0]
+                                    / "rejected_permit_disposition.json"
+                                ),
+                            ),
+                        }
+                        for child, identity, count, disposition, disposition_digest in rejected_history
+                    ]
+                except Exception as authority_exc:
+                    raise _fail_callback(
+                        config, effects, phase="target_deferral_authority_evidence",
+                        run_id=replacement_identity.run_id, reseal_index=reseal_index,
+                        exc=authority_exc,
+                    ) from authority_exc
+                assert isinstance(exc, CandidateObservationUnavailableError)
+                evidence = {
+                    **_event_base(config),
+                    "startup_reseal_index": reseal_index,
+                    "completed_startup_reseal_count": completed_reseal_count,
+                    "rejected_run_id": outcome.run_id,
+                    "replacement_run_id": replacement_identity.run_id,
+                    "recovery_source_kind": recovery_source_kind,
+                    "fresh_localization_evidence_json": str(evidence_path),
+                    "fresh_start_pose": {"x_m": fresh_pose.x_m, "y_m": fresh_pose.y_m,
+                                         "yaw_rad": fresh_pose.yaw_rad},
+                    "rejected_children": history,
+                    "entire_routine_motion_published": False,
+                    "replacement_started": False,
+                    "replacement_permit_issued": False,
+                    "observer_started": False,
+                    "motion_authorized": False,
+                }
+                deferred = CandidateStartupTargetUnavailableError(
+                    observation_error=exc, initial_identity=config.initial_identity,
+                    rejected_child=RejectedChildFailure.from_outcome(
+                        outcome, policy_reason="current_lidar_target_unavailable",
+                        preserve_child_reason=True,
+                    ),
+                    completed_startup_reseal_count=completed_reseal_count,
+                    startup_reseal_index=reseal_index,
+                    startup_target_deferral_evidence=evidence,
+                )
+                _emit(config, effects, {
+                    "event": "candidate_startup_target_deferred",
+                    **deferred.to_failure_fields(),
+                })
+                raise deferred from exc
+            raise _fail_callback(
+                config, effects, phase="same_routine_replan",
+                run_id=replacement_identity.run_id, reseal_index=reseal_index,
+                exc=exc,
+            ) from exc
+        try:
             _ensure_source_root(source_root)
             _validate_request_identity(
                 replacement_request,
@@ -793,6 +997,7 @@ __all__ = [
     "CandidateStartupRecoveryConfig",
     "CandidateStartupRecoveryEffects",
     "CandidateStartupRecoveryError",
+    "CandidateStartupTargetUnavailableError",
     "execute_candidate_motion_with_startup_recovery",
     "issued_motion_permit_kinds",
 ]

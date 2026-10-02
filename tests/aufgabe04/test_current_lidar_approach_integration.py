@@ -241,6 +241,146 @@ class CurrentLidarApproachIntegrationTests(unittest.TestCase):
                 with self.subTest(owner=owner, supported=supported):
                     self._check_reseal(owner, supported)
 
+    def test_ambiguous_arrival_reacquires_before_camera_and_opposite_dispatch(self):
+        config = self.config()
+        order, paths = [], []
+
+        def capture(cfg, effects, frame, uids, output):
+            index = len(paths)
+            paths.append(Path(output))
+            order.append("scan")
+            accepted = index == 1
+            evidence = {
+                "eligible_candidate_uids": ["candidate_0"] if accepted else [],
+                "excluded_candidate_uids": [] if accepted else ["candidate_0"],
+                "candidate_decisions": {"candidate_0": {
+                    "candidate_uid": "candidate_0", "accepted": accepted,
+                    "reasons": [] if accepted else ["ambiguous_current_target_correspondence"],
+                    "scans": [{"scan_stamp_sec": 100.0 + index * 3 + i * .1,
+                               "reason": "ambiguous_clusters" if not accepted and i == 5 else "supported"}
+                              for i in range(8)],
+                }},
+                "observation_not_before_sec": 100.0 + index * 3,
+                "planning_frame": frame.to_evidence(), "motion_authorized": False,
+                "keepouts_changed": False,
+            }
+            path = Path(output) / "current_lidar_targets.json"
+            digest = write_content_hashed_json(path, evidence, hash_field=HASH_FIELD)
+            return ({"candidate_0": self.target()} if accepted else {},
+                    {**evidence, "evidence_path": str(path), "evidence_sha256": digest})
+
+        def camera(request):
+            order.append("camera")
+            return approach.CandidateObservation(None, None, self.root / "camera_axis.json")
+
+        class OppositeDispatchReached(RuntimeError):
+            pass
+
+        def opposite(**kwargs):
+            order.append("opposite")
+            self.assertEqual(kwargs["observation_frame"].current_lidar_target_path,
+                             paths[1] / "current_lidar_targets.json")
+            # The test stops at the existing certified route boundary; it
+            # never substitutes an unsafe route or claims executed motion.
+            raise OppositeDispatchReached()
+
+        effects = self.effects(capture_observation=Mock(side_effect=camera),
+                               wait_for_lidar_reacquisition=lambda seconds: order.append("pause"))
+        frame = approach._CandidateObservationFrame(config, config.snapshot.candidates[0],
+            self.frame(), None, observation_pose=self.frame().current_pose)
+        with patch(SENSOR + ".capture_current_lidar_targets", side_effect=capture), \
+                patch(MODULE + "._move_certified_opposite_face", side_effect=opposite):
+            with self.assertRaises(OppositeDispatchReached):
+                approach._capture_candidate_camera_result(
+                    observation_frame=frame, source_config=config, effects=effects,
+                    source_registry=self.registry(config), candidate_root=self.root / "arrival_retry",
+                    candidate_run_id="candidate_arrival_retry", candidate_index=0)
+        self.assertEqual(order, ["scan", "pause", "scan", "camera", "opposite"])
+        self.assertEqual(paths[1], paths[0] / "reacquire_001")
+        effects.run_motion_leg.assert_not_called()
+
+    def test_typed_startup_target_deferral_preserves_goal_and_visits_next_candidate(self):
+        self._check_startup_target_deferral()
+
+    def test_typed_startup_target_deferral_does_not_expand_camera_pilot(self):
+        self._check_startup_target_deferral(pilot=True)
+
+    def test_startup_target_deferral_cannot_change_parent_routine_identity(self):
+        self._check_startup_target_deferral(wrong_identity=True)
+
+    def _check_startup_target_deferral(self, *, pilot=False, wrong_identity=False):
+        from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
+            CandidateStartupTargetUnavailableError, RejectedChildFailure,
+        )
+        from scripts.aufgabe04.real_robot.candidate.startup_recovery import CandidateRoutineIdentity
+
+        # Sensor/certificate details of this subtype are covered by the real
+        # coordinator tests. Here exercise the parent ledger and candidate loop.
+        config = replace(self.config(count=2), require_current_lidar_support=False,
+                         stop_after_camera_candidates=1 if pilot else None)
+        attempted, observed = [], []
+
+        def unavailable(uid):
+            return CandidateObservationUnavailableError(
+                candidate_uid=uid, observation_attempt_index=0, reason="candidate_target_ineligible",
+                process_evidence={"observer_started": False, "motion_authorized": False},
+                status_evidence={"reason": "current_lidar_target_unavailable"})
+
+        def execute(**kwargs):
+            uid = kwargs["target_id"]
+            attempted.append(uid)
+            if uid == "candidate_0":
+                stopped = MotionLegOutcome(run_id=kwargs["run_id"], status="preflight_failed",
+                    stop_reason="certified start mismatch", stop_details={}, motion_published=False,
+                    returncode=1, semantic_log_path=self.root / "stopped.jsonl")
+                raise CandidateStartupTargetUnavailableError(
+                    observation_error=unavailable(uid),
+                    initial_identity=CandidateRoutineIdentity(config.session_id, config.semantic_map_id,
+                        "candidate_preapproach", kwargs["candidate_index"], uid,
+                        "foreign_run" if wrong_identity else kwargs["run_id"]),
+                    rejected_child=RejectedChildFailure.from_outcome(stopped,
+                        policy_reason="current_target_unavailable", preserve_child_reason=True),
+                    completed_startup_reseal_count=0, startup_reseal_index=1,
+                    startup_target_deferral_evidence={"motion_published": False,
+                                                      "test_consumed_authority_verified": True})
+            return replace(stopped_template, run_id=kwargs["run_id"], status="completed", returncode=0)
+
+        stopped_template = MotionLegOutcome(run_id="template", status="stopped", stop_reason="",
+            stop_details={}, motion_published=False, returncode=1, semantic_log_path=self.root / "test.jsonl")
+
+        def observe(**kwargs):
+            uid = kwargs["observation_frame"].candidate.candidate_uid
+            observed.append(uid)
+            raise unavailable(uid)
+
+        effects = self.effects(admit_planning_frame=None,
+            select_initial_preapproach=self.fixtures._nearest_selection,
+            plan_preapproach=lambda request: {"route_csv": "injected_route.csv"})
+        with patch(MODULE + "._execute_candidate_motion", side_effect=execute), \
+                patch(MODULE + "._capture_candidate_camera_result", side_effect=observe):
+            if wrong_identity:
+                with self.assertRaisesRegex(RuntimeError, "changed candidate routine identity"):
+                    approach.execute_candidate_approach_phase(config, effects)
+                self.assertEqual(attempted, ["candidate_0"])
+                self.assertFalse(observed)
+                return
+            with self.assertRaises(CandidateQrGoalIncompleteError):
+                approach.execute_candidate_approach_phase(config, effects)
+        self.assertEqual(attempted, ["candidate_0"] if pilot else ["candidate_0", "candidate_1"])
+        self.assertEqual(observed, [] if pilot else ["candidate_1"])
+        progress = json.loads((config.session_root / "candidate_goal_progress.json").read_text())
+        self.assertFalse(progress["goal_completed"])
+        self.assertEqual(progress["confirmed_stand_count"], 0)
+        self.assertEqual(progress["keepout_candidate_uids"], ["candidate_0", "candidate_1"])
+        self.assertEqual(progress["inspection_order"], [] if pilot else ["candidate_1"])
+        first = next(d for d in progress["candidate_dispositions"] if d["candidate_uid"] == "candidate_0")
+        self.assertEqual(first["disposition"], "target_reconciliation_required")
+        event = next(e for e in self.events if e.get("event") == "camera_candidate_startup_target_deferred")
+        self.assertEqual(event["candidate_uid"], "candidate_0")
+        self.assertFalse(event["motion_authorized"])
+        self.assertFalse(event["retry_eligible"])
+        self.assertFalse(event["keepouts_changed"])
+
     def _check_reseal(self, owner, supported):
         root = self.root / f"{owner}_{supported}"
         root.mkdir()

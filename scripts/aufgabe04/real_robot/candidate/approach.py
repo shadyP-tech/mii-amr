@@ -158,6 +158,7 @@ from scripts.aufgabe04.real_robot.candidate.opposite_face_route_fallback import 
 )
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     CandidateStartupRecoveryError,
+    CandidateStartupTargetUnavailableError,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateGeometry,
@@ -1135,6 +1136,7 @@ class CandidateApproachEffects:
     run_centering_turn: Callable[..., object] | None = None
     capture_lidar_view: Callable[[CandidateLidarCaptureRequest], CandidateLidarView] | None = None
     run_lidar_sampling_turn: Callable[..., object] | None = None
+    wait_for_lidar_reacquisition: Callable[[float], None] = time.sleep
 
 
 def _camera_alignment_uncertainty(context):
@@ -1530,17 +1532,11 @@ def _admit_camera_arrival_geometry(
 
 def _require_current_lidar_target(*, config, effects, planning_frame, candidate_uid,
                                 output_dir, attempt_index):
-    from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import capture_current_lidar_targets
-    estimates, evidence = capture_current_lidar_targets(
-        config, effects, planning_frame, {candidate_uid}, output_dir)
-    if candidate_uid not in estimates:
-        raise CandidateObservationUnavailableError(
-            candidate_uid=candidate_uid, observation_attempt_index=attempt_index,
-            reason="candidate_target_ineligible",
-            process_evidence={"observer_started": False, "motion_authorized": False},
-            status_evidence={"reason": "current_lidar_target_unavailable", "current_lidar_support": evidence},
-        )
-    return estimates[candidate_uid], evidence
+    from scripts.aufgabe04.real_robot.candidate.current_lidar_reacquisition import require_current_lidar_target
+    return require_current_lidar_target(
+        config=config, effects=effects, planning_frame=planning_frame,
+        candidate_uid=candidate_uid, output_dir=output_dir, attempt_index=attempt_index,
+    )
 
 
 def _admit_opposite_face_planning_geometry(
@@ -2920,6 +2916,39 @@ def execute_candidate_approach_phase(
                 source_registry=source_registry,
                 plan_planning_frame=selection_planning_frame,
             )
+        except CandidateStartupTargetUnavailableError as exc:
+            expected_identity = CandidateRoutineIdentity(
+                session_id=config.session_id, semantic_map_id=config.semantic_map_id,
+                routine_kind="candidate_preapproach", routine_index=candidate_index,
+                target_id=candidate.candidate_uid, run_id=candidate_run_id,
+            )
+            if exc.initial_identity != expected_identity:
+                raise RuntimeError("startup target deferral changed candidate routine identity") from exc
+            selected = observation_ledger.select(candidate.candidate_uid)
+            if selected != observation_selection_preview:
+                raise RuntimeError("startup target deferral changed observation selection") from exc
+            attempt = observation_ledger.mark_unavailable(exc.observation_error)
+            evidence = {
+                **exc.observation_error.to_event_fields(),
+                "startup_target_deferral": exc.startup_target_deferral_evidence,
+            }
+            effects.event_sink(selection_log_path, {
+                **evidence, **attempt.to_dict(),
+                "event": "camera_candidate_startup_target_deferred",
+                "timestamp_unix_sec": effects.clock(),
+                "retry_eligible": False,
+                "future_motion_requires_fresh_live_gates": True,
+                "motion_authorized": False,
+                "keepouts_changed": False,
+            })
+            goal.mark_unavailable(candidate.candidate_uid,
+                                  disposition="target_reconciliation_required", evidence=evidence)
+            goal_store.write(goal)
+            unresolved.discard(candidate.candidate_uid)
+            if pilot_limit is not None:
+                raise CandidateQrGoalIncompleteError(goal, attempt_evidence=observation_ledger.attempts) from exc
+            candidate_index += 1
+            continue
         except CandidateStartupRecoveryError as exc:
             deferral = evaluate_candidate_route_admission_deferral(
                 exc,

@@ -227,6 +227,56 @@ def validate_startup_reseal_permit_disposition(
                 raise ValueError(f"startup rejected permit master {name} mismatch")
 
 
+def validate_odom_startup_rejected_permit_disposition(
+    path: Path,
+    *,
+    expected_sha256: str,
+    permit_path: Path | None,
+    permit_kind: str | None,
+    expected_permit_sha256: str,
+    rejected_semantic_log_path: Path,
+    session_id: str,
+    semantic_map_id: str,
+    rejected_run_id: str,
+    mission_leg_kind: str,
+    mission_leg_index: int,
+    target_id: str,
+    reseal_index: int,
+    no_permit_disposition_path: Path,
+) -> None:
+    """Read-check terminal authority when no replacement will be issued.
+
+    Reuse retirement's complete source-log and permit validation, bound to the
+    caller's stopped child rather than identities read from the disposition.
+    A copied tombstone cannot substitute for the exclusive consumption slot.
+    This function creates neither a claim nor a replacement permit.
+    """
+    from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization import file_sha256
+
+    source = _normal_path(path)
+    if file_sha256(source) != expected_sha256:
+        raise ValueError("startup rejected permit disposition hash mismatch")
+    payload = load_content_hashed_json(source, hash_field=DISPOSITION_HASH_FIELD)
+    expected, claim = _disposition_payload(
+        permit_path=permit_path, permit_kind=permit_kind,
+        expected_permit_sha256=expected_permit_sha256,
+        rejected_semantic_log_path=rejected_semantic_log_path,
+        session_id=session_id, rejected_run_id=rejected_run_id,
+        mission_leg_kind=mission_leg_kind, mission_leg_index=mission_leg_index,
+        target_id=target_id, reseal_index=reseal_index,
+    )
+    expected_path = claim if claim is not None else no_permit_disposition_path
+    if payload != expected or source != expected_path:
+        raise ValueError("startup rejected permit disposition binding or claim path mismatch")
+    if permit_path is not None:
+        permit, master, _ = _load_old_permit(permit_path, permit_kind)
+        if (master.semantic_map_id != semantic_map_id
+                or getattr(permit, "semantic_map_id", semantic_map_id) != semantic_map_id):
+            raise ValueError("startup rejected permit semantic map mismatch")
+    if file_sha256(source) != expected_sha256:
+        raise ValueError("startup rejected permit disposition changed during validation")
+
+
 def _normal_path(path: Path) -> Path:
     source = Path(path)
     if not source.is_absolute() or source.is_symlink() or not source.is_file():
