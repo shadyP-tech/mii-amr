@@ -137,6 +137,9 @@ class OppositeLocalizationRetryTest(unittest.TestCase):
             case.arrival.assert_called_once()
             self.assertEqual(case.arrival.call_args.kwargs['candidate_root'],
                              case.root/'opposite/localization_001')
+            completed_frame = case.arrival.call_args.kwargs['target_source_frame']
+            self.assertEqual(completed_frame.retained_backside_axis_path, case.source_receipt)
+            self.assertAlmostEqual(completed_frame.camera_target_geometry.x_m, .2)
 
     def test_all_bounded_endpoint_rejections_do_not_refresh(self):
         with self.mixed_failure_case(all_endpoints_rejected=True) as case:
@@ -227,7 +230,8 @@ class OppositeLocalizationRetryTest(unittest.TestCase):
                               side_effect=endpoint_error if source_orientation_rejected else None), \
                  patch.object(approach, 'load_backside_axis_planning_observation',
                               return_value=SimpleNamespace(validated_target_center={
-                                  'x_m':.2, 'y_m':0., 'uncertainty_m':.024178})), \
+                                  'x_m':.2, 'y_m':0., 'uncertainty_m':.024178,
+                                  'policy':'reconciled_metric_head_position_engineering_bound'})), \
                  patch.object(approach, 'try_opposite_checkpoint', side_effect=checkpoint) as checkpoint_mock, \
                  patch.object(approach, '_admit_camera_arrival_geometry', return_value=arrived) as arrival:
                 def invoke():

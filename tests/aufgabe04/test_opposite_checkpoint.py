@@ -207,6 +207,11 @@ class OppositeCoordinatorCheckpointTest(unittest.TestCase):
             def motion(**kw):
                 motions.append(kw)
                 if '_checkpoint' in kw['run_id']:
+                    sink = kw.get('completed_frame_sink')
+                    if sink is not None:
+                        sink(approach._observation_frame_for_plan(
+                            config=kw['config'], plan_request=kw['plan_request'],
+                            planning_frame=kw['plan_planning_frame']))
                     return SimpleNamespace(status='completed')
                 outcome=factory._route_uncertainty_rejection(SimpleNamespace(run_id=kw['run_id'],session_root=root))
                 raise OppositeFaceRouteFallbackTest._error(outcome)
@@ -221,11 +226,13 @@ class OppositeCoordinatorCheckpointTest(unittest.TestCase):
             arrived=object()
             with patch.object(approach,'_admit_opposite_face_planning_geometry',side_effect=admit), \
                  patch.object(approach,'opposite_face_normal',return_value=1.2), \
-                 patch.object(approach,'load_backside_axis_planning_observation',return_value=SimpleNamespace(validated_target_center={'uncertainty_m':.02})), \
+                 patch.object(approach,'load_backside_axis_planning_observation',return_value=SimpleNamespace(validated_target_center={
+                     'x_m':.2, 'y_m':0., 'uncertainty_m':.02,
+                     'policy':'reconciled_metric_head_position_engineering_bound'})), \
                  patch.object(approach,'bounded_inspection_standoffs',return_value=(.5,.45)), \
                  patch.object(approach,'_execute_candidate_motion',side_effect=motion), \
                  patch.object(approach,'try_opposite_checkpoint',side_effect=checkpoint), \
-                 patch.object(approach,'_admit_camera_arrival_geometry',return_value=arrived):
+                 patch.object(approach,'_admit_camera_arrival_geometry',return_value=arrived) as arrival:
                 result=approach._move_certified_opposite_face(observation_frame=frame,observation=observation,
                     source_config=config,effects=effects,source_registry=None,candidate_root=root/'opposite',
                     candidate_run_id='mission_inspect',candidate_index=1)
@@ -240,6 +247,9 @@ class OppositeCoordinatorCheckpointTest(unittest.TestCase):
             self.assertEqual(prefix['config'].max_startup_reseals_per_leg,0)
             self.assertEqual(prefix['config'].max_runtime_localization_reseals_per_leg,0)
             self.assertEqual(len({m['run_id'] for m in motions}),len(motions))
+            completed_frame=arrival.call_args.kwargs['target_source_frame']
+            self.assertEqual(completed_frame.observation_pose,plans[-1].start)
+            self.assertEqual(completed_frame.retained_backside_axis_path,observation.axis_observation_path)
 
 
 if __name__=='__main__':unittest.main()

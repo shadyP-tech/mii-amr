@@ -1,11 +1,14 @@
 """Persist candidate-local target deferral without changing obstacle keepouts."""
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 import math
 from pathlib import Path
 
-from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
+from scripts.aufgabe04.artifacts.content_store import (
+    load_content_hashed_json, payload_sha256, write_content_hashed_json,
+)
 from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+from scripts.aufgabe04.navigation.approach.candidate_frame_projection import CandidatePlanningFrame
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
     load_backside_axis_planning_observation,
 )
@@ -15,9 +18,110 @@ from scripts.aufgabe04.navigation.approach.candidate_target_admission import (
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationUnavailableError,
 )
-from scripts.aufgabe04.stations.candidate_snapshot import (
-    candidate_geometry_sha256, candidate_snapshot_sha256, validate_candidate_geometry,
+from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import (
+    HASH_FIELD as LIDAR_TARGET_HASH_FIELD, POLICY as LIDAR_TARGET_POLICY,
+    load_current_lidar_target,
 )
+from scripts.aufgabe04.stations.candidate_snapshot import (
+    CandidateSnapshot, candidate_geometry_sha256, candidate_snapshot_sha256,
+    validate_candidate_geometry,
+)
+
+
+@dataclass(frozen=True)
+class RetainedLidarTargetBinding:
+    """Original stopped support; subsequent localization never rewrites it."""
+
+    candidate_uid: str
+    evidence_path: Path
+    evidence_sha256: str
+    source_snapshot: CandidateSnapshot
+    source_snapshot_sha256: str
+    source_planning_frame: CandidatePlanningFrame
+
+
+def _project_geometry(geometry, before, after):
+    a, b = before.map_from_odom, after.map_from_odom
+    if a == b:
+        return geometry
+    dx, dy = geometry.x_m-a.x_m, geometry.y_m-a.y_m
+    ox = math.cos(a.yaw_rad)*dx + math.sin(a.yaw_rad)*dy
+    oy = -math.sin(a.yaw_rad)*dx + math.cos(a.yaw_rad)*dy
+    return replace(geometry,
+        x_m=b.x_m+math.cos(b.yaw_rad)*ox-math.sin(b.yaw_rad)*oy,
+        y_m=b.y_m+math.sin(b.yaw_rad)*ox+math.cos(b.yaw_rad)*oy)
+
+
+def _load_retained_lidar_geometry(binding):
+    if not isinstance(binding, RetainedLidarTargetBinding):
+        raise ValueError("invalid retained LiDAR target binding")
+    proof = load_content_hashed_json(binding.evidence_path, hash_field=LIDAR_TARGET_HASH_FIELD)
+    if (payload_sha256(proof) != binding.evidence_sha256
+            or candidate_snapshot_sha256(binding.source_snapshot) != binding.source_snapshot_sha256
+            or proof.get("planning_frame") != binding.source_planning_frame.to_evidence()):
+        raise ValueError("retained LiDAR target original source binding changed")
+    estimate = load_current_lidar_target(binding.evidence_path,
+        candidate_uid=binding.candidate_uid, snapshot=binding.source_snapshot)
+    candidate = binding.source_snapshot.candidate_for(binding.candidate_uid)
+    if candidate is None or estimate.get("policy") != LIDAR_TARGET_POLICY:
+        raise ValueError("retained LiDAR target candidate/policy mismatch")
+    geometry = planning_target_geometry(candidate, estimate)
+    limit = min(.16, 2*(candidate.geometry.radius_m+candidate.geometry.uncertainty_m))
+    if (geometry.uncertainty_m > .14
+            or math.hypot(geometry.x_m-candidate.geometry.x_m,
+                          geometry.y_m-candidate.geometry.y_m) > limit+1e-9):
+        raise ValueError("retained LiDAR target outside original support bound")
+    return geometry
+
+
+def _lidar_geometry_in_frame(binding, geometry, frame):
+    original = binding.source_snapshot
+    snapshot, planning = frame.config.snapshot, frame.planning_frame
+    if (planning is None or binding.candidate_uid != frame.candidate.candidate_uid
+            or snapshot.candidate_for(binding.candidate_uid) != frame.candidate
+            or replace(snapshot, candidates=original.candidates) != original
+            or (planning.map_frame, planning.odom_frame) != (
+                binding.source_planning_frame.map_frame, binding.source_planning_frame.odom_frame)
+            or planning.map_frame != snapshot.planning_frame):
+        raise ValueError("retained LiDAR target candidate/snapshot/frame mismatch")
+    # Every obstacle remains the same canonical odom obstacle. Only its map
+    # coordinates may change when stationary localization is refreshed.
+    if len(snapshot.candidates) != len(original.candidates):
+        raise ValueError("retained LiDAR target snapshot population changed")
+    for before, after in zip(original.candidates, snapshot.candidates):
+        expected = _project_geometry(before.geometry, binding.source_planning_frame, planning)
+        if (replace(after, geometry=before.geometry) != before
+                or any(abs(getattr(after.geometry, key)-getattr(expected, key)) > 1e-9
+                       for key in asdict(expected))):
+            raise ValueError("retained LiDAR target snapshot geometry/projection mismatch")
+    return _project_geometry(geometry, binding.source_planning_frame, planning)
+
+
+def bind_current_lidar_target(frame, *, evidence_path: Path):
+    """Bind one accepted preapproach point to its immutable acquisition source."""
+    proof = load_content_hashed_json(evidence_path, hash_field=LIDAR_TARGET_HASH_FIELD)
+    if frame.planning_frame is None:
+        raise ValueError("current LiDAR target requires an admitted planning frame")
+    binding = RetainedLidarTargetBinding(frame.candidate.candidate_uid, Path(evidence_path),
+        payload_sha256(proof), frame.config.snapshot,
+        candidate_snapshot_sha256(frame.config.snapshot), frame.planning_frame)
+    geometry = _load_retained_lidar_geometry(binding)
+    target = _lidar_geometry_in_frame(binding, geometry, frame)
+    existing = getattr(frame, "camera_target_geometry", None)
+    if existing is not None and existing != target:
+        raise ValueError("current LiDAR target differs from selected camera target")
+    return replace(frame, camera_target_geometry=target, camera_alignment=None,
+                   current_lidar_target_path=Path(evidence_path), retained_lidar_target=binding)
+
+
+def _require_retained_lidar_geometry(frame):
+    binding = frame.retained_lidar_target
+    original_geometry = _load_retained_lidar_geometry(binding)
+    expected = _lidar_geometry_in_frame(binding, original_geometry, frame)
+    if (getattr(frame, "camera_target_geometry", None) != expected
+            or getattr(frame, "current_lidar_target_path", None) != binding.evidence_path):
+        raise ValueError("retained LiDAR target geometry/path binding changed")
+    return original_geometry
 
 
 def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
@@ -29,8 +133,9 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
     that the camera is aligned after moving or refreshing localization.
     """
     geometry = getattr(source, "camera_target_geometry", None)
+    lidar_binding = getattr(source, "retained_lidar_target", None)
     alignment = getattr(source, "camera_alignment", None)
-    if geometry is None and alignment is None:
+    if geometry is None and alignment is None and lidar_binding is None:
         return arrival
     if getattr(arrival, "camera_target_geometry", None) is not None:
         return arrival
@@ -50,7 +155,12 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
     if (before.map_frame != source.config.snapshot.planning_frame
             or after.map_frame != arrival.config.snapshot.planning_frame):
         raise ValueError("retained camera target planning frame mismatch")
-    if geometry is None:
+    if lidar_binding is not None:
+        original_geometry = _require_retained_lidar_geometry(source)
+        target = _lidar_geometry_in_frame(lidar_binding, original_geometry, arrival)
+        projected_alignment = None
+        kind = LIDAR_TARGET_POLICY
+    elif geometry is None:
         from scripts.aufgabe04.navigation.approach.camera_head_alignment import (
             reproject_camera_alignment, validate_camera_alignment,
         )
@@ -79,20 +189,18 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
     else:
         # The fit lives in the source frame, not the refreshed map frame.
         # Rotate/translate via its canonical odom point; never copy x/y.
-        a, b = before.map_from_odom, after.map_from_odom
-        dx, dy = geometry.x_m-a.x_m, geometry.y_m-a.y_m
-        ox = math.cos(a.yaw_rad)*dx + math.sin(a.yaw_rad)*dy
-        oy = -math.sin(a.yaw_rad)*dx + math.cos(a.yaw_rad)*dy
-        target = replace(arrival.candidate.geometry,
-            x_m=b.x_m+math.cos(b.yaw_rad)*ox-math.sin(b.yaw_rad)*oy,
-            y_m=b.y_m+math.sin(b.yaw_rad)*ox+math.cos(b.yaw_rad)*oy,
-            uncertainty_m=geometry.uncertainty_m)
+        projected = _project_geometry(geometry, before, after)
+        target = replace(arrival.candidate.geometry, x_m=projected.x_m,
+            y_m=projected.y_m, uncertainty_m=geometry.uncertainty_m)
         projected_alignment = None
         kind = "current_camera_target_geometry"
     for frame, point in ((source, geometry), (arrival, target)):
         validate_candidate_geometry(point)
         envelope = frame.candidate.geometry
-        if math.hypot(point.x_m-envelope.x_m, point.y_m-envelope.y_m) > envelope.radius_m+envelope.uncertainty_m+1e-9:
+        limit = envelope.radius_m+envelope.uncertainty_m
+        if lidar_binding is not None:
+            limit = min(.16, 2*limit)
+        if math.hypot(point.x_m-envelope.x_m, point.y_m-envelope.y_m) > limit+1e-9:
             raise ValueError("retained fitted camera target outside candidate envelope")
     provenance = {
         "schema_version": 1, "candidate_uid": uid, "source_kind": kind,
@@ -108,9 +216,18 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
         "head_alignment_verified": False, "camera_centered": False,
         "motion_authorized": False, "keepouts_changed": False,
     }
+    if lidar_binding is not None:
+        provenance["retained_lidar_target"] = {
+            "evidence_path": str(lidar_binding.evidence_path),
+            "evidence_sha256": lidar_binding.evidence_sha256,
+            "source_candidate_snapshot_sha256": lidar_binding.source_snapshot_sha256,
+            "source_planning_frame": lidar_binding.source_planning_frame.to_evidence(),
+        }
     write_content_hashed_json(evidence_path, provenance,
         hash_field="camera_target_geometry_projection_sha256")
-    return replace(arrival, camera_target_geometry=target,
+    changes = {} if lidar_binding is None else dict(retained_lidar_target=lidar_binding,
+        current_lidar_target_path=lidar_binding.evidence_path)
+    return replace(arrival, **changes, camera_target_geometry=target,
                    camera_alignment=projected_alignment,
                    camera_target_geometry_evidence_path=evidence_path)
 
@@ -155,6 +272,8 @@ def require_target(config, candidate, *, evidence_path: Path, attempt_index: int
 def require_frame_target(frame, *, evidence_path: Path, attempt_index: int):
     """Resolve retained geometry only after it has been projected to this frame."""
     geometry = getattr(frame, "camera_target_geometry", None)
+    if getattr(frame, "retained_lidar_target", None) is not None:
+        _require_retained_lidar_geometry(frame)
     retained = getattr(frame, "retained_backside_axis_path", None)
     if retained is not None:
         observation = load_backside_axis_planning_observation(retained)

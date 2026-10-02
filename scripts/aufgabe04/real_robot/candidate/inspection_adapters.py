@@ -32,7 +32,7 @@ from scripts.aufgabe04.navigation.approach.candidate_arrival_admission import (
     CandidateArrivalAdmissionConfig, evaluate_candidate_arrival_admission,
 )
 from scripts.aufgabe04.real_robot.candidate.centering_execution import capture_with_centering
-from scripts.aufgabe04.real_robot.candidate.target_admission import require_frame_target
+from scripts.aufgabe04.real_robot.candidate.target_admission import bind_current_lidar_target, require_frame_target
 from scripts.aufgabe04.real_robot.candidate.retained_orientation import retain_orientation_after_arrival
 from scripts.aufgabe04.navigation.planning.map_io import read_map_metadata
 from scripts.aufgabe04.real_robot.candidate.inspection_execution import (
@@ -126,15 +126,32 @@ def execute_local_candidate_inspection(
                           None if artifacts is None else artifacts.camera_decision_binding(), pose,
                           localization_evidence_path=(None if planning is None else
                               root / "opposite_face_planning_localization.json"))
-        if getattr(source_config, "require_current_lidar_support", False):
-            from scripts.aufgabe04.real_robot.candidate.approach import _require_current_lidar_target
-            from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
-            estimate, support = _require_current_lidar_target(
-                config=config, effects=effects, planning_frame=planning, candidate_uid=candidate_uid,
-                output_dir=root / "current_lidar_target", attempt_index=active_view_index)
-            result = replace(result, camera_target_geometry=planning_target_geometry(candidate, estimate),
-                             current_lidar_target_path=Path(support["evidence_path"]))
         return result
+
+    def require_translation_support(frame, root):
+        if getattr(source_config, "require_current_lidar_support", False):
+            from scripts.aufgabe04.real_robot.candidate.approach import (
+                _require_current_lidar_target, _validate_current_lidar_target_agreement,
+            )
+            estimate, support = _require_current_lidar_target(
+                config=frame.config, effects=effects, planning_frame=frame.planning_frame, candidate_uid=candidate_uid,
+                output_dir=root / "current_lidar_target", attempt_index=active_view_index)
+            if frame.retained_backside_axis_path is not None:
+                from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+                from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import load_backside_axis_planning_observation
+                axis = load_backside_axis_planning_observation(frame.retained_backside_axis_path)
+                target = planning_target_geometry(frame.candidate, axis.validated_target_center)
+                _validate_current_lidar_target_agreement(
+                    estimate=estimate, support=support, candidate=frame.candidate,
+                    target_geometry=target, attempt_index=active_view_index,
+                )
+            frame = bind_current_lidar_target(
+                replace(frame, camera_target_geometry=None, camera_alignment=None,
+                        retained_lidar_target=None, current_lidar_target_path=None,
+                        camera_target_geometry_evidence_path=None),
+                evidence_path=Path(support["evidence_path"]),
+            )
+        return frame
 
     def yaw(frame) -> float:
         return 0.0 if frame.planning_frame is None else frame.planning_frame.map_from_odom.yaw_rad
@@ -165,6 +182,7 @@ def execute_local_candidate_inspection(
         source_frame = frame
         if prepared_plan is None:
             frame = retain_orientation_after_arrival(source_frame, fresh_frame(root / "planning"), root / "planning")
+            frame = require_translation_support(frame, root / "planning")
         current = pose(frame)
         if current is None:
             raise RuntimeError("inspection route lacks a fresh finite start pose")
@@ -177,6 +195,23 @@ def execute_local_candidate_inspection(
             current_support_path = frame.current_lidar_target_path
             current_estimate = load_current_lidar_target(current_support_path,
                 candidate_uid=candidate_uid, snapshot=frame.config.snapshot)
+        elif prepared_plan is not None and getattr(source_config, "require_current_lidar_support", False):
+            # Preparation must follow acquisition in this exact stopped frame.
+            # Confirm the fixed camera fit, without rewriting its sealed point.
+            from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import load_current_lidar_target
+            estimate = load_current_lidar_target(frame.current_lidar_target_path,
+                candidate_uid=candidate_uid, snapshot=frame.config.snapshot)
+            alignment = prepared_plan.camera_alignment
+            if alignment is None or math.hypot(
+                    estimate["x_m"]-alignment["center_x_m"],
+                    estimate["y_m"]-alignment["center_y_m"]) > (
+                    estimate["uncertainty_m"]+alignment["center_uncertainty_m"]):
+                raise CandidateObservationUnavailableError(
+                    candidate_uid=candidate_uid, observation_attempt_index=index,
+                    reason="candidate_target_ineligible",
+                    process_evidence={"observer_started": False, "motion_authorized": False},
+                    status_evidence={"reason": "current_lidar_disagrees_with_prepared_alignment"},
+                )
         write_candidate_inspection_view(
             view_path, snapshot=frame.config.snapshot, candidate_uid=candidate_uid,
             start=current, view_normal_rad=map_normal,
@@ -282,6 +317,7 @@ def execute_local_candidate_inspection(
             before_motion()
         motion_serial += 1
         run_id = f"{candidate_run_id}_inspection_{motion_serial:03d}"
+        completed_frames = []
         try:
             with phase("inspection_motion", root, index, purpose=purpose, run_id=run_id):
                 execute_motion(
@@ -291,6 +327,8 @@ def execute_local_candidate_inspection(
                     candidate_index=100000 + candidate_index * 1000 + motion_serial,
                     target_id=candidate_uid, frame_source_config=source_config,
                     source_registry=source_registry, plan_planning_frame=frame.planning_frame,
+                    completed_frame_sink=completed_frames.append,
+                    retained_backside_axis_path=frame.retained_backside_axis_path,
                 )
         except CandidateStartupRecoveryError as exc:
             decision = evaluate_candidate_route_admission_deferral(
@@ -302,7 +340,14 @@ def execute_local_candidate_inspection(
                 str(exc), reason_code="no_motion_route_uncertainty_rejection",
                 evidence=decision.to_event_fields(),
             ) from exc
-        return frame
+        if not completed_frames and getattr(source_config, "require_current_lidar_support", False):
+            raise RuntimeError("inspection motion did not return its completed target frame")
+        completed = completed_frames[0] if completed_frames else frame
+        if completed.retained_backside_axis_path is None and frame.retained_backside_axis_path is not None:
+            # This original certified receipt is projected by arrival admission
+            # into the completed route's new localization frame.
+            completed = replace(completed, retained_backside_axis_path=frame.retained_backside_axis_path)
+        return completed
 
     def admit(root, fallback_frame, index):
         with phase("arrival_admission", root, index):
@@ -576,6 +621,7 @@ def execute_local_candidate_inspection(
             source_registry=source_registry, effects=effects, candidate_root=candidate_root,
             fresh_frame=fresh_frame, plan_and_move=plan_lidar_move,
             load_uncertainty=load_alignment_uncertainty,
+            require_translation_support=require_translation_support,
         )
 
         def recover_lidar(frame, root, index):

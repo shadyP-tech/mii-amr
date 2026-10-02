@@ -14,7 +14,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.navigation.approach.backside_axis_frame_projection import (
     BacksideAxisFrameProjection, load_backside_axis_planning_observation,
@@ -236,9 +236,14 @@ class OppositeRuntimeRetryTest(unittest.TestCase):
             return kwargs["continue_from_checkpoint"]()
         case.checkpoint.side_effect = checkpoint
         real_epoch = approach._move_certified_opposite_face_epoch
+        # The mocked certified center must follow each admitted projection,
+        # including the frame transported from the completed checkpoint suffix.
+        def current_center(axis):
+            return {"x_m": axis.stand_x_m, "y_m": axis.stand_y_m,
+                    "uncertainty_m": .024,
+                    "policy": "reconciled_metric_head_position_engineering_bound"}
         with patch.object(BacksideAxisFrameProjection, "validated_target_center",
-                          new_callable=PropertyMock,
-                          return_value={"x_m": 1., "y_m": .3, "uncertainty_m": .024}), \
+                          new=property(current_center)), \
              patch.object(approach, "_move_certified_opposite_face_epoch", wraps=real_epoch) as epochs:
             if should_complete:
                 self.assertIs(case.invoke(), case.arrived)
@@ -261,6 +266,12 @@ class OppositeRuntimeRetryTest(unittest.TestCase):
         self.assertEqual(suffix["observation"].axis_observation_path, case.source_axis)
         final_axis = load_backside_axis_planning_observation(case.plans[-1].axis_observation_path)
         self.assertAlmostEqual(final_axis.stand_axis_rad, .14)
+        if should_complete:
+            completed_frame = case.arrival.call_args.kwargs["target_source_frame"]
+            self.assertEqual(completed_frame.retained_backside_axis_path,
+                             case.plans[-1].axis_observation_path)
+            self.assertAlmostEqual(completed_frame.camera_target_geometry.x_m, final_axis.stand_x_m)
+            self.assertAlmostEqual(completed_frame.camera_target_geometry.y_m, final_axis.stand_y_m)
 
     def test_existing_post_motion_epoch_cannot_be_reused(self):
         with self.case() as case:

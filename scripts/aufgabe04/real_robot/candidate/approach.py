@@ -89,7 +89,10 @@ from scripts.aufgabe04.navigation.approach.camera_candidate_selection import (
     NoFeasibleCameraCandidateError,
 )
 from scripts.aufgabe04.navigation.approach.candidate_target_admission import NoEligibleCameraTargetError
-from scripts.aufgabe04.real_robot.candidate.target_admission import evaluate_target, require_target
+from scripts.aufgabe04.real_robot.candidate.target_admission import (
+    RetainedLidarTargetBinding, bind_current_lidar_target, evaluate_target,
+    require_target, retain_camera_target_geometry,
+)
 from scripts.aufgabe04.navigation.approach.exact_two_camera_admission import (
     exact_two_camera_handoff_sha256,
     load_exact_two_camera_handoff,
@@ -273,6 +276,8 @@ class CandidateApproachConfig:
     lidar_scan_frame: str | None = None
     lidar_scan_topic: str | None = None
     measured_stand_model: StandModelProfile | None = None
+    # Require fresh target support for selection/new translations. Passive
+    # camera arrival retains the executed target with fresh localization.
     require_current_lidar_support: bool = False
 
 
@@ -392,6 +397,7 @@ class _CandidateObservationFrame:
     camera_alignment: Mapping[str, object] | None = None
     camera_target_geometry_evidence_path: Path | None = None
     current_lidar_target_path: Path | None = None
+    retained_lidar_target: RetainedLidarTargetBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -1397,8 +1403,7 @@ def _admit_camera_arrival_geometry(
         current_target = load_backside_axis_planning_observation(arrival_axis_path).validated_target_center
         target_geometry = planning_target_geometry(candidate,current_target)
     else:
-        if target_source_frame is not None and not getattr(source_config, "require_current_lidar_support", False):
-            from scripts.aufgabe04.real_robot.candidate.target_admission import retain_camera_target_geometry
+        if target_source_frame is not None:
             uncertainty = None
             if (target_source_frame.camera_target_geometry is None
                     and target_source_frame.camera_alignment is not None):
@@ -1420,26 +1425,13 @@ def _admit_camera_arrival_geometry(
                 alignment_uncertainty=uncertainty,
             )
         target_geometry = target_frame.camera_target_geometry or candidate.geometry
-    current_support = None
-    if getattr(source_config, "require_current_lidar_support", False):
-        from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
-        estimate, current_support = _require_current_lidar_target(
-            config=artifacts.config, effects=effects, planning_frame=planning_frame,
-            candidate_uid=candidate_uid, output_dir=arrival_path.parent / "current_lidar_target",
-            attempt_index=observation_attempt_index,
-        )
-        measured = planning_target_geometry(candidate, estimate)
-        if retained_backside_axis_path is None:
-            target_geometry = measured
-        elif math.hypot(measured.x_m-target_geometry.x_m, measured.y_m-target_geometry.y_m) > (
-                measured.uncertainty_m+target_geometry.uncertainty_m):
-            raise CandidateObservationUnavailableError(
-                candidate_uid=candidate_uid, observation_attempt_index=observation_attempt_index,
-                reason="candidate_target_ineligible",
-                process_evidence={"observer_started": False, "motion_authorized": False},
-                status_evidence={"reason": "current_lidar_disagrees_with_retained_target",
-                                 "current_lidar_support": current_support},
-            )
+    # Passive camera observation uses the target of the executed route. Sparse
+    # arrival scans cannot veto it, and cannot send it back to a stale centroid.
+    # A new translation still acquires its own current-target evidence.
+    if (getattr(source_config, "require_current_lidar_support", False)
+            and retained_backside_axis_path is None
+            and target_frame.camera_target_geometry is None):
+        raise ValueError("camera arrival lacks the executed route's retained target")
     target_admission = evaluate_target(artifacts.config, candidate, target_geometry=target_geometry)
     decision, calibrated_evidence = _camera_arrival_decision(
         robot_pose=planning_frame.current_pose,
@@ -1480,7 +1472,11 @@ def _admit_camera_arrival_geometry(
         **decision.to_evidence_dict(),
         **calibrated_evidence,
         "validated_target_center": current_target,
-        "current_lidar_support": current_support,
+        "current_lidar_support": None,
+        "retained_current_lidar_target_path": (
+            None if target_frame.current_lidar_target_path is None
+            else str(target_frame.current_lidar_target_path)),
+        "current_lidar_reacquisition_required": False,
         "candidate_target_admission": target_admission.to_evidence(),
         "camera_target_geometry_projection_path": (
             None if target_frame.camera_target_geometry_evidence_path is None
@@ -1526,7 +1522,6 @@ def _admit_camera_arrival_geometry(
         target_frame,
         retained_backside_axis_path=arrival_axis_path,
         camera_target_geometry=target_geometry,
-        current_lidar_target_path=(None if current_support is None else Path(current_support["evidence_path"])),
     )
 
 
@@ -1537,6 +1532,36 @@ def _require_current_lidar_target(*, config, effects, planning_frame, candidate_
         config=config, effects=effects, planning_frame=planning_frame,
         candidate_uid=candidate_uid, output_dir=output_dir, attempt_index=attempt_index,
     )
+
+
+def _confirm_current_lidar_target(*, config, effects, planning_frame, candidate,
+                                  target_geometry, output_dir, attempt_index=0):
+    """Confirm a camera-certified motion target without changing its angle/point."""
+    estimate, support = _require_current_lidar_target(
+        config=config, effects=effects, planning_frame=planning_frame,
+        candidate_uid=candidate.candidate_uid, output_dir=output_dir,
+        attempt_index=attempt_index,
+    )
+    _validate_current_lidar_target_agreement(
+        estimate=estimate, support=support, candidate=candidate,
+        target_geometry=target_geometry, attempt_index=attempt_index,
+    )
+    return estimate, support
+
+
+def _validate_current_lidar_target_agreement(*, estimate, support, candidate,
+                                           target_geometry, attempt_index=0):
+    from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+    measured = planning_target_geometry(candidate, estimate)
+    if math.hypot(measured.x_m-target_geometry.x_m, measured.y_m-target_geometry.y_m) > (
+            measured.uncertainty_m+target_geometry.uncertainty_m):
+        raise CandidateObservationUnavailableError(
+            candidate_uid=candidate.candidate_uid, observation_attempt_index=attempt_index,
+            reason="candidate_target_ineligible",
+            process_evidence={"observer_started": False, "motion_authorized": False},
+            status_evidence={"reason": "current_lidar_disagrees_with_retained_target",
+                             "current_lidar_support": support},
+        )
 
 
 def _admit_opposite_face_planning_geometry(
@@ -1658,6 +1683,8 @@ def _execute_candidate_motion(
     source_registry: StandSurveyRegistry | None = None,
     plan_planning_frame: CandidatePlanningFrame | None = None,
     recovery_artifact_suffix: str = "",
+    completed_frame_sink: Callable[[_CandidateObservationFrame], None] | None = None,
+    retained_backside_axis_path: Path | None = None,
 ) -> MotionLegOutcome:
     """Run one candidate routine with bounded startup and runtime recovery."""
 
@@ -1710,6 +1737,7 @@ def _execute_candidate_motion(
 
     startup_planning_frame: CandidatePlanningFrame | None = None
     runtime_planning_frame: CandidatePlanningFrame | None = None
+    planned_frames = {run_id: (config, plan_request, plan_planning_frame)}
 
     def admit_localization(evidence_path: Path) -> Pose2D:
         nonlocal startup_planning_frame
@@ -1791,6 +1819,27 @@ def _execute_candidate_motion(
                     ).opposite_face_normal_rad
                 )
         if inspection_view_path is not None:
+            def confirm_retained_target(estimate, support):
+                if retained_backside_axis_path is None:
+                    return
+                if fresh_planning_frame is None:
+                    raise RuntimeError("retained target reseal requires a fresh planning frame")
+                from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+                retained_candidate = replacement_snapshot.candidate_for(plan_request.candidate_uid)
+                retained_path = source_root / "retained_target_axis_projection.json"
+                write_backside_axis_frame_projection(
+                    retained_path, axis_evidence_path=retained_backside_axis_path,
+                    target_candidate_projection_path=artifacts.evidence_path,
+                    target_candidate_projection_sha256=artifacts.evidence_sha256,
+                    target_candidate_x_m=retained_candidate.geometry.x_m,
+                    target_candidate_y_m=retained_candidate.geometry.y_m,
+                )
+                retained_axis = load_backside_axis_planning_observation(retained_path)
+                _validate_current_lidar_target_agreement(
+                    estimate=estimate, support=support, candidate=retained_candidate,
+                    target_geometry=planning_target_geometry(retained_candidate, retained_axis.validated_target_center),
+                )
+
             old_view = load_candidate_inspection_view(inspection_view_path)
             normal = float(old_view["view_normal_rad"])
             current_estimate = None
@@ -1804,6 +1853,7 @@ def _execute_candidate_motion(
                     attempt_index=0,
                 )
                 current_support_path = Path(support["evidence_path"])
+                confirm_retained_target(current_estimate, support)
                 normal = math.atan2(fresh_start_pose.y_m-current_estimate["y_m"],
                                     fresh_start_pose.x_m-current_estimate["x_m"])
             if fresh_planning_frame is not None and current_estimate is None:
@@ -1848,6 +1898,17 @@ def _execute_candidate_motion(
                 )
                 alignment["localization_source_evidence"] = dict(context.source_evidence)
                 normal = alignment["view_normal_rad"]
+                if getattr(replacement_config, "require_current_lidar_support", False):
+                    aligned_candidate = replacement_snapshot.candidate_for(plan_request.candidate_uid)
+                    alignment_estimate, alignment_support = _confirm_current_lidar_target(
+                        config=replacement_config, effects=effects, planning_frame=fresh_planning_frame,
+                        candidate=aligned_candidate,
+                        target_geometry=replace(aligned_candidate.geometry,
+                            x_m=alignment["center_x_m"], y_m=alignment["center_y_m"],
+                            uncertainty_m=alignment["center_uncertainty_m"]),
+                        output_dir=source_root / "current_lidar_target",
+                    )
+                    confirm_retained_target(alignment_estimate, alignment_support)
             replacement_view_path = source_root / "inspection_view_frame_projection.json"
             write_candidate_inspection_view(
                 replacement_view_path, snapshot=replacement_snapshot,
@@ -1859,6 +1920,16 @@ def _execute_candidate_motion(
                 current_lidar_targets_path=current_support_path,
             )
             inspection_view_path = replacement_view_path
+        if axis_evidence_path is not None and getattr(replacement_config, "require_current_lidar_support", False):
+            from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+            axis_candidate = replacement_snapshot.candidate_for(plan_request.candidate_uid)
+            axis = load_backside_axis_planning_observation(axis_evidence_path)
+            _confirm_current_lidar_target(
+                config=replacement_config, effects=effects, planning_frame=fresh_planning_frame,
+                candidate=axis_candidate,
+                target_geometry=planning_target_geometry(axis_candidate, axis.validated_target_center),
+                output_dir=source_root / "current_lidar_target",
+            )
         return replacement_config, replace(
             plan_request,
             start=fresh_start_pose,
@@ -1882,6 +1953,9 @@ def _execute_candidate_motion(
             fresh_localization_evidence_path=attempt.fresh_localization_evidence_path,
         )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
+        planned_frames[attempt.identity.run_id] = (
+            replacement_config, replacement_plan, startup_planning_frame,
+        )
         return _motion_request(
             config=replacement_config,
             sealed=replacement_sealed,
@@ -1929,6 +2003,9 @@ def _execute_candidate_motion(
             fresh_localization_evidence_path=attempt.fresh_localization_evidence_path,
         )
         replacement_sealed = effects.plan_preapproach(replacement_plan)
+        planned_frames[attempt.identity.run_id] = (
+            replacement_config, replacement_plan, runtime_planning_frame,
+        )
         return _motion_request(
             config=replacement_config,
             sealed=replacement_sealed,
@@ -1952,7 +2029,7 @@ def _execute_candidate_motion(
             )
         return runner(replacement_request, attempt)
 
-    return execute_candidate_motion_with_recovery(
+    outcome = execute_candidate_motion_with_recovery(
         initial_request,
         startup_config=CandidateStartupRecoveryConfig(
             initial_identity=_candidate_routine_identity(initial_request),
@@ -1998,6 +2075,38 @@ def _execute_candidate_motion(
             clock=effects.clock,
         ),
     )
+    if completed_frame_sink is not None:
+        completed_config, completed_plan, completed_planning_frame = planned_frames[outcome.run_id]
+        completed_frame_sink(_observation_frame_for_plan(
+            config=completed_config, plan_request=completed_plan,
+            planning_frame=completed_planning_frame,
+        ))
+    return outcome
+
+
+def _observation_frame_for_plan(*, config, plan_request, planning_frame):
+    """Recover camera target provenance from the route that actually completed."""
+    candidate = config.snapshot.candidate_for(plan_request.candidate_uid)
+    if candidate is None:
+        raise ValueError("completed candidate route lost its snapshot target")
+    frame = _CandidateObservationFrame(
+        config=config, candidate=candidate, planning_frame=planning_frame,
+        decision_binding=None, observation_pose=plan_request.start,
+    )
+    if plan_request.inspection_view_path is not None:
+        view = load_candidate_inspection_view(plan_request.inspection_view_path)
+        if view.get("validated_target_center") is not None:
+            frame = bind_current_lidar_target(
+                frame, evidence_path=Path(view["current_lidar_targets_path"]),
+            )
+        else:
+            frame = replace(frame, camera_alignment=view.get("camera_alignment"))
+    if plan_request.axis_observation_path is not None:
+        from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+        axis = load_backside_axis_planning_observation(plan_request.axis_observation_path)
+        frame = replace(frame, retained_backside_axis_path=plan_request.axis_observation_path,
+                        camera_target_geometry=planning_target_geometry(candidate, axis.validated_target_center))
+    return frame
 
 
 def _move_certified_opposite_face(
@@ -2139,6 +2248,14 @@ def _move_certified_opposite_face_epoch(
     rejected_routes = []
     axis_geometry = load_backside_axis_planning_observation(axis_planning_evidence_path)
     current_center = axis_geometry.validated_target_center
+    if getattr(opposite_config, "require_current_lidar_support", False):
+        from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+        _confirm_current_lidar_target(
+            config=opposite_config, effects=effects, planning_frame=opposite_planning_frame,
+            candidate=candidate, target_geometry=planning_target_geometry(candidate, current_center),
+            output_dir=candidate_root / "opposite_current_lidar_target",
+        )
+    completed_frames = []
     resolution = (read_map_metadata(opposite_config.map_yaml).resolution
                   if Path(opposite_config.map_yaml).is_file() else None)
     offsets = bounded_inspection_standoffs(
@@ -2241,6 +2358,7 @@ def _move_certified_opposite_face_epoch(
                 source_registry=source_registry,
                 plan_planning_frame=opposite_planning_frame,
                 recovery_artifact_suffix=route_attempt.artifact_suffix,
+                completed_frame_sink=completed_frames.append,
             )
             break
         except CandidateRuntimeRecoveryError as exc:
@@ -2368,7 +2486,9 @@ def _move_certified_opposite_face_epoch(
         candidate_root=candidate_root,
         observation_attempt_index=1,
         allow_centering_acquisition=effects.run_centering_turn is not None,
-        retained_backside_axis_path=(axis_planning_evidence_path if opposite_planning_frame is not None else None),
+        retained_backside_axis_path=(completed_frames[0].retained_backside_axis_path
+                                    if opposite_planning_frame is not None else None),
+        target_source_frame=completed_frames[0],
     )
     return opposite_arrival_frame
 
@@ -2901,6 +3021,7 @@ def execute_candidate_approach_phase(
         candidate_run_id = (
             f"{config.session_id}_candidate_{candidate_index:03d}"
         )
+        completed_frames = []
         try:
             outcome = _execute_candidate_motion(
                 config=planning_config,
@@ -2915,6 +3036,7 @@ def execute_candidate_approach_phase(
                 frame_source_config=config,
                 source_registry=source_registry,
                 plan_planning_frame=selection_planning_frame,
+                completed_frame_sink=completed_frames.append,
             )
         except CandidateStartupTargetUnavailableError as exc:
             expected_identity = CandidateRoutineIdentity(
@@ -2992,13 +3114,7 @@ def execute_candidate_approach_phase(
         goal.mark_inspection_started(candidate.candidate_uid)
         goal_store.write(goal)
         try:
-            observation_frame = _CandidateObservationFrame(
-                config=planning_config, candidate=candidate,
-                planning_frame=selection_planning_frame,
-                decision_binding=None, observation_pose=current,
-                camera_alignment=(None if selection.prepared_plan is None
-                                  else selection.prepared_plan.camera_alignment),
-            )
+            observation_frame = completed_frames[0]
             observation, observation_frame = (
                 _capture_candidate_camera_result(
                     observation_frame=observation_frame,

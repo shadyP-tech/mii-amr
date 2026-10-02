@@ -24,6 +24,7 @@ from scripts.aufgabe04.navigation.approach.lidar_head_observability import (
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
 from scripts.aufgabe04.real_robot.candidate.target_admission import require_frame_target
+from scripts.aufgabe04.real_robot.candidate.retained_orientation import retain_orientation_after_arrival
 from scripts.aufgabe04.real_robot.candidate.lidar_inspection_hints import load_camera_lidar_receipts
 from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256
 
@@ -200,7 +201,8 @@ def create_bounded_lidar_recovery(*, observe, move_probe, move_aligned, persist,
 
 def create_lidar_camera_recovery(*, source_config, source_registry, effects,
                                  candidate_root, fresh_frame, plan_and_move,
-                                 load_uncertainty, monotonic=time.monotonic,
+                                 load_uncertainty, require_translation_support=None,
+                                 monotonic=time.monotonic,
                                  budget_sec=MAX_RECOVERY_ELAPSED_SEC):
     """Build a lazy candidate-bound recovery session; construction has no effects."""
     from scripts.aufgabe04.real_robot.candidate.approach import _camera_alignment_uncertainty
@@ -252,7 +254,8 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
                 survey_root=source_config.survey_root, plan=source_config.plan,
                 snapshot=source_config.snapshot, registry=source_registry)
         checkpoint("observation_preflight", observation_index=serial)
-        frame = fresh_frame(root / f"view_{serial:02d}" / "planning")
+        planning_root = root / f"view_{serial:02d}" / "planning"
+        frame = retain_orientation_after_arrival(frame, fresh_frame(planning_root), planning_root)
         route_context = load_uncertainty(frame)
         uncertainty = _camera_alignment_uncertainty(route_context)
         stopped_receipts = ()
@@ -387,7 +390,9 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
             # Reproject it through each fresh frame before camera admission.
             frame = replace(frame, camera_target_geometry=replace(frame.candidate.geometry,
                 x_m=current_fit.center_x_m, y_m=current_fit.center_y_m,
-                uncertainty_m=current_fit.center_uncertainty_m))
+                uncertainty_m=current_fit.center_uncertainty_m),
+                current_lidar_target_path=None, retained_lidar_target=None,
+                camera_target_geometry_evidence_path=None, camera_alignment=None)
         return frame, hint, support_fit, review
 
     def move_sampling(frame, review, serial, checkpoint):
@@ -462,7 +467,13 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
         # Capture provides the actual arrival pose. Routing reacquires its own
         # stopped pose/covariance together rather than reusing an earlier one.
         checkpoint("alignment_preflight", serial=serial)
-        frame = fresh_frame(root / f"alignment_{serial:02d}" / "planning")
+        planning_root = root / f"alignment_{serial:02d}" / "planning"
+        frame = retain_orientation_after_arrival(frame, fresh_frame(planning_root), planning_root)
+        if require_translation_support is not None:
+            checkpoint("alignment_target_support", serial=serial)
+            frame = require_translation_support(frame, planning_root)
+        elif getattr(source_config, "require_current_lidar_support", False):
+            raise RuntimeError("LiDAR alignment translation lacks current target support admission")
         context = load_uncertainty(frame)
         hints, _ = derive_lidar_inspection_hints(
             snapshot=frame.config.snapshot, registry=source_registry,
