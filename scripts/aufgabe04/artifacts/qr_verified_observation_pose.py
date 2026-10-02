@@ -313,6 +313,24 @@ def _validate_opposite_crop(crop, data, image, scan, shape):
         _depth_interval(target_depth)
         if not target_depth[0] <= support['depth_m'] <= target_depth[1]:
             raise ValueError('isolated target depth is outside its uncertainty interval')
+    range_proof = crop.get('decoded_symbol_range_resolution')
+    ray_search = (crop.get('search') or {}).get('policy') == 'current_decoded_qr_ray'
+    if ray_search != (range_proof is not None):
+        raise ValueError('opposite decoded-symbol search requires its range proof')
+    if range_proof is not None:
+        from dataclasses import asdict
+        from scripts.aufgabe04.real_robot.observer.qr_finite_range import validate_qr_range
+        from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import _equal
+        result, finite = validate_qr_range(range_proof)
+        if (not isolated or support.get('target_reconciliation') is not None
+                or result.search_association.scan_stamp_sec != scan
+                or not _equal(range_proof['center_px'], support['center_px'])
+                or not _equal(asdict(result), support['lidar_association'])
+                or not _equal(asdict(result.search_association), data['qr_binding']['association'])
+                or not _equal(range_proof['intrinsics'], support['finite_bearing']['intrinsics'])
+                or not _equal(range_proof['scan_from_camera'], support['finite_bearing']['scan_from_camera'])
+                or abs(finite['optical_depth_m']-support['depth_m']) > 1e-9):
+            raise ValueError('opposite QR range proof differs from current decoded symbol')
     if 'raw_pixel_binding' in crop or 'payload_pixel_source' in crop:
         from scripts.aufgabe04.real_robot.observer.opposite_raw_qr import validate_opposite_raw_qr_binding
         validate_opposite_raw_qr_binding(crop.get('raw_pixel_binding'), crop=crop,

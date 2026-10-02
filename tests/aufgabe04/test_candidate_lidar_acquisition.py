@@ -9,11 +9,9 @@ from unittest.mock import Mock, patch
 
 from scripts.aufgabe04.artifacts.content_store import load_content_hashed_json
 from scripts.aufgabe04.navigation.execution.route_uncertainty_budget import PlanarCovariance
-from scripts.aufgabe04.navigation.planning.map_io import load_occupancy_grid_with_bundle
 from scripts.aufgabe04.perception.stand_axis.model_profile import load_measured_physical_stand_model
 from scripts.aufgabe04.real_robot.candidate.approach import _CandidateObservationFrame
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
-from scripts.aufgabe04.real_robot.candidate.observation_deferral import CandidateObservationUnavailableError
 from scripts.aufgabe04.real_robot.candidate.lidar_acquisition import (
     create_lidar_camera_recovery, create_bounded_lidar_recovery,
 )
@@ -23,8 +21,6 @@ from scripts.aufgabe04.real_robot.candidate.lidar_acquisition_capture import (
 from scripts.aufgabe04.real_robot.readiness.tour_scan_capture import TourScanCaptureError
 from tests.aufgabe04.test_lidar_alignment_arrival import calibration
 from tests.aufgabe04.test_lidar_inspection_hint import hint_fixture, line_receipts
-from tests.aufgabe04 import test_candidate_preapproach_planning as planning_fixtures
-from tests.aufgabe04.test_detected_station_exploration import write_free_map
 
 
 def frame_fixture():
@@ -578,43 +574,52 @@ class CandidateLidarAcquisitionAdapterTest(unittest.TestCase):
             self.run_adapter()
         self.move.assert_not_called()
 
-    def test_direct_sampling_turn_rechecks_target_before_any_motion_dispatch(self):
-        map_yaml = write_free_map(self.root)
-        _, bundle = load_occupancy_grid_with_bundle(map_yaml, semantic_map_id="arena", planning_frame="map")
-        candidate = replace(self.frame.candidate,
-                            geometry=replace(self.frame.candidate.geometry, x_m=3.))
-        snapshot = replace(self.frame.config.snapshot, map_bundle_sha256=bundle.bundle_sha256,
-                           candidates=(candidate,))
-        config = SimpleNamespace(snapshot=snapshot, map_yaml=map_yaml, semantic_map_id="arena",
-            plan=planning_fixtures.CandidatePreapproachPlanningTest._plan(bundle.bundle_sha256))
-        frame = replace(self.frame, config=config, candidate=candidate)
-        self.effects.run_lidar_sampling_turn = Mock(side_effect=AssertionError("invalid target must not turn"))
-        checkpoint = Mock()
+    def test_fragmented_scans_use_viewing_route_without_sampling_yaw(self):
+        from tests.aufgabe04.test_lidar_scan_support_recovery import source_view
 
-        # Call the adapter's production sampling callback directly: even if an
-        # upstream observation/controller gate were bypassed, dispatch is guarded.
-        def bind_sampling(**callbacks):
-            return lambda current: callbacks["move_sampling"](current, {}, 1, checkpoint)
+        template, _, _ = source_view(self.root / "fragmented_source")
+        self.effects.run_lidar_sampling_turn = Mock(side_effect=AssertionError(
+            "camera recovery must not rotate away to improve scan sampling"))
 
-        with patch("scripts.aufgabe04.real_robot.candidate.lidar_acquisition.create_bounded_lidar_recovery",
-                   side_effect=bind_sampling):
-            recovery = self.make_adapter()
-            with self.assertRaises(CandidateObservationUnavailableError) as raised:
-                recovery(frame)
-        self.assertEqual(raised.exception.reason, "candidate_target_ineligible")
-        self.assertEqual(raised.exception.status_evidence["reasons"], ["target_static_map_incompatible"])
-        self.assertFalse(raised.exception.process_evidence["observer_started"])
+        def capture(request):
+            captured = self.capture(request)
+            start = request.observation_not_before_sec
+            receipts = tuple(replace(receipt,
+                receipt_id=f"fragmented_{len(self.capture_requests)}_{index}",
+                viewpoint_id=request.viewpoint_id,
+                scan_stamp_sec=start+.025*(index+1),
+                pose_stamp_sec=start+.025*(index+1),
+                observer_clock_sec=start+.025*(index+1)+.01)
+                for index, receipt in enumerate(template.receipts))
+            mount = captured.mount_evidence[0]
+            return replace(captured, receipts=receipts,
+                latest_base_pose_odom=template.latest_base_pose_odom,
+                pose_stamp_sec=receipts[-1].scan_stamp_sec,
+                mount_evidence=tuple({**mount, "stamp_sec": receipt.scan_stamp_sec,
+                    "exact_transform_stamp_sec": receipt.scan_stamp_sec}
+                    for receipt in receipts))
+
+        def move(frame, *args, **kwargs):
+            kwargs["before_motion"]()
+            return frame
+
+        self.effects.capture_lidar_view = capture
+        self.move.side_effect = move
+        _, report, hint = self.run_adapter(survey=())
+
+        stopped = [event for event in report["history"] if event["event"] == "stopped_observation"]
+        self.assertTrue(stopped)
+        self.assertTrue(all(event["boundary_fragmentation_detected"] for event in stopped))
+        self.assertIsNone(hint)
+        self.assertEqual(report["sampling_moves_attempted"], 0)
+        self.assertTrue(report["motion_completed"])
+        self.assertEqual(report["probe_moves_attempted"], 1)
+        self.assertEqual(len(self.capture_requests), 6)  # Three cohorts before and after the route.
         self.effects.run_lidar_sampling_turn.assert_not_called()
-        self.move.assert_not_called()
-        self.fresh.assert_not_called()
-        self.assertEqual(self.capture_requests, [])
-        checkpoint.assert_called_once_with("sampling_turn_preflight", sampling_index=1)
-        evidence = load_content_hashed_json(
-            self.root / "lidar_head_acquisition/sampling_01_target_admission.json",
-            hash_field="candidate_target_admission_sha256")
-        self.assertFalse(evidence["accepted"])
-        self.assertFalse(evidence["motion_authorized"])
-        self.assertFalse(evidence["keepouts_changed"])
+        self.move.assert_called_once()
+        self.assertEqual(self.move.call_args.kwargs["purpose"], "lidar_axis_hint")
+        self.assertEqual([event["kind"] for event in report["history"]
+                          if event["event"] == "motion_dispatch"], ["support_view"])
 
 
 if __name__ == "__main__":

@@ -55,11 +55,14 @@ def execute_candidate_inspection(
     frame = initial_frame
     last_error: CandidateObservationUnavailableError | None = None
     revision = 0
+    identity_pending = False
+    identity_retry_used = False
 
     def persist() -> None:
         nonlocal revision
         payload = {**state.to_dict(), **({} if effects.route_search_evidence is None
-                                        else dict(effects.route_search_evidence()))}
+                                        else dict(effects.route_search_evidence())),
+                   "identity_pending_passive_retry_used": identity_retry_used}
         receipt = candidate_root / "inspection_history" / f"revision_{revision:03d}.json"
         digest = write_content_hashed_json(receipt, payload,
                                           hash_field="candidate_inspection_progress_sha256")
@@ -74,10 +77,13 @@ def execute_candidate_inspection(
         index = len(state.history)
         observation = None
         progress: dict[str, object] = {}
+        validated_progress = False
         normal = effects.canonical_normal(frame)
         try:
             output = candidate_root / f"camera_lidar_attempt_{index:02d}"
-            if effects.capture_centered is None:
+            # An identity-only retry keeps the stopped camera view. The
+            # centering wrapper may turn, so it cannot own this passive retry.
+            if effects.capture_centered is None or identity_pending:
                 observation = effects.capture(frame, output, index)
             else:
                 observation, frame = effects.capture_centered(frame, output, index)
@@ -104,6 +110,7 @@ def execute_candidate_inspection(
                             "axis_observation_path": str(observation.axis_observation_path)}
             elif observation.inspection_observation_path is not None:
                 progress = effects.progress_evidence(frame, observation)
+                validated_progress = True
             else:
                 raise RuntimeError("observer returned no recommendation, certified axis, or inspection progress")
             if state.termination_reason is None:
@@ -146,14 +153,28 @@ def execute_candidate_inspection(
             "joint_observation_ready", "qr_verified_observation_pose_ready",
         }:
             return observation, frame
+        if (validated_progress
+                and "measured_head_front_identity_unresolved" in progress.get("reasons", ())):
+            # This validated receipt proves that camera head geometry exists.
+            # A provisional QR latch does not identify this current face.
+            # Missing identity alone is not a reason to acquire another axis
+            # or move to a different view. A later generic miss must not erase
+            # this distinction and regain movement authority.
+            identity_pending = True
         if len(state.history) >= max_views:
-            state.termination_reason = "view_budget_exhausted"
+            state.termination_reason = (
+                "head_visible_identity_pending_exhausted" if identity_pending
+                else "view_budget_exhausted"
+            )
             break
         if observation is not None and observation.axis_observation_path is not None:
             try:
                 frame = effects.move_opposite(
                     frame, observation, candidate_root / f"inspection_opposite_{index + 1:02d}", index + 1,
                 )
+                # A certified axis grants an independent next-view decision;
+                # the previous pose's pending identity no longer owns it.
+                identity_pending = False
                 continue
             except CandidateInspectionRouteUnavailableError as exc:
                 state.route_failures.append({
@@ -161,6 +182,13 @@ def execute_candidate_inspection(
                     "reason_code": exc.reason_code, "evidence": exc.evidence,
                 })
                 persist()
+        if identity_pending:
+            if identity_retry_used:
+                state.termination_reason = "head_visible_identity_pending_exhausted"
+                break
+            identity_retry_used = True
+            persist()
+            continue
         if normal is None:
             raise RuntimeError("candidate inspection search lacks a finite observation pose")
         classification = str(progress.get("classification", "unobservable"))
@@ -284,5 +312,6 @@ def execute_candidate_inspection(
                           "inspection_exhaustion_reason": state.termination_reason,
                           "last_observer_failure": None if last_error is None else str(last_error)},
         status_evidence={**state.to_dict(), **({} if effects.route_search_evidence is None
-                                              else dict(effects.route_search_evidence()))},
+                                              else dict(effects.route_search_evidence())),
+                         "identity_pending_passive_retry_used": identity_retry_used},
     )

@@ -55,6 +55,28 @@ count and twice that count. For the five-stand site this is five to ten
 hypotheses. Too few or too many still produces a durable failure; the selector
 never silently chooses a best-five subset.
 
+The observation sequence is approach → head inspection and QR attempt → retain
+the head frame → opposite-side QR identity when the first side has no identity.
+A complete, associated head supplies the first QR crop directly from its
+accepted camera/LiDAR association. It does not need a second, wider cone to
+contain only one cluster. An empty decoder result can support the presumed
+backside branch; a decoder that never ran cannot classify a backside.
+
+On the opposite side, the retained head frame supplies the angle. Acquisition
+does not fit a second angle. A current exclusive head crop can bind decoded
+text directly. Otherwise, a search crop may invoke the decoder, but admission
+requires genuine symbol corners with current target support and neighbor
+exclusion. Search pixels alone never establish candidate identity.
+
+Usable geometry, retained orientation, or a QR observation takes priority over
+optional centering advice. Any executed turn requires a fresh stopped capture.
+A verified, bounded centering tolerance miss allows one capture with further
+centering disabled for that view; unsafe or unverified motion still fails.
+For an initial observation approach only, visibility-related missing LiDAR
+support can retain the bounded survey target. The full candidate pool remains
+in route keepouts. Precision and opposite-side motion retain their stronger
+current-target requirements.
+
 `candidate/qr_goal_progress.py` records each bounded inspection episode and
 finishes at five distinct, candidate-bound QR identities. The preferred outcome
 has validated head geometry and a facing pose. If geometry fails, a fresh QR

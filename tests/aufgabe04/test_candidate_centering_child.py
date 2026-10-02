@@ -156,6 +156,77 @@ def test_child_exception_records_failure_and_consumes_attempt(turn_request,monke
     assert list(turn_request.master_authorization_path.parent.glob('candidate_centering_claims/*.json'))
 
 
+def bounded_miss_result(permit, **changes):
+    """Replay the recorded 0.5885-degree request / 0.308-degree residual."""
+    error = math.radians(.308)
+    signed = permit['signed_turn_rad'] - error
+    anchor = permit['advisory']['anchor_odom_pose']
+    return {**motion_result(permit), 'status': 'stopped', 'stop_reason': 'centering turn timeout',
+        'actual_angular_travel_rad': abs(signed), 'signed_angular_travel_rad': signed,
+        'total_angular_travel_rad': permit['previous_angular_travel_rad'] + abs(signed),
+        'final_yaw_error_rad': error,
+        'final_odom_pose': {**anchor, 'yaw_rad': anchor['yaw_rad'] + signed},
+        'preflight_current_target': {'associated': True}, **changes}
+
+
+@pytest.mark.parametrize('reason', ['centering turn timeout', 'centering stopped outside yaw tolerance'])
+def test_recorded_tiny_bounded_stop_gets_one_fresh_capture_without_more_turns(
+        turn_request, monkeypatch, reason):
+    request = replace(turn_request, signed_turn_rad=math.radians(.5885))
+    outcome = child.run_candidate_centering_child(request, run_process=runner(monkeypatch,
+        lambda permit: bounded_miss_result(permit, stop_reason=reason)))
+    assert outcome.disposition is child.CandidateCenteringDisposition.STOPPED_CAPTURE_ONLY
+    assert outcome.returncode == 1 and outcome.result['status'] == 'stopped'
+    assert math.degrees(outcome.result['final_yaw_error_rad']) == pytest.approx(.308)
+    initial = SimpleNamespace(recommendation_path=None, centering_advisory_path='advice')
+    fresh = SimpleNamespace(recommendation_path=None, inspection_observation_path='fresh')
+    capture = Mock(side_effect=[initial, fresh])
+    turn = Mock(return_value=('new-stopped-frame', outcome))
+    observation, frame = capture_with_centering(candidate_uid=request.candidate_id,
+        frame='before', output_dir=request.output_dir.parent/'view', view_index=0,
+        timeout_sec=90., capture=capture, turn=turn, monotonic=lambda:10.)
+    assert observation is fresh and frame == 'new-stopped-frame'
+    assert capture.call_count == 2 and turn.call_count == 1
+    assert capture.call_args_list[1].args[3] is False
+    assert capture.call_args_list[1].args[-1] == outcome.result['stopped_at_sec']
+    progress = json.loads((request.output_dir.parent/'view/centering_progress.json').read_text())
+    assert progress['centering_disabled_after_bounded_stop'] is True
+    assert progress['actual_angular_travel_rad'] == outcome.result['actual_angular_travel_rad']
+    # A stopped miss cannot serve as authority for a second correction.
+    with pytest.raises(ValueError, match='did not complete'):
+        child.run_candidate_centering_child(replace(request, turn_index=1,
+            previous_result_path=outcome.result_path, output_dir=request.output_dir.parent/'extra',
+            remaining_travel_rad=request.remaining_travel_rad-outcome.result['actual_angular_travel_rad']),
+            run_process=Mock())
+
+
+@pytest.mark.parametrize('changes', [
+    {'stop_reason': 'obstacle'}, {'stop_reason': 'centering angular travel budget exhausted'},
+    {'stop_reason': 'centering live sensor frame or timestamp mismatch'},
+    {'stationary_odom': {'accepted': False}}, {'stationary_odom': None},
+    {'zero_command_count': 0}, {'maximum_translation_m': .0101},
+    {'actual_angular_travel_rad': math.radians(13)}, {'stopped_at_sec': 1.},
+    {'motion_published': False}, {'final_odom_pose': None}, {'preflight_current_target': None},
+    {'final_yaw_error_rad': .02},
+])
+def test_timeout_string_cannot_bypass_stopped_frame_motion_or_authority_checks(
+        turn_request, monkeypatch, changes):
+    request = replace(turn_request, signed_turn_rad=math.radians(.5885))
+    with pytest.raises(RuntimeError):
+        child.run_candidate_centering_child(request, run_process=runner(monkeypatch,
+            lambda permit: bounded_miss_result(permit, **changes)))
+
+
+def test_bounded_stop_requires_its_controller_trace(turn_request, monkeypatch):
+    request = replace(turn_request, signed_turn_rad=math.radians(.5885))
+    def motion(permit):
+        result = bounded_miss_result(permit)
+        Path(permit['controller_trace_path']).unlink()
+        return result
+    with pytest.raises(RuntimeError, match='trace evidence'):
+        child.run_candidate_centering_child(request, run_process=runner(monkeypatch, motion))
+
+
 def test_successful_turn_persists_revisions_and_requires_new_sensor_epoch(tmp_path):
     initial=SimpleNamespace(recommendation_path=None,centering_advisory_path=tmp_path/'advice.json')
     complete=SimpleNamespace(recommendation_path=tmp_path/'recommendation.json')
@@ -174,8 +245,8 @@ def test_successful_turn_persists_revisions_and_requires_new_sensor_epoch(tmp_pa
         capture_with_centering(**args)
 
 
-@pytest.mark.parametrize('completion_field',['recommendation_path','qr_observation_pose_path'])
-def test_completion_and_advice_require_turn_and_a_new_observation(tmp_path,completion_field):
+@pytest.mark.parametrize('completion_field',['recommendation_path','qr_observation_pose_path','axis_observation_path'])
+def test_ready_completion_precedes_optional_turn(tmp_path,completion_field):
     initial=SimpleNamespace(recommendation_path=None,qr_observation_pose_path=None,
                             centering_advisory_path='advice')
     fresh=SimpleNamespace(recommendation_path=None,qr_observation_pose_path=None)
@@ -188,12 +259,13 @@ def test_completion_and_advice_require_turn_and_a_new_observation(tmp_path,compl
     result,frame=capture_with_centering(candidate_uid='candidate',frame='before',
         output_dir=tmp_path,view_index=0,timeout_sec=90.,capture=capture,turn=turn,
         monotonic=lambda:10.)
-    assert result is fresh and frame=='after'
-    assert turn.call_count==1
-    assert capture.call_args_list[1].args[-1]==12.
+    assert result is initial and frame=='before'
+    turn.assert_not_called()
+    assert capture.call_count == 1
     progress=json.loads((tmp_path/'centering_progress.json').read_text())
     assert progress['phase']=='observation_returned'
-    assert progress['camera_centering_status_path'].endswith('recenter_01/capture/observer_status.json')
+    assert progress['camera_centering_status_path'].endswith('observer_status.json')
+    assert progress['turn_history'] == []
 
 
 def test_failed_turn_records_progress_without_reobservation(tmp_path):

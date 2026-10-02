@@ -96,7 +96,7 @@ def test_recorded_qr_yields_bounded_right_turn_without_head_or_angle():
         validate_camera_centering_advisory(metadata, min_scan_stamp_sec=current.scan_stamp_sec)
 
 
-def test_recorded_centering_precedes_qr_only_completion(tmp_path, monkeypatch):
+def test_recorded_qr_only_completion_precedes_optional_centering(tmp_path, monkeypatch):
     current, payload, geometry = recorded_current()
     fixture = processing.CameraObserverProcessingTest()
     adapter = fixture.make_adapter()
@@ -133,18 +133,16 @@ def test_recorded_centering_precedes_qr_only_completion(tmp_path, monkeypatch):
     assert not update.axis_sample_accepted
     assert update.snapshot.current_axis_sample_count == 0
     assert adapter._candidate_centering_ready is not None
-    # The QR would otherwise be immediately eligible for discovery. Centering
-    # deliberately suppresses that pre-turn receipt while preserving identity.
+    # The stopped candidate-bound QR is usable without executing optional advice.
     assert QrObservationPoseFallback().observe(current, update=update,
         observed_at_sec=payload['checked_at_sec'], now_monotonic_sec=1.) is not None
-    assert adapter._qr_observation_pose_ready is None
+    assert adapter._qr_observation_pose_ready is not None
     PassiveRealViewpointNode._write_status(adapter, 'metric_model_measurement_unavailable')
-    committed = json.loads(adapter.args.candidate_centering_json.read_text())
-    assert validate_camera_centering_advisory(committed).arrival_recovery
-    assert not adapter.args.qr_observation_pose_json.exists()
+    assert not adapter.args.candidate_centering_json.exists()
+    assert adapter.args.qr_observation_pose_json.exists()
     assert not adapter.args.recommended_pose_json.exists()
     status = json.loads(adapter.args.status_json.read_text())
-    assert status['state'] == 'candidate_centering_committed'
+    assert status['state'] == 'qr_observation_pose_committed'
     assert status['camera_centering']['reason'] == 'fresh_reconciled_qr_off_center'
 
 

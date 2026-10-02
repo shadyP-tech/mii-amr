@@ -126,10 +126,10 @@ def plan_and_select_camera_candidate(
             "unresolved candidates are absent from snapshot: " + ", ".join(unknown)
         )
     if current_target_estimates is not None and (
-            set(current_target_estimates) != set(unresolved_uids)
+            not set(current_target_estimates).issubset(unresolved_uids)
             or any(value.get("policy") != "current_stopped_lidar_surface"
                    for value in current_target_estimates.values())):
-        raise ValueError("current LiDAR estimates must cover exactly the current selection population")
+        raise ValueError("current LiDAR estimates must be a subset of the current selection population")
     if support_class_by_uid is not None:
         missing_support = sorted(unresolved_uids.difference(support_class_by_uid))
         if missing_support:
@@ -156,6 +156,8 @@ def plan_and_select_camera_candidate(
         decision = evaluate_candidate_target_admission(candidate, context.costmaps.base_costmap,
             target_geometry=planning_target_geometry(candidate, estimate))
         hint = (lidar_inspection_hints or {}).get(candidate.candidate_uid)
+        if current_target_estimates is not None and estimate is None:
+            hint = None  # Explicit survey observation cannot inherit a precise old fit.
         if (not decision.accepted and UNRESOLVED_MORPHOLOGY_CONFLICT not in decision.reasons
                 and hint is not None):
             # Only a fully validated fitted target may replace the raw point.
@@ -215,6 +217,8 @@ def plan_and_select_camera_candidate(
                 planning_context=context,
             )
             hint = (lidar_inspection_hints or {}).get(candidate.candidate_uid)
+            if current_target_estimates is not None and candidate.candidate_uid not in current_target_estimates:
+                hint = None
             prepared = None
             estimate = (current_target_estimates or {}).get(candidate.candidate_uid)
             if estimate is not None:

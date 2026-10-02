@@ -23,7 +23,6 @@ from scripts.aufgabe04.navigation.approach.lidar_head_observability import (
 )
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
 from scripts.aufgabe04.real_robot.candidate.inspection_route_search import CandidateInspectionRouteUnavailableError
-from scripts.aufgabe04.real_robot.candidate.target_admission import require_frame_target
 from scripts.aufgabe04.real_robot.candidate.retained_orientation import retain_orientation_after_arrival
 from scripts.aufgabe04.real_robot.candidate.lidar_inspection_hints import load_camera_lidar_receipts
 from scripts.aufgabe04.stations.candidate_snapshot import candidate_snapshot_sha256
@@ -392,26 +391,9 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
                 x_m=current_fit.center_x_m, y_m=current_fit.center_y_m,
                 uncertainty_m=current_fit.center_uncertainty_m),
                 current_lidar_target_path=None, retained_lidar_target=None,
+                retained_survey_target=None,
                 camera_target_geometry_evidence_path=None, camera_alignment=None)
         return frame, hint, support_fit, review
-
-    def move_sampling(frame, review, serial, checkpoint):
-        from scripts.aufgabe04.real_robot.candidate.lidar_sampling import MAX_TOTAL_TRAVEL_RAD
-        checkpoint("sampling_turn_preflight", sampling_index=serial)
-        require_frame_target(frame, evidence_path=root / f"sampling_{serial:02d}_target_admission.json",
-                             attempt_index=serial)
-        outcome = effects.run_lidar_sampling_turn(
-            candidate=frame.candidate, source_view_path=last_capture.evidence_path,
-            snapshot_path=frame.config.snapshot_path, output_dir=root / f"sampling_{serial:02d}",
-            before_motion=lambda: checkpoint("motion_dispatch", kind="scan_boundary_sampling", serial=serial))
-        result = outcome.result
-        if (result.get("purpose") != "candidate_lidar_sampling" or result.get("status") != "completed"
-                or result.get("translation_commanded") is not False
-                or result.get("total_angular_travel_rad", math.inf) > MAX_TOTAL_TRAVEL_RAD
-                or result.get("stopped_at_sec", 0) <= last_capture.pose_stamp_sec):
-            raise RuntimeError("LiDAR sampling turn lacks bounded fresh stopped evidence")
-        # The next observation reacquires the actual pose and a new stopped epoch.
-        return frame
 
     def move_probe(frame, normal, serial, checkpoint):
         pose = frame.planning_frame.current_pose
@@ -515,8 +497,10 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
             offset=prepared.approach_offset_m, prepared_plan=prepared, selection_evidence=selected.to_evidence(),
             before_motion=lambda: checkpoint("motion_dispatch", kind="normal_alignment", serial=serial))
 
+    # Scan-boundary yaw optimizes LiDAR sampling, not the next camera view.
+    # Camera recovery uses the existing admitted viewing routes instead.
     controller = create_bounded_lidar_recovery(observe=observe, move_probe=move_probe,
-        move_aligned=move_aligned, move_sampling=(move_sampling if getattr(effects, "run_lidar_sampling_turn", None) is not None else None),
+        move_aligned=move_aligned,
         persist=persist, monotonic=monotonic, budget_sec=budget_sec)
 
     def recover(frame):

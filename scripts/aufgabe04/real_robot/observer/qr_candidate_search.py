@@ -18,6 +18,30 @@ from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoi
 from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import envelope_is_unique, envelope_from_proof
 
 
+def retained_opposite_qr_search(*, orientation, camera_from_map, intrinsics,
+        model_profile, image_stamp_sec, now_sec, max_scan_age_sec):
+    """Project the retained target for decoding, without granting association.
+
+    A failed current scan/head proof must not prevent looking at the target.
+    This bounded search crop cannot bind either a payload or an image ray.
+    """
+    if not 0 <= now_sec-image_stamp_sec <= max_scan_age_sec:
+        return None
+    center = orientation.get('validated_target_center') or orientation['stand_center']
+    point = transform_point((center['x_m'], center['y_m'],
+        model_profile.head_center_height_m), camera_from_map)
+    if point[2] <= 0:
+        return None
+    projection = project_optical_point(point, intrinsics,
+        physical_size_m=max(model_profile.head_width_m, model_profile.head_height_m))
+    roi = roi_from_projection(projection, intrinsics, padding_scale=2.4)
+    if roi is None:
+        return None
+    return HeadRoiAttempt(roi, 'retained_opposite_qr_search_only', 2.4,
+        projection.u_px, projection.v_px,
+        intrinsics.fy_px*model_profile.head_height_m/point[2])
+
+
 def qr_registration_envelope(scan, *, map_bearing_rad, cone_half_angle_rad,
         max_camera_map_bearing_delta_rad, accepted_range_m, now_sec, max_scan_age_sec,
         fragmentation=None, resolve_lidar_association=None):

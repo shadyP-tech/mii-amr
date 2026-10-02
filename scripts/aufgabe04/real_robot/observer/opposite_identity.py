@@ -4,9 +4,13 @@ from types import SimpleNamespace
 
 from scripts.aufgabe04.artifacts.retained_backside_orientation import opposite_view_matches
 from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_observations_bgr
-from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import exclusive_identity_crop, bind_crop_text, masked_identity_pixels
+from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import (
+    exclusive_identity_crop, bind_crop_text, masked_identity_pixels, decoded_symbol_identity_crop,
+)
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import prepare_qr_observation_pose
-from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
+from scripts.aufgabe04.real_robot.observer.qr_candidate_search import (
+    current_scan_qr_search, retained_opposite_qr_search,
+)
 from scripts.aufgabe04.real_robot.observer.opposite_head_support import (
     detect_opposite_head_support, detect_opposite_head_region, support_opposite_head_region,
 )
@@ -86,6 +90,7 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
         max_camera_map_bearing_delta_rad=math.radians(adapter.args.backside_registration_max_bearing_delta_deg),
         accepted_range_m=accepted_range_m, now_sec=now, max_scan_age_sec=adapter.args.max_sensor_age_sec)
     search = current_scan_qr_search(**options)
+    search_attempt = search[0]
     if require_target_reconciliation and target_reconciliation is None:
         search = (None, {**search[1], 'accepted': False,
             'reason': 'retained_target_reconciliation_pending'})
@@ -133,6 +138,37 @@ def process_opposite_identity(adapter, *, context, frame, intrinsics, robot_pose
                 max_elapsed_sec=remaining, diagnostics=metadata.setdefault('decoder', {}),
                 **{**getattr(adapter, '_qr_decoder_options', {}), 'identity_only': True},
                 preferred_scale=4)
+    else:
+        # Observation is allowed before current head/target proof is complete.
+        # A payload from this search remains provisional until its own actual
+        # symbol pixels pass the ordinary current ray and neighbor checks.
+        now = adapter.node.get_clock().now().nanoseconds / 1e9
+        if search_attempt is None:
+            search_attempt = retained_opposite_qr_search(orientation=orientation,
+                camera_from_map=camera_from_map, intrinsics=intrinsics,
+                model_profile=adapter.stand_model_profile,
+                image_stamp_sec=image_stamp_sec, now_sec=now,
+                max_scan_age_sec=adapter.args.max_sensor_age_sec)
+        provisional = metadata['provisional_qr_search'] = dict(
+            attempted=False, accepted=False, supplies_angle=False,
+            reason='search_unavailable', motion_authorized=False)
+        remaining = min(.12, adapter.args.max_sensor_age_sec-max(0., now-image_stamp_sec)-.05)
+        if search_attempt is not None and remaining > 0:
+            roi = search_attempt.roi
+            provisional.update(attempted=True, search=search_attempt.metadata())
+            observations = detect_qr_observations_bgr(
+                frame[roi.y0:roi.y1, roi.x0:roi.x1], adapter.cv2,
+                max_elapsed_sec=remaining, diagnostics=metadata.setdefault('decoder', {}),
+                **{**getattr(adapter, '_qr_decoder_options', {}), 'identity_only': False},
+                preferred_scale=4)
+            options['now_sec'] = adapter.node.get_clock().now().nanoseconds / 1e9
+            decoded_attempt, decoded_crop, decoded_support = decoded_symbol_identity_crop(
+                observations, search_attempt=search_attempt, image_shape=frame.shape[:2],
+                candidate_uid=adapter.args.stand_id, snapshot=context.snapshot,
+                scan_from_camera=scan_from_camera, diagnostics=provisional, **options)
+            if decoded_attempt is not None:
+                attempt, crop, support = decoded_attempt, decoded_crop, decoded_support
+                metadata['identity_crop'] = crop
     binding = bind_crop_text(observations, crop)
     texts = tuple(sorted({o.text for o in observations}))
     now = adapter.node.get_clock().now().nanoseconds / 1e9

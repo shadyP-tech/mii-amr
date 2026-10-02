@@ -4,7 +4,7 @@ The current border only bounds identity pixels and supplies a camera ray for
 independent scan registration. It never fits or replaces the retained angle.
 No QR detector, payload, marker geometry, or predicted border is used here.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 import time
 
@@ -127,6 +127,77 @@ def head_region_from_corners(corners, *, image_shape, image_stamp_sec, attempt,
     except (TypeError, ValueError):
         return None
     return region
+
+
+def support_from_current_head(association, corners_px, *, image_shape, image_stamp_sec,
+        intrinsics, scan_from_camera, scan, now_sec, max_scan_age_sec, sync_tolerance_sec):
+    """Reuse an admitted head's narrow scan association for its identity pixels.
+
+    The association already chose the current target. Recheck its source tuple,
+    rather than requiring unrelated returns in a wider search cone to be unique.
+    No head detector, angle fit or new target selection runs here.
+    """
+    from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
+    from scripts.aufgabe04.real_robot.observer.finite_target_bearing import finite_target_bearing
+    from scripts.aufgabe04.real_robot.observer.opposite_target_support import validate_target_support
+    from scripts.aufgabe04.real_robot.observer.scan_target_persistence import registered_target_is_unique
+    from scripts.aufgabe04.perception.candidate_lidar_association import associate_camera_registered_candidate_lidar_target
+    from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND, _equal
+
+    if (not isinstance(association, CurrentHeadCandidateAssociation) or not association.accepted
+            or not registered_target_is_unique(association.lidar_association)):
+        raise ValueError('current complete associated head required')
+    lidar = association.lidar_association
+    cluster = lidar.search_association
+    if (scan.scan_frame_id != scan_from_camera.parent_frame
+            or cluster.scan_frame_id != scan.scan_frame_id or cluster.scan_stamp_sec != scan.scan_stamp_sec
+            or tuple(image_shape) != (intrinsics.height_px, intrinsics.width_px)
+            or not 0 < sync_tolerance_sec <= .1
+            or abs(image_stamp_sec-scan.scan_stamp_sec) > sync_tolerance_sec
+            or any(not 0 <= now_sec-stamp <= max_scan_age_sec for stamp in (image_stamp_sec, scan.scan_stamp_sec))):
+        raise ValueError('current head identity source tuple mismatch or stale')
+    if lidar.witnessed_fragmentation is None:
+        replay = associate_camera_registered_candidate_lidar_target(scan,
+            map_bearing_rad=lidar.map_bearing_rad, observed_camera_bearing_rad=lidar.registered_search_bearing_rad,
+            cone_half_angle_rad=cluster.cone_half_angle_rad, accepted_range_m=cluster.accepted_range_m,
+            now_sec=now_sec, max_scan_age_sec=max_scan_age_sec,
+            min_cluster_sample_count=cluster.min_cluster_sample_count,
+            max_range_jump_m=cluster.max_range_jump_m, max_point_gap_m=cluster.max_point_gap_m,
+            max_camera_map_bearing_delta_rad=lidar.max_camera_map_bearing_delta_rad)
+        if replace(replay, search_association=replace(replay.search_association,
+                scan_age_sec=cluster.scan_age_sec)) != lidar:
+            raise ValueError('current head association differs from current scan')
+    else:
+        proof = lidar.witnessed_fragmentation
+        if proof['kind'] == SUBSET_KIND:
+            proof = proof['envelope']
+        raw = asdict(scan)
+        raw['ranges'] = [v if math.isfinite(v) else None for v in scan.ranges]
+        if not _equal(raw, proof['current']['scan']):
+            raise ValueError('current head witness differs from current scan')
+    corners = tuple((p.u_px, p.v_px) for p in validate_current_head_proposal(
+        tuple(ImagePoint(*p) for p in corners_px), frame_shape=image_shape))
+    center = tuple(sum(p[k] for p in corners)/4 for k in (0, 1))
+    if center != association.full_image_center_px or not association.scale_gate['accepted']:
+        raise ValueError('current head identity pixels differ from admitted head')
+    distance = lidar.distance_m
+    if association.target_reconciliation is not None:
+        from scripts.aufgabe04.real_robot.observer.target_reconciliation import validate_reconciliation
+        from scripts.aufgabe04.real_robot.observer.candidate_position_epoch import check_current_scan
+        proof_scan, envelope, _, _ = validate_reconciliation(association.target_reconciliation,
+            image_stamp_sec=image_stamp_sec, scan_stamp_sec=scan.scan_stamp_sec)
+        check_current_scan(proof_scan, scan)
+        distance = envelope.distance_m
+    bearing, uncertainty, depth = finite_target_bearing(center_px=center,
+        intrinsics=intrinsics, scan_from_camera=scan_from_camera,
+        distance_m=distance, range_interval_m=cluster.accepted_range_m)
+    if abs(math.remainder(bearing-lidar.map_bearing_rad, math.tau))+uncertainty > lidar.max_camera_map_bearing_delta_rad:
+        raise ValueError('current head finite bearing exceeds registration limit')
+    support = OppositeHeadSupport(corners, center, lidar, image_stamp_sec, tuple(image_shape),
+        association.scale_gate['expected_size_px'], depth, association.target_reconciliation,
+        dict(intrinsics=asdict(intrinsics), scan_from_camera=asdict(scan_from_camera)))
+    validate_target_support(support.metadata())
+    return support
 
 
 def _miss(diagnostics, reason, **fields):

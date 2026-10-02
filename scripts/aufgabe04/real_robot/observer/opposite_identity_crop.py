@@ -5,7 +5,7 @@ projected head vicinity. Overlap requires a current associated foreground head
 and separated depth bounds; the decoder samples only pixels inside that head.
 Historical QR-supported receipts remain readable.
 """
-from dataclasses import replace
+from dataclasses import asdict, replace
 import math
 
 from scripts.aufgabe04.perception.stand_axis_handoff.geometry import transform_point
@@ -173,3 +173,88 @@ def bind_crop_text(observations, crop_evidence):
         return QrTargetBinding(False, 'exclusive_target_crop_required', symbol_count=1)
     return QrTargetBinding(True, 'decoded_qr_exclusive_opposite_crop', (text,), 1,
         association=crop_evidence['search']['envelope'], current_head_binding=crop_evidence)
+
+
+def decoded_symbol_identity_crop(observations, *, search_attempt, image_shape,
+        candidate_uid, snapshot, scan_from_camera, diagnostics, **options):
+    """Bind a provisional decode by its own symbol pixels and current scan.
+
+    The decoding ROI is only a proposal. In particular, a cornerless payload
+    or a backend's whole-input rectangle cannot become a target identity.
+    Use the existing isolated-symbol crop receipt after genuine ray support.
+    """
+    from scripts.aufgabe04.qr_scanning.qr_observation import validated_qr_corners
+    from scripts.aufgabe04.real_robot.observer.opposite_target_support import (
+        _outline_from_corners, support_opposite_qr_outline,
+        OppositeTargetSupport, validate_target_support,
+    )
+    observations = tuple(observations or ())
+
+    def miss(reason):
+        diagnostics.update(accepted=False, reason=reason)
+        return None, None, None
+
+    if len(observations) != 1:
+        return miss('multiple_qr_symbols' if observations else 'no_decoded_qr_identity')
+    roi = search_attempt.roi
+    corners = validated_qr_corners(observations[0].corners,
+        image_shape=(roi.y1-roi.y0, roi.x1-roi.x0))
+    if corners is None:
+        return miss('decoded_symbol_corners_required')
+    full = tuple((x+roi.x0, y+roi.y0) for x, y in corners)
+    outline = _outline_from_corners(full, image_shape=image_shape,
+        image_stamp_sec=options['image_stamp_sec'], attempt=search_attempt,
+        model_profile=options['model_profile'])
+    if outline is None:
+        return miss('decoded_symbol_outside_target_scale_or_region')
+    support_diagnostics = diagnostics['target_support'] = {}
+    range_proof = None
+    if options.get('target_reconciliation') is not None or options.get('fragmentation') is not None:
+        search = current_scan_qr_search(**options)
+        if search[0] is None:
+            return miss(search[1]['reason'])
+        support_options = {key: value for key, value in options.items()
+            if key not in ('scan_from_map', 'camera_from_map', 'sync_tolerance_sec')}
+        support = support_opposite_qr_outline(outline, attempt=search_attempt,
+            image_shape=image_shape, scan_from_camera=scan_from_camera,
+            diagnostics=support_diagnostics, **support_options)
+    else:
+        # The decoded symbol now owns a calibrated ray. Do not rerun broad
+        # search uniqueness: compare all possible depths along that ray, then
+        # retain the genuine narrow association and its existing replay proof.
+        from scripts.aufgabe04.real_robot.observer.qr_finite_range import resolve_qr_range
+        try:
+            scan, stamp, now = options['scan'], options['image_stamp_sec'], options['now_sec']
+            if (scan.scan_frame_id != options['scan_from_map'].parent_frame
+                    or scan_from_camera.parent_frame != scan.scan_frame_id
+                    or scan_from_camera.child_frame != options['camera_from_map'].parent_frame
+                    or options['scan_from_map'].child_frame != options['camera_from_map'].child_frame
+                    or not 0 <= now-stamp <= options['max_scan_age_sec']
+                    or abs(stamp-scan.scan_stamp_sec) > options['sync_tolerance_sec']):
+                return miss('decoded_symbol_source_context_mismatch')
+            lidar, finite, range_proof = resolve_qr_range(scan=scan,
+                center_px=outline.full_image_center_px, intrinsics=options['intrinsics'],
+                scan_from_camera=scan_from_camera, map_bearing_rad=options['map_bearing_rad'],
+                cone_half_angle_rad=options['cone_half_angle_rad'],
+                accepted_range_m=options['accepted_range_m'], now_sec=now,
+                max_scan_age_sec=options['max_scan_age_sec'], min_cluster_sample_count=1,
+                max_camera_map_bearing_delta_rad=options['max_camera_map_bearing_delta_rad'])
+            support = OppositeTargetSupport(outline.corners_px, outline.full_image_center_px,
+                lidar, stamp, outline.image_shape, outline.expected_symbol_height_px,
+                finite['optical_depth_m'], finite_bearing=dict(
+                    intrinsics=asdict(options['intrinsics']), scan_from_camera=asdict(scan_from_camera)))
+            validate_target_support(support.metadata())
+            search = (search_attempt, dict(policy='current_decoded_qr_ray', accepted=True,
+                supplies_identity=False, supplies_head_geometry=False, motion_authorized=False,
+                envelope=asdict(lidar.search_association)))
+            support_diagnostics.update(reason='current_decoded_symbol_ray_associated')
+        except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            return miss(str(exc))
+    if support is None:
+        return miss(support_diagnostics.get('reason', 'decoded_symbol_scan_support_unavailable'))
+    attempt, crop = exclusive_identity_crop(candidate_uid=candidate_uid,
+        snapshot=snapshot, support=support, search_result=search, **options)
+    diagnostics.update(accepted=attempt is not None, reason=crop['reason'])
+    if attempt is not None and range_proof is not None:
+        crop['decoded_symbol_range_resolution'] = range_proof
+    return attempt, crop, support

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+from enum import Enum
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +17,7 @@ from scripts.aufgabe04.artifacts.content_store import payload_sha256, write_cont
 from scripts.aufgabe04.navigation.execution.candidate_centering_permit import (
     MAX_ADVISORY_AGE_SEC, RESULT_HASH, load_candidate_centering_permit,
     load_candidate_centering_result, write_candidate_centering_permit, finite_number,
+    advisory_source_stamps,
 )
 from scripts.aufgabe04.navigation.execution.mission_leg_motion_permit import (
     load_mission_leg_motion_authorization, mission_leg_motion_authorization_sha256,
@@ -41,6 +44,11 @@ class CandidateCenteringChildRequest:
     purpose: str = "candidate_centering"
 
 
+class CandidateCenteringDisposition(Enum):
+    COMPLETED = "completed"
+    STOPPED_CAPTURE_ONLY = "stopped_capture_only"
+
+
 @dataclass(frozen=True)
 class CandidateCenteringChildOutcome:
     result: dict
@@ -48,6 +56,38 @@ class CandidateCenteringChildOutcome:
     permit_path: Path
     controller_trace_path: Path
     returncode: int
+    disposition: CandidateCenteringDisposition = CandidateCenteringDisposition.COMPLETED
+
+
+def _centering_disposition(result, permit, returncode):
+    """Classify a bound receipt; a bounded miss grants observation only."""
+    if returncode == 0 and result.get("status") == "completed":
+        return CandidateCenteringDisposition.COMPLETED
+    if (returncode != 1 or permit["purpose"] != "candidate_centering"
+            or result.get("status") != "stopped"
+            or result.get("stop_reason") not in {
+                "centering turn timeout", "centering stopped outside yaw tolerance"}):
+        raise ValueError("candidate centering stopped: " + str(result.get("stop_reason")))
+    actual = finite_number(result.get("actual_angular_travel_rad"), "angular travel")
+    signed = finite_number(result.get("signed_angular_travel_rad"), "signed travel")
+    error = finite_number(result.get("final_yaw_error_rad"), "final yaw error")
+    pose = result.get("final_odom_pose")
+    if not isinstance(pose, dict) or set(pose) != {"x_m", "y_m", "yaw_rad"}:
+        raise ValueError("centering bounded miss lacks a final odometry pose")
+    for key, value in pose.items():
+        finite_number(value, "final odometry " + key)
+    stationary = result.get("stationary_odom")
+    if (not isinstance(stationary, dict) or stationary.get("accepted") is not True
+            or type(result.get("zero_command_count")) is not int
+            or result["zero_command_count"] < 10
+            or result["maximum_translation_m"] > .01
+            or actual > permit["remaining_travel_rad"] + 1e-12
+            or abs(signed) > actual + 1e-12
+            or abs(math.remainder(permit["signed_turn_rad"] - signed - error, math.tau)) > 1e-9
+            or result["stopped_at_sec"] <= max(advisory_source_stamps(permit["advisory"]))
+            or result.get("preflight_current_target") is None):
+        raise ValueError("centering bounded miss lacks confirmed stopped motion bounds")
+    return CandidateCenteringDisposition.STOPPED_CAPTURE_ONLY
 
 
 def validate_candidate_centering_dependencies():
@@ -120,13 +160,13 @@ def run_candidate_centering_child(request, *, run_process=None):
         completed = run_process(command, check=False)
         result = load_candidate_centering_result(result_path, permit_path=permit_path)
         returncode = int(completed.returncode)
-        if returncode != 0 or result.get("status") != "completed":
-            raise RuntimeError("candidate centering stopped: " + str(result.get("stop_reason")))
         if result.get("motion_published") is not True or not trace_path.is_file() or trace_path.stat().st_size == 0:
             raise RuntimeError("candidate centering lacks motion/trace evidence")
+        disposition = _centering_disposition(result, payload, returncode)
     except (OSError, ValueError, RuntimeError) as exc:
         raise RuntimeError(f"candidate centering child failed; artifacts: {root}: {exc}") from exc
-    return CandidateCenteringChildOutcome(result, result_path, permit_path, trace_path, returncode)
+    return CandidateCenteringChildOutcome(result, result_path, permit_path, trace_path, returncode,
+                                         disposition)
 
 
 def _claim_turn(permit):

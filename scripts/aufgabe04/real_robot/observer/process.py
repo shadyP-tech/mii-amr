@@ -140,17 +140,17 @@ def _detect_artifact(
     candidate_centering_path: Path | None = None,
 ) -> _DetectedArtifact | None:
     # A facing recommendation is richer than a discovery-only viewing pose.
-    # A current bounded centering correction precedes QR-only completion.
+    # Usable stopped observations precede optional centering corrections.
     # Positive QR still outranks axis/diverse-view artifacts, so it cannot
     # accidentally request a backside inspection.
     if recommendation_path.exists():
         return _DetectedArtifact("recommendation", recommendation_path)
-    if candidate_centering_path is not None and candidate_centering_path.exists():
-        return _DetectedArtifact("candidate_centering", candidate_centering_path)
     if qr_observation_pose_path is not None and qr_observation_pose_path.exists():
         return _DetectedArtifact("qr_verified_observation_pose", qr_observation_pose_path)
     if axis_observation_path.exists():
         return _DetectedArtifact("axis_observation", axis_observation_path)
+    if candidate_centering_path is not None and candidate_centering_path.exists():
+        return _DetectedArtifact("candidate_centering", candidate_centering_path)
     if inspection_observation_path is not None and inspection_observation_path.exists():
         return _DetectedArtifact("inspection_observation", inspection_observation_path)
     return None

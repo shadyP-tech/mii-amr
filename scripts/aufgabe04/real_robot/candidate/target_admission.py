@@ -20,7 +20,7 @@ from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
 )
 from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import (
     HASH_FIELD as LIDAR_TARGET_HASH_FIELD, POLICY as LIDAR_TARGET_POLICY,
-    load_current_lidar_target,
+    load_current_lidar_target, load_current_lidar_assessment, permits_survey_observation,
 )
 from scripts.aufgabe04.stations.candidate_snapshot import (
     CandidateSnapshot, candidate_geometry_sha256, candidate_snapshot_sha256,
@@ -38,6 +38,32 @@ class RetainedLidarTargetBinding:
     source_snapshot: CandidateSnapshot
     source_snapshot_sha256: str
     source_planning_frame: CandidatePlanningFrame
+
+
+SURVEY_OBSERVATION_POLICY = "retained_survey_observation_only"
+
+
+@dataclass(frozen=True)
+class RetainedSurveyTargetBinding:
+    """A bounded survey point, never a fitted head or precise motion target."""
+
+    candidate_uid: str
+    evidence_path: Path
+    evidence_sha256: str
+    source_snapshot: CandidateSnapshot
+    source_snapshot_sha256: str
+    source_planning_frame: CandidatePlanningFrame
+
+
+def load_survey_observation_support(path, *, candidate_uid, snapshot):
+    """Require replayable missing-visibility evidence for this survey target."""
+    _, evidence = load_current_lidar_assessment(path, snapshot=snapshot)
+    decision = evidence["candidate_decisions"].get(candidate_uid, {})
+    if (snapshot.candidate_for(candidate_uid) is None
+            or decision.get("candidate_uid") != candidate_uid
+            or not permits_survey_observation(decision)):
+        raise ValueError("survey observation requires missing current visibility")
+    return evidence
 
 
 def _project_geometry(geometry, before, after):
@@ -110,7 +136,8 @@ def bind_current_lidar_target(frame, *, evidence_path: Path):
     existing = getattr(frame, "camera_target_geometry", None)
     if existing is not None and existing != target:
         raise ValueError("current LiDAR target differs from selected camera target")
-    return replace(frame, camera_target_geometry=target, camera_alignment=None,
+    changes = {"retained_survey_target": None} if hasattr(frame, "retained_survey_target") else {}
+    return replace(frame, **changes, camera_target_geometry=target, camera_alignment=None,
                    current_lidar_target_path=Path(evidence_path), retained_lidar_target=binding)
 
 
@@ -124,6 +151,44 @@ def _require_retained_lidar_geometry(frame):
     return original_geometry
 
 
+def _load_retained_survey_geometry(binding):
+    if not isinstance(binding, RetainedSurveyTargetBinding):
+        raise ValueError("invalid retained survey target binding")
+    proof = load_survey_observation_support(binding.evidence_path,
+        candidate_uid=binding.candidate_uid, snapshot=binding.source_snapshot)
+    if (payload_sha256(proof) != binding.evidence_sha256
+            or candidate_snapshot_sha256(binding.source_snapshot) != binding.source_snapshot_sha256
+            or proof["planning_frame"] != binding.source_planning_frame.to_evidence()):
+        raise ValueError("retained survey target original source binding changed")
+    return binding.source_snapshot.candidate_for(binding.candidate_uid).geometry
+
+
+def bind_survey_observation_target(frame, *, evidence_path: Path):
+    """Retain the actual survey target of a completed observation-only route."""
+    if frame.planning_frame is None:
+        raise ValueError("survey observation requires an admitted planning frame")
+    proof = load_survey_observation_support(evidence_path,
+        candidate_uid=frame.candidate.candidate_uid, snapshot=frame.config.snapshot)
+    binding = RetainedSurveyTargetBinding(frame.candidate.candidate_uid, Path(evidence_path),
+        payload_sha256(proof), frame.config.snapshot,
+        candidate_snapshot_sha256(frame.config.snapshot), frame.planning_frame)
+    geometry = _load_retained_survey_geometry(binding)
+    target = _lidar_geometry_in_frame(binding, geometry, frame)
+    return replace(frame, camera_target_geometry=target, camera_alignment=None,
+        current_lidar_target_path=None, retained_lidar_target=None, retained_survey_target=binding)
+
+
+def _require_retained_survey_geometry(frame):
+    binding = frame.retained_survey_target
+    original = _load_retained_survey_geometry(binding)
+    expected = _lidar_geometry_in_frame(binding, original, frame)
+    if (frame.camera_target_geometry != expected
+            or frame.current_lidar_target_path is not None
+            or frame.retained_lidar_target is not None):
+        raise ValueError("retained survey target geometry/provenance changed")
+    return original
+
+
 def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
                                   alignment_uncertainty=None):
     """Carry a bound fitted point through odom into one newly admitted frame.
@@ -134,8 +199,9 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
     """
     geometry = getattr(source, "camera_target_geometry", None)
     lidar_binding = getattr(source, "retained_lidar_target", None)
+    survey_binding = getattr(source, "retained_survey_target", None)
     alignment = getattr(source, "camera_alignment", None)
-    if geometry is None and alignment is None and lidar_binding is None:
+    if geometry is None and alignment is None and lidar_binding is None and survey_binding is None:
         return arrival
     if getattr(arrival, "camera_target_geometry", None) is not None:
         return arrival
@@ -155,7 +221,12 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
     if (before.map_frame != source.config.snapshot.planning_frame
             or after.map_frame != arrival.config.snapshot.planning_frame):
         raise ValueError("retained camera target planning frame mismatch")
-    if lidar_binding is not None:
+    if survey_binding is not None:
+        original_geometry = _require_retained_survey_geometry(source)
+        target = _lidar_geometry_in_frame(survey_binding, original_geometry, arrival)
+        projected_alignment = None
+        kind = SURVEY_OBSERVATION_POLICY
+    elif lidar_binding is not None:
         original_geometry = _require_retained_lidar_geometry(source)
         target = _lidar_geometry_in_frame(lidar_binding, original_geometry, arrival)
         projected_alignment = None
@@ -223,10 +294,21 @@ def retain_camera_target_geometry(source, arrival, *, evidence_path: Path,
             "source_candidate_snapshot_sha256": lidar_binding.source_snapshot_sha256,
             "source_planning_frame": lidar_binding.source_planning_frame.to_evidence(),
         }
+    if survey_binding is not None:
+        provenance["retained_survey_target"] = {
+            "evidence_path": str(survey_binding.evidence_path),
+            "evidence_sha256": survey_binding.evidence_sha256,
+            "source_candidate_snapshot_sha256": survey_binding.source_snapshot_sha256,
+            "source_planning_frame": survey_binding.source_planning_frame.to_evidence(),
+            "purpose": "observation_only", "precise_motion_authorized": False,
+        }
     write_content_hashed_json(evidence_path, provenance,
         hash_field="camera_target_geometry_projection_sha256")
     changes = {} if lidar_binding is None else dict(retained_lidar_target=lidar_binding,
         current_lidar_target_path=lidar_binding.evidence_path)
+    if survey_binding is not None:
+        changes.update(retained_survey_target=survey_binding,
+                       retained_lidar_target=None, current_lidar_target_path=None)
     return replace(arrival, **changes, camera_target_geometry=target,
                    camera_alignment=projected_alignment,
                    camera_target_geometry_evidence_path=evidence_path)
@@ -274,6 +356,8 @@ def require_frame_target(frame, *, evidence_path: Path, attempt_index: int):
     geometry = getattr(frame, "camera_target_geometry", None)
     if getattr(frame, "retained_lidar_target", None) is not None:
         _require_retained_lidar_geometry(frame)
+    if getattr(frame, "retained_survey_target", None) is not None:
+        _require_retained_survey_geometry(frame)
     retained = getattr(frame, "retained_backside_axis_path", None)
     if retained is not None:
         observation = load_backside_axis_planning_observation(retained)

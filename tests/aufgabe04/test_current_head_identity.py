@@ -6,6 +6,7 @@ results are controlled here; this exercises association, not decoder accuracy.
 from copy import deepcopy
 from dataclasses import asdict, replace
 import json
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,6 +22,8 @@ from scripts.aufgabe04.real_robot.observer.current_head_identity import (
     acquire_current_head_identity, validate_current_head_identity_binding, validate_identity_startup,
 )
 from scripts.aufgabe04.real_robot.observer.node import PassiveRealViewpointNode
+from scripts.aufgabe04.real_robot.observer.current_head_association import CurrentHeadCandidateAssociation
+from scripts.aufgabe04.perception.stand_axis.head_model_admission import HeadModelAdmission
 from scripts.aufgabe04.real_robot.observer.opposite_head_support import detect_opposite_head_region, support_opposite_head_region
 from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
 from scripts.aufgabe04.real_robot.observer.qr_observation_pose import prepare_qr_observation_pose, commit_qr_observation_pose
@@ -98,8 +101,15 @@ def make_ordinary(tmp_path, monkeypatch):
 
     decoder.side_effect = decoded
     monkeypatch.setattr('scripts.aufgabe04.qr_scanning.opencv_qr_detector.detect_qr_observations_bgr', decoder)
+    # Geometry quality is the upstream contract under test elsewhere. Keep the
+    # recorded border/association and its actual scale/center for ID conversion.
+    association = CurrentHeadCandidateAssociation(True, 'current_head_unique_lidar_cluster',
+        'recorded_head', HeadModelAdmission(True, 'geometry_fixture'), support.full_image_center_px, 1.5,
+        scale_gate=dict(accepted=True, expected_size_px=support.expected_head_height_px),
+        full_image_center_px=support.full_image_center_px, lidar_association=support.lidar_association,
+        target_reconciliation=case['reconciliation'])
     kwargs = dict(frame=frame, estimate=SimpleNamespace(corners=tuple(ImagePoint(*p) for p in region.corners_px)),
-        association=SimpleNamespace(accepted=True, lidar_association=support.lidar_association),
+        association=association,
         crop_review=SimpleNamespace(accepted=True), selected_roi=ImageRoi(0, 0, 800, 600, 100.),
         intrinsics=case['intrinsics'], scan=case['scan'], scan_from_camera=case['scan_from_camera'],
         scan_from_map=case['scan_from_map'], camera_from_map=case['camera_from_map'],
@@ -202,6 +212,126 @@ def test_decoder_systemic_error_does_not_claim_attempted_empty_identity(ordinary
     details = ordinary.kwargs['metadata']['current_head_identity']
     assert not binding.accepted and details['accepted_crop']
     assert details['attempted'] is False and details['decoded_texts'] == []
+
+
+@pytest.fixture
+def narrow_head(ordinary):
+    """Synthetic topology matching the run failure; all association gates run.
+
+    A complete admitted head has one cluster in its 3-degree cone and a separate
+    return near 10 degrees makes the old 15-degree search ambiguous. Decoder
+    payloads are controlled; this does not claim these are recorded QR pixels.
+    """
+    import numpy as np
+    from tests.aufgabe04.test_current_head_association import CurrentHeadAssociationTests
+    from scripts.aufgabe04.real_robot.observer.current_head_association import associate_current_measured_head
+    from scripts.aufgabe04.perception.stand_axis_handoff import RigidTransform
+    from scripts.aufgabe04.stations.candidate_snapshot import write_candidate_snapshot
+    options = CurrentHeadAssociationTests().options()
+    options['scan'] = replace(options['scan'], ranges=(.55,)*9+(math.inf,)*7+(.55,)*2)
+    height = ordinary.case['model'].head_center_height_m
+    options['scan_from_camera'] = replace(options['scan_from_camera'], translation_xyz_m=(0., 0., height))
+    association = associate_current_measured_head(**options)
+    assert association.accepted
+    target = ordinary.case['snapshot'].candidate_for(ordinary.adapter.args.stand_id)
+    target = replace(target, geometry=replace(target.geometry, x_m=.55, y_m=0.))
+    snapshot = replace(ordinary.case['snapshot'], candidates=(target,))
+    ordinary.adapter.args.candidate_crop_snapshot = ordinary.adapter.args.candidate_crop_snapshot.with_name('narrow_snapshot.json')
+    write_candidate_snapshot(ordinary.adapter.args.candidate_crop_snapshot, snapshot)
+    ordinary.kwargs.update(frame=np.full((600, 800, 3), 170, dtype=np.uint8),
+        estimate=options['estimate'], association=association, selected_roi=options['attempt'].roi,
+        intrinsics=options['intrinsics'], scan=options['scan'], scan_from_camera=options['scan_from_camera'],
+        scan_from_map=RigidTransform('base_scan', 'map', (0., 0., 0.), (0., 0., 0., 1.)),
+        camera_from_map=RigidTransform('camera', 'map', (0., height, 0.), (.5, -.5, .5, .5)),
+        map_bearing_rad=options['map_bearing_rad'], accepted_range_m=options['accepted_range_m'],
+        image_stamp_sec=10., target_reconciliation=None, metadata={})
+    ordinary.clock.clock_sec = 10.1
+    ordinary.adapter.args.stand_x, ordinary.adapter.args.stand_y = .55, 0.
+    ordinary.association_options = options
+    ordinary.snapshot = snapshot
+    return ordinary
+
+
+@pytest.mark.parametrize('texts', (('Start',), ()))
+def test_admitted_narrow_head_decodes_despite_competing_broad_search(narrow_head, texts, monkeypatch):
+    o = narrow_head.kwargs
+    search = current_scan_qr_search(scan=o['scan'], scan_from_map=o['scan_from_map'],
+        camera_from_map=o['camera_from_map'], intrinsics=o['intrinsics'],
+        model_profile=narrow_head.adapter.stand_model_profile, image_stamp_sec=10.,
+        sync_tolerance_sec=.1, map_bearing_rad=o['map_bearing_rad'],
+        cone_half_angle_rad=math.radians(3), max_camera_map_bearing_delta_rad=math.radians(12),
+        accepted_range_m=o['accepted_range_m'], now_sec=10.1, max_scan_age_sec=.5)
+    assert search[1]['reason'] == 'qr_search_cluster_not_unique'
+    assert search[1]['envelope']['eligible_cluster_count'] == 2
+    monkeypatch.setattr('scripts.aufgabe04.real_robot.observer.qr_candidate_search.current_scan_qr_search',
+        Mock(side_effect=AssertionError('an admitted head must not restart broad search')))
+    def decode(*args, **kwargs):
+        kwargs['diagnostics']['events'] = [{'stage': 'opencv_multi'}]
+        return tuple(DecodedQrObservation(text, None, 'test', 1.) for text in texts)
+    narrow_head.decoder.side_effect = decode
+    observations, binding = acquire(narrow_head)
+    details = o['metadata']['current_head_identity']
+    assert details['attempted'] and details['accepted_crop'], details
+    assert details['decoded_texts'] == list(texts)
+    assert binding.accepted is bool(texts)
+    assert tuple(observation.text for observation in observations) == texts
+    envelope = details['search']['envelope']
+    assert envelope['eligible_cluster_count'] == 1
+    assert envelope['cone_half_angle_rad'] == math.radians(3)
+    assert envelope['selected_cluster_source_indices'] == tuple(range(9))
+    if texts:
+        publish(narrow_head, observations, binding)
+        validate_qr_verified_observation_pose(json.loads(narrow_head.adapter.args.qr_observation_pose_json.read_text()))
+    else:
+        assert binding.reason == 'no_decoded_qr_identity'
+
+
+def test_intruding_scan_competitor_cannot_reuse_head_association(narrow_head):
+    # The same timestamp is insufficient: replay must detect changed beams in
+    # the actual narrow cone, even when handed the previously accepted object.
+    scan = narrow_head.kwargs['scan']
+    ranges = list(scan.ranges)
+    ranges[4] = math.inf
+    narrow_head.kwargs['scan'] = replace(scan, ranges=tuple(ranges))
+    _, binding = acquire(narrow_head)
+    assert not binding.accepted
+    narrow_head.decoder.assert_not_called()
+    assert 'differs from current scan' in narrow_head.kwargs['metadata']['current_head_identity']['detail']
+
+
+@pytest.mark.parametrize('changed', ('stale', 'scan_stamp', 'scan_frame', 'camera_frame', 'image_shape', 'head_center'))
+def test_current_head_identity_rejects_changed_source_tuple(narrow_head, changed):
+    o = narrow_head.kwargs
+    if changed == 'stale':
+        narrow_head.clock.clock_sec = 10.6
+    elif changed == 'scan_stamp':
+        o['scan'] = replace(o['scan'], scan_stamp_sec=10.01)
+    elif changed == 'scan_frame':
+        o['scan'] = replace(o['scan'], scan_frame_id='other_scan')
+    elif changed == 'camera_frame':
+        o['scan_from_camera'] = replace(o['scan_from_camera'], child_frame='other_camera')
+    elif changed == 'image_shape':
+        o['frame'] = o['frame'][:-1]
+    else:
+        o['estimate'] = replace(o['estimate'], corners=tuple(ImagePoint(p.u_px+1, p.v_px) for p in o['estimate'].corners))
+    _, binding = acquire(narrow_head)
+    assert not binding.accepted
+    narrow_head.decoder.assert_not_called()
+
+
+def test_overlapping_neighbor_still_blocks_admitted_head_decode(narrow_head):
+    from scripts.aufgabe04.stations.candidate_snapshot import write_candidate_snapshot
+    target = narrow_head.snapshot.candidates[0]
+    neighbor = replace(target, candidate_uid='overlapping_neighbor',
+        geometry=replace(target.geometry, y_m=.03),
+        source=replace(target.source, perception_advisories=(),
+            observation_ids=tuple('neighbor_'+value for value in target.source.observation_ids)))
+    narrow_head.adapter.args.candidate_crop_snapshot = narrow_head.adapter.args.candidate_crop_snapshot.with_name('neighbor_snapshot.json')
+    write_candidate_snapshot(narrow_head.adapter.args.candidate_crop_snapshot,
+        replace(narrow_head.snapshot, candidates=tuple(sorted((target, neighbor), key=lambda item: item.candidate_uid))))
+    _, binding = acquire(narrow_head)
+    assert binding.reason == 'target_crop_overlap_unresolved'
+    narrow_head.decoder.assert_not_called()
 
 
 @pytest.mark.parametrize('missing', ('association', 'crop', 'snapshot'))

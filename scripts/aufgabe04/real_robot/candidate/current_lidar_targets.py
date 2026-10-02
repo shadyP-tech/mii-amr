@@ -309,13 +309,28 @@ def capture_current_lidar_targets(config, effects, planning_frame, candidate_uid
     return estimates, {**evidence, "evidence_path": str(path), "evidence_sha256": digest}
 
 
-def load_current_lidar_target(path, *, candidate_uid, snapshot):
-    """Replay source-bound support before using a local target estimate."""
+def permits_survey_observation(decision):
+    """Missing visibility may retain a survey hypothesis for observation only.
+
+    Plain unsupported returns, competing targets, non-stand clusters and any
+    geometry/model rejection are deliberately not absence of visibility.
+    """
+    scans = decision.get("scans", ())
+    return (decision.get("accepted") is False
+            and decision.get("reasons") == ["insufficient_current_lidar_support"]
+            and len(scans) == SCAN_COUNT
+            and all(scan.get("reason") in {
+                "supported", "occluded", "insufficient_visible_returns"} for scan in scans)
+            and any(scan.get("reason") in {
+                "occluded", "insufficient_visible_returns"} for scan in scans))
+
+
+def load_current_lidar_assessment(path, *, snapshot):
+    """Replay the original complete assessment, including rejected targets."""
     evidence = load_content_hashed_json(_regular(path), hash_field=HASH_FIELD)
     if (evidence.get("policy") != POLICY or evidence.get("schema_version") != 1
             or evidence.get("candidate_snapshot_sha256") != candidate_snapshot_sha256(snapshot)
-            or evidence.get("map_bundle_sha256") != snapshot.map_bundle_sha256
-            or candidate_uid not in evidence.get("eligible_candidate_uids", ())):
+            or evidence.get("map_bundle_sha256") != snapshot.map_bundle_sha256):
         raise ValueError("current LiDAR target snapshot/candidate binding mismatch")
     view, receipts = _load_sources(evidence["candidate_lidar_view_path"], evidence["candidate_lidar_view_sha256"],
                                    evidence["capture_path"], evidence["capture_sha256"])
@@ -330,6 +345,14 @@ def load_current_lidar_target(path, *, candidate_uid, snapshot):
         receipts=receipts, candidate_uids=evidence["candidate_uids"], stand_model=StandModelProfile(**evidence["stand_model"]),
         now_sec=evidence["assessed_at_unix_sec"], not_before_sec=evidence["observation_not_before_sec"],
         mount_evidence=view["mount_evidence"], base_frame=evidence["base_frame"])
-    if any(evidence.get(key) != value for key, value in replay.items()) or candidate_uid not in estimates:
+    if any(evidence.get(key) != value for key, value in replay.items()):
         raise ValueError("current LiDAR support assessment failed source replay")
+    return estimates, evidence
+
+
+def load_current_lidar_target(path, *, candidate_uid, snapshot):
+    """Replay source-bound support before using a local target estimate."""
+    estimates, evidence = load_current_lidar_assessment(path, snapshot=snapshot)
+    if candidate_uid not in estimates:
+        raise ValueError("current LiDAR target snapshot/candidate binding mismatch")
     return dict(estimates[candidate_uid])

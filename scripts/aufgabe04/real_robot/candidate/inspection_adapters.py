@@ -147,7 +147,8 @@ def execute_local_candidate_inspection(
                 )
             frame = bind_current_lidar_target(
                 replace(frame, camera_target_geometry=None, camera_alignment=None,
-                        retained_lidar_target=None, current_lidar_target_path=None,
+                        retained_lidar_target=None, retained_survey_target=None,
+                        current_lidar_target_path=None,
                         camera_target_geometry_evidence_path=None),
                 evidence_path=Path(support["evidence_path"]),
             )

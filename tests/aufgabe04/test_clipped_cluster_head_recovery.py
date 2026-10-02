@@ -188,7 +188,7 @@ def test_recorded_clipped_cluster_recovers_backside_and_scan_safe_left_turn(tmp_
         axis_yaw_rad=math.radians(evaluation.estimate.yaw_deg),
         axis_source=evaluation.estimate.source, qr_texts=(), qr_symbol_count=0)
     assert update.frame_accepted
-    assert update.reason == "current_target_requires_centering_before_inspection"
+    assert update.reason == "current_head_window_input_unavailable"
     assert not update.axis_sample_accepted
     assert update.snapshot.current_axis_sample_count == 0
     assert update.axis_consensus is None

@@ -257,7 +257,7 @@ def test_identity_overlap_does_not_block_target_recovery(recorded,outline_availa
     with patch(module+'detect_opposite_head_support',return_value=support if outline_available else None), \
          patch(module+'exclusive_identity_crop',return_value=(None,dict(accepted=False,reason='target_crop_overlap_unresolved'))), \
          patch(module+'pose2d_from_transform',return_value=Pose2D(0.,0.,0.)), \
-         patch(module+'detect_qr_observations_bgr') as decoder:
+         patch(module+'detect_qr_observations_bgr', return_value=()) as decoder:
         process_opposite_identity(adapter,context=SimpleNamespace(orientation=orientation,snapshot=snapshot),
             frame=image,intrinsics=options['intrinsics'],robot_pose=Pose2D(*row['robot_pose']),
             camera_signature=(1,2,3,4),image_stamp_sec=row['image_stamp_sec'],scan=options['scan'],
@@ -265,7 +265,7 @@ def test_identity_overlap_does_not_block_target_recovery(recorded,outline_availa
             map_bearing_rad=options['map_bearing_rad'],accepted_range_m=options['accepted_range_m'],
             scan_from_camera=tf('base_scan','camera'),base_from_camera=tf('base_footprint','camera'),
             image_stamp=None,target_reconciliation=proof)
-        decoder.assert_not_called()
+        decoder.assert_called_once()
     assert frames[-1]['lidar_associated'] and not frames[-1]['qr_texts']
     if outline_available:
         assert adapter._pending_candidate_centering.association is support

@@ -106,8 +106,9 @@ def endpoint(tmp_path, monkeypatch):
     def detect_head(*args, **options):
         return detect(*args, **{**options, 'max_elapsed_sec': .5})
     monkeypatch.setattr(opposite_identity, 'detect_opposite_head_region', detect_head)
+    adapter._test_decoder_modes = []
     def decode_identity(*args, **options):
-        assert options['identity_only'] is True
+        adapter._test_decoder_modes.append(options['identity_only'])
         return (DecodedQrObservation('Start', None, 'payload_only_fixture', 4.),)
     monkeypatch.setattr(opposite_identity, 'detect_qr_observations_bgr', decode_identity)
     # The lightweight adapter supplies the recorded robot digest. Camera
@@ -188,6 +189,7 @@ def test_original_opposite_frame_commits_current_qr_and_roundtrips_retained_geom
     case, adapter, _, kwargs, calls = endpoint
     opposite_identity.process_opposite_identity(adapter, **kwargs)
     assert len(calls) == 1
+    assert adapter._test_decoder_modes == [True]
     assert calls[0]["kind"] == "retained_opposite_current_qr_endpoint_confirmation"
     assert calls[0]['outline']['policy'] == HEAD_REGION_POLICY
     proof = adapter._current_position_epoch_proof
@@ -227,11 +229,12 @@ def test_original_opposite_frame_commits_current_qr_and_roundtrips_retained_geom
     assert load_recommendation(path) == projected
 
 
-def test_missing_current_head_cannot_admit_hint_or_decode_identity(endpoint, monkeypatch):
+def test_missing_current_head_allows_search_but_cannot_bind_cornerless_identity(endpoint, monkeypatch):
     _, adapter, _, kwargs, calls = endpoint
     monkeypatch.setattr(opposite_identity, "detect_opposite_head_region", lambda *a, **k: None)
     opposite_identity.process_opposite_identity(adapter, **kwargs)
     assert calls == []
+    assert adapter._test_decoder_modes == [False]
     assert getattr(adapter, "_current_position_epoch_proof", None) is None
     assert getattr(adapter, "_pending_qr_observation_pose", None) is None
     assert not adapter._last_observation_update.frame_accepted
@@ -377,7 +380,14 @@ def test_persisted_raw_payload_binding_replays_calibration_stamp_and_own_corners
     crop = payload["qr_binding"]["current_head_binding"]
     raw = crop["raw_pixel_binding"]
     assert raw["qr_id"] == "Start"
-    assert raw["corner_error_px"] < 1.
+    # Replay the source calibration and the decoder's own corners. Native
+    # corner locations vary slightly by backend/version; the production
+    # geometric tolerance, followed by these tamper controls, is the contract.
+    mapped = opposite_raw_qr._rectified_quad(raw['decoded_raw_corners_px'],
+        endpoint[0]['calibration'], cv2)
+    error = opposite_raw_qr._corner_error(mapped, raw['confirmed_corners_px'])
+    assert raw['corner_error_px'] == pytest.approx(error)
+    assert 0 <= error <= raw['maximum_corner_error_px']
     assert raw["motion_authorized"] is False and raw["supplies_angle"] is False
     if tamper == "projection":
         raw["calibration"]["projection_matrix"][0] += 1.

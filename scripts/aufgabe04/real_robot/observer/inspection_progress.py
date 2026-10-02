@@ -54,14 +54,19 @@ def classify_inspection_progress(state: str, details: dict) -> InspectionClassif
 
     axis = details.get("stand_axis_debug") or {}
     model = axis.get("metric_model") or {}
-    reason = str(details.get("estimator_reason") or details.get("reason") or axis.get("estimator_reason") or state)
+    identity_pending = details.get("reason") == "measured_head_front_identity_unresolved"
+    reason = str(details.get("reason") if identity_pending else
+                 details.get("estimator_reason") or details.get("reason") or axis.get("estimator_reason") or state)
     yaw = axis.get("advisory_camera_relative_yaw_rad")
     if isinstance(yaw, bool) or not isinstance(yaw, (int, float)) or not math.isfinite(yaw):
         yaw = None
     bounded_yaw = _bounded_head_view_yaw(axis)
     if bounded_yaw is not None:
         yaw = bounded_yaw
-        reason = "bounded_head_orientation_disambiguation"
+        # The interval remains an advisory diagnostic. It must not erase the
+        # explicit missing-identity reason used by the parent's no-motion retry.
+        if not identity_pending:
+            reason = "bounded_head_orientation_disambiguation"
     front = details.get("front_observation") or {}
     if front.get("axis_state") == "unresolved" and front.get("classification") in {
         "front_readable", "front_unreadable",

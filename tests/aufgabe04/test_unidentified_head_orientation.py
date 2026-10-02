@@ -6,6 +6,7 @@ import json
 import math
 
 import pytest
+from unittest.mock import Mock
 
 pytest.importorskip("cv2")
 pytest.importorskip("numpy")
@@ -46,7 +47,7 @@ def observer():
 
 
 def frame(observer, stamp, *, attempt_changes=None, associated=True, complete=True,
-          age=.1, marker_seen=False, qr_conflict=False, pose=None):
+          age=.1, marker_seen=False, qr_conflict=False, pose=None, before_publish=None):
     """Use real head bounds, association, temporal gates, and durable publication."""
     adapter = observer.adapter
     observer.fixture.clock_sec = stamp + age
@@ -100,6 +101,8 @@ def frame(observer, stamp, *, attempt_changes=None, associated=True, complete=Tr
         axis_yaw_rad=None, axis_source=None,
         qr_texts=("Start", "QR_003") if qr_conflict else (),
         qr_symbol_count=2 if qr_conflict else 0)
+    if before_publish is not None:
+        before_publish(adapter)
     PassiveRealViewpointNode._write_status(adapter, "metric_model_measurement_unavailable")
     return update, metadata
 
@@ -145,8 +148,62 @@ def test_seven_current_id_attempts_commit_orientation_without_claiming_backside(
     assert not observer.adapter.args.recommended_pose_json.exists()
 
 
+def use_precise_geometry(observer):
+    """Fit the same measured model at a pose passing the existing strict gate."""
+    import cv2
+    import numpy
+    from scripts.aufgabe04.perception.stand_axis.head_model_quality import evaluate_head_model_quality
+    from scripts.aufgabe04.perception.stand_axis.head_orientation_bounds import evaluate_current_head_orientation_bounds
+    from scripts.aufgabe04.perception.stand_axis.models import ImagePoint
+    from scripts.aufgabe04.perception.stand_axis.qr_pose_seed import estimate_planar_pose_ippe
+    from tests.aufgabe04.test_head_model_admission import outer_boundary
+    pixels = cv2.projectPoints(numpy.asarray([(p.x_m, p.y_m, p.z_m)
+        for p in observer.profile.head_corners]), numpy.asarray((0., .2, 0.)),
+        numpy.asarray((-.03, 0., .55)), numpy.asarray(((640., 0., 120.),
+        (0., 640., 80.), (0., 0., 1.))), None)[0]
+    corners = tuple(ImagePoint(float(u), float(v)) for u, v in pixels.reshape(-1, 2))
+    poses = estimate_planar_pose_ippe(cv2, corners, observer.profile.head_corners, observer.camera)
+    options = dict(profile=observer.profile, camera=observer.camera, corners=corners,
+        pose_result=poses, raw_border_support_mean=.98, raw_corner_support_accepted=True,
+        outer_border_verified=True)
+    quality = evaluate_head_model_quality(cv2, **options, centered_neck_supported=False)
+    assert quality.accepted
+    proof = evaluate_current_head_orientation_bounds(cv2, **options, frame_shape=(160, 160))
+    assert proof.accepted
+    pose = poses.hypotheses[0]
+    left, right = (math.hypot(corners[a].u_px-corners[b].u_px,
+                            corners[a].v_px-corners[b].v_px) for a,b in ((0,3),(1,2)))
+    observer.proof = proof
+    observer.current = replace(observer.current,
+        estimate=replace(observer.current.estimate, corners=corners, usable=True,
+            yaw_deg=pose.yaw_deg, evidence_state='fresh_refined', left_height_px=left,
+            right_height_px=right, reason=quality.reason),
+        debug=replace(observer.current.debug, refined_corners=corners, model_pose=pose,
+            evidence_state='fresh_refined', head_model_quality=quality,
+            head_orientation_bounds=proof, head_outer_recovery=outer_boundary(corners, observer.profile.sha256),
+            pose_reprojection_rmse_px=pose.reprojection_rmse_px))
+
+
+@pytest.mark.parametrize('precise', [False, True])
+def test_empty_decode_retains_precise_or_bounded_axis_ahead_of_centering(observer, monkeypatch, precise):
+    if precise:
+        use_precise_geometry(observer)
+    for index in range(6):
+        frame(observer, 100. + index*.2)
+    centering = Mock(side_effect=AssertionError('usable retained geometry precedes advice'))
+    monkeypatch.setattr('scripts.aufgabe04.real_robot.observer.node.commit_candidate_centering', centering)
+    frame(observer, 101.2, before_publish=lambda adapter:
+        setattr(adapter, '_candidate_centering_ready', object()))
+    payload = receipt(observer)
+    assert payload is not None
+    assert payload['visible_face'] == 'unidentified'
+    assert payload['bounded_orientation']['half_width_rad'] == pytest.approx(observer.proof.half_width_rad)
+    centering.assert_not_called()
+
+
 @pytest.mark.parametrize("changes", (
     {"attempted": False}, {"attempted": None}, {"accepted_crop": False},
+    {"attempted": False, "decoder": {"events": [{"stage": "wechat", "reason": "decoder_error"}]}},
     {"decoded_texts": ["Start"]}, {"decoded_texts": None},
     {"image_stamp_sec": 99.}, {"scan_stamp_sec": 99.},
 ))

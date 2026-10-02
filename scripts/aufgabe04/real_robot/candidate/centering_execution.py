@@ -15,6 +15,7 @@ from scripts.aufgabe04.artifacts.content_store import write_content_hashed_json
 from scripts.aufgabe04.real_robot.candidate.observation_deferral import (
     CandidateObservationUnavailableError,
 )
+from scripts.aufgabe04.real_robot.execution.candidate_centering import CandidateCenteringDisposition
 
 
 MAX_CENTERING_TURNS = 2
@@ -48,6 +49,7 @@ def capture_with_centering(
     travel_limit = MAX_CENTERING_TRAVEL_RAD
     arrival_recovery = False
     observation_status_path = None
+    capture_only = False
 
     def persist(phase):
         nonlocal revision
@@ -56,6 +58,7 @@ def capture_with_centering(
             "schema_version": 1, "candidate_uid": candidate_uid,
             "physical_view_index": view_index, "phase": phase,
             "maximum_turn_count": turn_limit, "arrival_recovery": arrival_recovery,
+            "centering_disabled_after_bounded_stop": capture_only,
             "maximum_angular_travel_rad": travel_limit,
             "actual_angular_travel_rad": travel,
             "observation_not_before_sec": not_before,
@@ -84,19 +87,18 @@ def capture_with_centering(
                                   "centering_progress_path": str(state_path)},
                 status_evidence={"motion_authorized": False},
             )
-        enabled = len(history) < turn_limit and travel < travel_limit
+        enabled = not capture_only and len(history) < turn_limit and travel < travel_limit
         capture_dir = (output_dir if not history else
                        output_dir / f"recenter_{len(history):02d}" / "capture")
         observation = capture(frame, capture_dir, view_index, enabled, remaining_sec, not_before)
         observation_status_path = str(capture_dir / "observer_status.json")
-        # Acquisition precedes completion: neither geometry nor QR-only evidence
-        # can hide actionable advice. Return the fresh post-turn capture.
-        # Disabled budgets never revive motion even if an injected effect also
-        # exposes an advisory alongside its completed observation.
+        # A usable stopped observation precedes optional framing. Movement still
+        # requires another capture with a strictly newer sensor timestamp.
         complete = (observation.recommendation_path is not None or
-                    getattr(observation, "qr_observation_pose_path", None) is not None)
+                    getattr(observation, "qr_observation_pose_path", None) is not None or
+                    getattr(observation, "axis_observation_path", None) is not None)
         advisory_path = getattr(observation, "centering_advisory_path", None)
-        if advisory_path is None or complete and not enabled:
+        if advisory_path is None or complete or capture_only:
             persist("observation_returned")
             return observation, frame
         if not history and Path(advisory_path).is_file():
@@ -122,6 +124,14 @@ def capture_with_centering(
             persist("turn_failed")
             raise
         result = outcome.result
+        disposition = getattr(outcome, "disposition", CandidateCenteringDisposition.COMPLETED)
+        if (disposition not in {CandidateCenteringDisposition.COMPLETED,
+                               CandidateCenteringDisposition.STOPPED_CAPTURE_ONLY}
+                or result.get("status") not in {None, "completed", "stopped"}
+                or (result.get("status") == "stopped"
+                    and disposition is not CandidateCenteringDisposition.STOPPED_CAPTURE_ONLY)):
+            raise RuntimeError("invalid centering outcome classification")
+        capture_only = disposition is CandidateCenteringDisposition.STOPPED_CAPTURE_ONLY
         actual = result.get("actual_angular_travel_rad")
         stopped = result.get("stopped_at_sec")
         if (type(actual) not in (int, float) or not math.isfinite(actual) or actual < 0
@@ -133,5 +143,6 @@ def capture_with_centering(
         not_before = stopped
         previous_result_path = outcome.result_path
         history[-1].update(state="stopped", result_path=str(outcome.result_path),
-                           actual_angular_travel_rad=actual, stopped_at_sec=stopped)
+                           actual_angular_travel_rad=actual, stopped_at_sec=stopped,
+                           disposition=disposition.value)
         persist("fresh_observation_required")

@@ -1,5 +1,10 @@
 # Camera exploration candidate-admission review — October 2, 2026
 
+Historical snapshot before `ef3ef71`. The arrival correction is now committed
+and deployed. See [the follow-up simplification audit](aufgabe04_camera_exploration_simplification_audit_20261002.md)
+for the updated baseline, current-run decoder blockage, and already implemented
+opposite runtime recovery.
+
 ## Assessment
 
 Several gates are too early or have too final a consequence. The clearest
@@ -102,7 +107,7 @@ Line references describe the inspected local working tree.
 | 3 | An arrival rejection can consume an inspection episode with zero camera views. | Track `not_yet_observed`, recoverable acquisition failure, and exhausted inspection separately. The eight-view budget is inside an episode, while the outer ledger allows one episode. |
 | 4 | Any historical morphology conflict permanently vetoes target selection and passive handoff. | Provide explicit reconciliation by sufficiently strong current evidence while preserving history and keepouts. Keep the recorded wall-rejection controls. This was not the newest runs' binding gate. |
 | 5 | QR-only completion skips angle consensus but the physical acquisition path still requires an associated measured-head crop before decoding. | Assess a second, independently candidate-bound identity acquisition path when head fitting fails. Decoding arbitrary search regions without exclusive association would lose the ID-to-stand guarantee. |
-| 6 | Optional centering or a failed replacement route can become a session-wide failure. | After a verified stop and closed motion authority, permit a bounded passive observation, candidate deferral, or fresh alternative route as appropriate. Keep systemic frame/integrity and unconfirmed-stop failures terminal. |
+| 6 | Optional centering can become a session-wide failure. | After a verified stop and closed motion authority, permit a bounded passive observation or candidate deferral. Opposite-route replacement recovery is already implemented in `7aef892`; reuse its outcome distinctions rather than adding another retry layer. Keep systemic frame/integrity and unconfirmed-stop failures terminal. |
 
 Specific code anchors:
 

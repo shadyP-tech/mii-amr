@@ -122,9 +122,11 @@ def acquire_current_head_identity(adapter, *, frame, estimate, association, crop
     from pathlib import Path
     from scripts.aufgabe04.qr_scanning.opencv_qr_detector import detect_qr_observations_bgr
     from scripts.aufgabe04.real_robot.configuration.profile import camera_calibration_sha256, real_robot_profile_sha256
-    from scripts.aufgabe04.real_robot.observer.opposite_head_support import head_region_from_corners, support_opposite_head_region
+    from scripts.aufgabe04.real_robot.observer.opposite_head_support import support_from_current_head
+    from scripts.aufgabe04.real_robot.observer.head_roi_reacquisition import HeadRoiAttempt
     from scripts.aufgabe04.real_robot.observer.opposite_identity_crop import exclusive_identity_crop, masked_identity_pixels
-    from scripts.aufgabe04.real_robot.observer.qr_candidate_search import current_scan_qr_search
+    from scripts.aufgabe04.real_robot.observer.shared_scan_cluster import SUBSET_KIND
+    from scripts.aufgabe04.real_robot.observer.scan_target_persistence import validated_witnessed_fragmentation
     from scripts.aufgabe04.real_robot.observer.qr_target_binding import QrTargetBinding
     from scripts.aufgabe04.stations.candidate_snapshot import load_candidate_snapshot
 
@@ -153,30 +155,39 @@ def acquire_current_head_identity(adapter, *, frame, estimate, association, crop
         target_reconciliation=target_reconciliation, fragmentation=fragmentation)
     try:
         snapshot = load_candidate_snapshot(Path(snapshot_path))
-        search = current_scan_qr_search(**options)
-        details["search"] = search[1]
+        if (scan.scan_frame_id != scan_from_map.parent_frame
+                or scan_from_map.child_frame != camera_from_map.child_frame
+                or scan_from_camera.child_frame != camera_from_map.parent_frame
+                or association.target_reconciliation != target_reconciliation):
+            return miss("current_head_identity_context_mismatch")
+        lidar = association.lidar_association
+        if target_reconciliation is None and (lidar.map_bearing_rad != map_bearing_rad
+                or tuple(lidar.search_association.accepted_range_m) != tuple(accepted_range_m)):
+            return miss("current_head_identity_context_mismatch")
         corners = tuple((point.u_px+selected_roi.x0, point.v_px+selected_roi.y0)
                         for point in estimate.corners or ())
-        region = head_region_from_corners(corners, image_shape=frame.shape[:2],
-            image_stamp_sec=image_stamp_sec, attempt=search[0], model_profile=adapter.stand_model_profile)
-        if region is None:
-            return miss("current_head_identity_region_unavailable")
-        support = support_opposite_head_region(region, attempt=search[0], image_shape=frame.shape[:2],
-            intrinsics=intrinsics, model_profile=adapter.stand_model_profile,
+        support = support_from_current_head(association, corners, image_shape=frame.shape[:2],
+            intrinsics=intrinsics,
             scan_from_camera=scan_from_camera, scan=scan, image_stamp_sec=image_stamp_sec,
-            now_sec=now(), map_bearing_rad=map_bearing_rad,
-            cone_half_angle_rad=options["cone_half_angle_rad"], accepted_range_m=accepted_range_m,
+            now_sec=now(), sync_tolerance_sec=adapter.args.sync_tolerance_sec,
             max_scan_age_sec=adapter.args.max_sensor_age_sec,
-            max_camera_map_bearing_delta_rad=options["max_camera_map_bearing_delta_rad"],
-            target_reconciliation=target_reconciliation, fragmentation=fragmentation,
-            diagnostics=details.setdefault("support", {}))
-        if support is None:
-            return miss("current_head_identity_support_unavailable")
-        previous = association.lidar_association.search_association
-        current = support.lidar_association.search_association
-        if (previous.scan_stamp_sec != current.scan_stamp_sec or previous.scan_frame_id != current.scan_frame_id
-                or not set(previous.selected_cluster_source_indices).intersection(current.selected_cluster_source_indices)):
-            return miss("current_head_identity_cluster_mismatch")
+        )
+        details["support"] = dict(reason="current_admitted_head_support_reused")
+        attempt = HeadRoiAttempt(selected_roi, "current_admitted_head_identity", 1.,
+            *support.full_image_center_px, support.expected_head_height_px)
+        # Preserve actual narrow-cone indices/counts. A witnessed subset retains
+        # its already validated parent envelope; no new broad search is run.
+        envelope = asdict(lidar.search_association)
+        proof = lidar.witnessed_fragmentation
+        if proof is not None:
+            if proof['kind'] == SUBSET_KIND:
+                proof = proof['envelope']
+            envelope = {**asdict(validated_witnessed_fragmentation(proof).search_association),
+                        'witnessed_fragmentation': proof}
+        search = (attempt, dict(policy="current_admitted_head_identity", accepted=True,
+            envelope=envelope, attempt=attempt.metadata(), motion_authorized=False,
+            supplies_identity=False, supplies_head_geometry=False))
+        details["search"] = search[1]
         attempt, crop = exclusive_identity_crop(candidate_uid=adapter.args.stand_id, snapshot=snapshot,
             support=support, search_result=search, **options)
         details["crop"] = crop

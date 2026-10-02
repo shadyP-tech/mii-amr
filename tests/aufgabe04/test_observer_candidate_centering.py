@@ -147,21 +147,21 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
                 "physical_shifted_registered_" + scenario, publish_immediate=True)
         return adapter, recommendation, output
 
-    def test_real_processing_centers_before_accumulating_head_geometry(self):
+    def test_incomplete_processing_can_center_without_discarding_head_geometry(self):
         adapter, recommendation, output = self.run_processing("head_only")
         self.assertIsNone(recommendation)
         self.assertTrue(output.exists())
         self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 1)
-        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 0)
+        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 1)
         self.assertTrue(adapter.completed)
         self.assertFalse(json.loads(output.read_text())["motion_authorized"])
 
-    def test_real_current_head_and_qr_cannot_complete_before_ready_centering(self):
+    def test_incomplete_current_head_can_still_request_centering(self):
         adapter, recommendation, output = self.run_processing("bound_qr")
         self.assertIsNone(recommendation)
         self.assertTrue(output.exists())
         self.assertEqual(adapter._camera_pipeline_counters["processed_images"], 1)
-        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 0)
+        self.assertEqual(adapter.observation_evidence.snapshot().current_axis_sample_count, 1)
         self.assertTrue(adapter.completed)
 
     def test_first_admitted_frame_centers_without_waiting_for_geometry(self):
@@ -170,8 +170,8 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertTrue(update.frame_accepted)
         self.assertTrue(update.qr_sample_accepted)
         self.assertFalse(update.snapshot.poisoned)
-        self.assertFalse(update.axis_sample_accepted)
-        self.assertEqual(update.snapshot.current_axis_sample_count, 0)
+        self.assertTrue(update.axis_sample_accepted)
+        self.assertEqual(update.snapshot.current_axis_sample_count, 1)
         self.assertIsNone(update.axis_consensus)
         self.assertEqual(metadata["candidate_centering"]["reason"], "fresh_current_head_off_center")
 
@@ -183,16 +183,16 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertTrue(metadata["candidate_centering"]["camera_centered"])
         self.assertFalse(self.adapter.completed)
 
-    def test_ready_centering_discards_prior_precision_samples_in_same_view(self):
+    def test_ready_centering_preserves_prior_precision_samples_until_motion(self):
         for index in range(6):
             update, _ = self.frame(100. + index * .2, axis=True,
                                    center_px=(400., 300.), publish=False)
         self.assertEqual(update.snapshot.current_axis_sample_count, 6)
         update, _ = self.frame(101.2, axis=True)
         self.assertIsNotNone(self.result())
-        self.assertFalse(update.axis_sample_accepted)
-        self.assertEqual(update.snapshot.current_axis_sample_count, 0)
-        self.assertIsNone(update.axis_consensus)
+        self.assertTrue(update.axis_sample_accepted)
+        self.assertEqual(update.snapshot.current_axis_sample_count, 7)
+        self.assertIsNotNone(update.axis_consensus)
 
     def test_boundary_veto_does_not_publish_or_complete(self):
         _, metadata = self.frame(scan_topology=dict(profile="full_rotation", sample_count=360,
@@ -273,15 +273,15 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertIsNone(self.result())
         self.assertFalse(self.adapter.completed)
 
-    def test_current_qr_completion_cannot_bypass_ready_centering(self):
+    def test_current_qr_completion_precedes_ready_centering(self):
         self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"
         self.frame(qr=True)
-        self.assertFalse(self.adapter.args.qr_observation_pose_json.exists())
-        self.assertIsNotNone(self.result())
+        self.assertTrue(self.adapter.args.qr_observation_pose_json.exists())
+        self.assertIsNone(self.result())
         self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
-                         "candidate_centering_committed")
+                         "qr_observation_pose_committed")
 
-    def test_ready_centering_precedes_all_precision_commits_and_grace_periods(self):
+    def test_centering_runs_after_all_ready_completion_paths_decline(self):
         self.frame(axis=True, publish=False)
         self.assertIsNotNone(self.adapter._candidate_centering_ready)
         prefix = "scripts.aufgabe04.real_robot.observer.node."
@@ -294,11 +294,11 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertIsNotNone(self.result())
         self.assertTrue(self.adapter.completed)
         for commit in commits.values():
-            commit.assert_not_called()
+            commit.assert_called_once_with(self.adapter)
         self.assertEqual(json.loads(self.adapter.args.status_json.read_text())["state"],
                          "candidate_centering_committed")
 
-    def test_expired_centering_cannot_fall_through_to_precision_commit(self):
+    def test_expired_centering_does_not_suppress_independent_completion_checks(self):
         self.frame(axis=True, publish=False)
         self.assertIsNotNone(self.adapter._candidate_centering_ready)
         self.fixture.clock_sec = 100.7
@@ -309,7 +309,7 @@ class ObserverCandidateCenteringTests(unittest.TestCase):
         self.assertIsNone(self.result())
         self.assertFalse(self.adapter.completed)
         for commit in commits.values():
-            commit.assert_not_called()
+            commit.assert_called_once_with(self.adapter)
 
     def test_current_qr_still_completes_when_safe_centering_is_blocked(self):
         self.adapter.args.qr_observation_pose_json = self.root / "qr_pose.json"

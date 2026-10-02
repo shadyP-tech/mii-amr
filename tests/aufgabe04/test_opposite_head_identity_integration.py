@@ -122,11 +122,12 @@ def test_recorded_head_and_unique_scan_admit_cornerless_id_and_retained_facing(l
     assert load_recommendation(adapter.args.recommended_pose_json) == rec
 
 
-def test_missing_current_head_does_not_decode_background_overlap(latest_opposite):
+def test_missing_current_head_cannot_bind_cornerless_background_payload(latest_opposite):
     _, adapter, _, kwargs, decoder = latest_opposite
     kwargs['frame'] = np.full_like(kwargs['frame'], 255)
     opposite_identity.process_opposite_identity(adapter, **kwargs)
-    decoder.assert_not_called()
+    decoder.assert_called_once()
+    assert decoder.call_args.kwargs['identity_only'] is False
     assert not adapter._capture_pending['detector_metadata']['identity_crop']['accepted']
     assert commit_qr_observation_pose(adapter) is None
     assert not adapter.args.qr_observation_pose_json.exists()
@@ -149,7 +150,8 @@ def test_head_pixels_without_current_reconciliation_cannot_admit_identity(latest
     _, adapter, _, kwargs, decoder = latest_opposite
     kwargs['target_reconciliation'] = None
     opposite_identity.process_opposite_identity(adapter, **kwargs)
-    decoder.assert_not_called()
+    decoder.assert_called_once()
+    assert decoder.call_args.kwargs['identity_only'] is False
     assert not adapter._capture_pending['detector_metadata']['identity_crop']['accepted']
     assert commit_qr_observation_pose(adapter) is None
     assert not adapter.args.qr_observation_pose_json.exists()
