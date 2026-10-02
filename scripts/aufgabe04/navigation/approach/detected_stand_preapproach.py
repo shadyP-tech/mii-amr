@@ -372,14 +372,24 @@ def validate_detected_stand_preapproach_binding(
             )
             if metadata.get("axis_observation_json") is not None:
                 raise ValueError("inspection view cannot claim certified backside axis")
+            estimate = view.get("validated_target_center")
+            if metadata.get("validated_target_center") != estimate:
+                raise ValueError("route current target differs from bound inspection view")
+            if estimate is not None:
+                # The view validator replays the candidate-bound stopped scans.
+                # Their surface estimate selects a viewing point, never a face.
+                if (view["purpose"] != "current_lidar_target"
+                        or estimate.get("policy") != "current_stopped_lidar_surface"):
+                    raise ValueError("inspection current target lacks stopped LiDAR evidence")
+                geometry = planning_target_geometry(selected, estimate)
             offset = _finite_number(metadata.get("approach_offset_m"), "approach_offset_m")
             normal = float(view["view_normal_rad"])
             camera_alignment = view.get("camera_alignment")
             if metadata.get("camera_alignment") != camera_alignment:
                 raise ValueError("camera alignment differs from bound inspection view")
             if camera_alignment is None:
-                expected_x = selected.geometry.x_m + offset * math.cos(normal)
-                expected_y = selected.geometry.y_m + offset * math.sin(normal)
+                expected_x = geometry.x_m + offset * math.cos(normal)
+                expected_y = geometry.y_m + offset * math.sin(normal)
             else:
                 if abs(camera_alignment["camera_standoff_m"]-offset) > 1e-9:
                     raise ValueError("camera alignment standoff binding mismatch")
@@ -462,8 +472,12 @@ def validate_detected_stand_preapproach_binding(
             failures.append('terminal pose violates uncertain current target standoff')
         if _minimum_route_clearance_m(leg,geometry.x_m,geometry.y_m)+1e-9 < minimum_transit+geometry.uncertainty_m:
             failures.append('route violates uncertain current target keepout')
+        if estimate.get("policy") == "current_stopped_lidar_surface":
+            historical_required = max(selected.geometry.keepout_radius_m, minimum_transit)
+            if _minimum_route_clearance_m(leg, selected.geometry.x_m, selected.geometry.y_m)+1e-9 < historical_required:
+                failures.append("route violates historical candidate keepout")
     elif metadata.get('validated_target_center') is not None:
-        failures.append('current target has no certified backside source')
+        failures.append('current target has no validated inspection or certified backside source')
 
     for candidate in snapshot.candidates:
         if candidate.candidate_uid == selected_uid:

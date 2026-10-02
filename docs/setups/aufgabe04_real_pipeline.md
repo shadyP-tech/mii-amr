@@ -237,6 +237,30 @@ localization limit.
 
 ## 2. Seal Calibration and Hardware Inputs
 
+### Physical arena measurements (clarified 2026-10-02)
+
+The operator clarified the longitudinal measurements for the arena associated
+with `arena_1p898x3p9_auto`:
+
+| Measurement | Length | Reference |
+| --- | --- | --- |
+| Long walls | 3.70 m | Physical length of each long wall |
+| Short-wall-to-corridor span | 3.90 m | From one short wall to the "spot corridor" at the opposite short wall |
+
+The 0.20 m difference follows from those two measurements. The 3.90 m span
+must not be described as the long-wall length or used to infer a fully enclosed
+3.90 m rectangle. The corridor width, its placement in the saved map, and the
+precise measurement endpoints still need to be recorded before constructing
+a revised physical boundary model.
+
+The saved map name is a historical identifier. Its raster, origin, and scale
+are unchanged by this clarification. `navigation/foundation/arena_bounds.py`
+still uses a 3.90 m rectangular approximation; it does not represent the
+corrected wall/corridor geometry. Existing sealed site and hardware profiles
+retain their original bytes and hashes.
+
+### Site descriptor and hardware profile
+
 Create a physical-site descriptor whose filename stem is its stable site ID.
 It should identify the measured parkour revision, station placement procedure,
 map acquisition, and date. The pipeline binds its exact bytes:

@@ -45,7 +45,7 @@ def load_candidate_inspection_view(path: Path) -> dict[str, object]:
     ):
         raise ValueError("unsupported inspection view schema")
     if payload.get("purpose") not in {
-        "diverse_inspection", "arrival_alignment", "camera_distance_recovery", "lidar_axis_hint",
+        "diverse_inspection", "arrival_alignment", "camera_distance_recovery", "lidar_axis_hint", "current_lidar_target",
     }:
         raise ValueError("unsupported inspection view purpose")
     if payload.get("motion_authorized") is not False or payload.get(
@@ -72,6 +72,17 @@ def load_candidate_inspection_view(path: Path) -> dict[str, object]:
             if file_sha256(Path(source["path"])) != source.get("sha256"):
                 raise ValueError(f"inspection view {field} content changed")
     alignment = payload.get("camera_alignment")
+    current_target = payload.get("validated_target_center")
+    if current_target is not None or payload.get("current_lidar_targets_path") is not None:
+        if (payload["purpose"] != "current_lidar_target" or alignment is not None
+                or not isinstance(payload.get("current_lidar_targets_path"), str)
+                or not isinstance(current_target, dict)
+                or current_target.get("policy") != "current_stopped_lidar_surface"):
+            raise ValueError("inspection view current LiDAR target binding mismatch")
+        if file_sha256(Path(payload["current_lidar_targets_path"])) != payload.get("current_lidar_targets_file_sha256"):
+            raise ValueError("inspection view current LiDAR evidence changed")
+    elif payload["purpose"] == "current_lidar_target":
+        raise ValueError("current LiDAR inspection lacks evidence")
     if alignment is not None:
         validate_camera_alignment(alignment)
         if (payload["purpose"] != "lidar_axis_hint"
@@ -99,6 +110,15 @@ def validate_candidate_inspection_view_binding(
         "map_bundle_sha256"
     ) != snapshot.map_bundle_sha256:
         raise ValueError("inspection view frame/map binding mismatch")
+    if view.get("validated_target_center") is not None:
+        from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import load_current_lidar_target, HASH_FIELD as TARGET_HASH_FIELD
+        estimate = load_current_lidar_target(Path(view["current_lidar_targets_path"]),
+            candidate_uid=candidate_uid, snapshot=snapshot)
+        if estimate != view["validated_target_center"]:
+            raise ValueError("inspection target differs from current LiDAR evidence")
+        support = load_content_hashed_json(Path(view["current_lidar_targets_path"]), hash_field=TARGET_HASH_FIELD)
+        if support["planning_frame"]["current_pose"] != view["start_pose"]:
+            raise ValueError("inspection start differs from current LiDAR acquisition pose")
     center = view["stand_center"]
     if math.hypot(center["x_m"] - candidate.geometry.x_m,
                   center["y_m"] - candidate.geometry.y_m) > 1.0e-9:
@@ -126,6 +146,8 @@ def write_candidate_inspection_view(
     source_observation_path: Path | None = None,
     source_view_path: Path | None = None,
     camera_alignment: dict | None = None,
+    validated_target_center: dict | None = None,
+    current_lidar_targets_path: Path | None = None,
 ) -> dict[str, object]:
     candidate = snapshot.candidate_for(candidate_uid)
     if candidate is None:
@@ -155,5 +177,12 @@ def write_candidate_inspection_view(
     if camera_alignment is not None:
         validate_camera_alignment(camera_alignment)
         payload["camera_alignment"] = camera_alignment
+    if validated_target_center is not None or current_lidar_targets_path is not None:
+        payload["validated_target_center"] = validated_target_center
+        payload["current_lidar_targets_path"] = (None if current_lidar_targets_path is None
+                                                else str(current_lidar_targets_path))
+        payload["current_lidar_targets_file_sha256"] = (None if current_lidar_targets_path is None
+                                                       else file_sha256(current_lidar_targets_path))
+        validate_candidate_inspection_view_binding(payload, snapshot=snapshot, candidate_uid=candidate_uid)
     write_content_hashed_json(path, payload, hash_field=HASH_FIELD)
     return load_candidate_inspection_view(path)

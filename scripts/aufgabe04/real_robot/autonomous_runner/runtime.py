@@ -3041,6 +3041,7 @@ def _run_mission(parser, args) -> int:
             lidar_scan_frame=profile.scan_frame,
             lidar_scan_topic=runtime.scan_topic,
             measured_stand_model=stand_model,
+            require_current_lidar_support=True,
             robot_profile_sha256=real_robot_profile_sha256(profile),
             approach_offset_m=args.candidate_approach_offset_m,
             final_facing_offset_m=args.final_facing_offset_m,

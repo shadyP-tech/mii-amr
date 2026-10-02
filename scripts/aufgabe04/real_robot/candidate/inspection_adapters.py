@@ -122,10 +122,19 @@ def execute_local_candidate_inspection(
                 source_config=source_config, effects=effects, source_registry=source_registry,
                 candidate_uid=candidate_uid, candidate_root=root,
             )
-        return frame_type(config, candidate, planning,
+        result = frame_type(config, candidate, planning,
                           None if artifacts is None else artifacts.camera_decision_binding(), pose,
                           localization_evidence_path=(None if planning is None else
                               root / "opposite_face_planning_localization.json"))
+        if getattr(source_config, "require_current_lidar_support", False):
+            from scripts.aufgabe04.real_robot.candidate.approach import _require_current_lidar_target
+            from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+            estimate, support = _require_current_lidar_target(
+                config=config, effects=effects, planning_frame=planning, candidate_uid=candidate_uid,
+                output_dir=root / "current_lidar_target", attempt_index=active_view_index)
+            result = replace(result, camera_target_geometry=planning_target_geometry(candidate, estimate),
+                             current_lidar_target_path=Path(support["evidence_path"]))
+        return result
 
     def yaw(frame) -> float:
         return 0.0 if frame.planning_frame is None else frame.planning_frame.map_from_odom.yaw_rad
@@ -161,11 +170,20 @@ def execute_local_candidate_inspection(
             raise RuntimeError("inspection route lacks a fresh finite start pose")
         map_normal = math.remainder(canonical_normal + yaw(frame), 2.0 * math.pi)
         view_path = root / "inspection_view.json"
+        current_estimate = None
+        current_support_path = None
+        if prepared_plan is None and getattr(source_config, "require_current_lidar_support", False):
+            from scripts.aufgabe04.real_robot.candidate.current_lidar_targets import load_current_lidar_target
+            current_support_path = frame.current_lidar_target_path
+            current_estimate = load_current_lidar_target(current_support_path,
+                candidate_uid=candidate_uid, snapshot=frame.config.snapshot)
         write_candidate_inspection_view(
             view_path, snapshot=frame.config.snapshot, candidate_uid=candidate_uid,
-            start=current, view_normal_rad=map_normal, purpose=purpose,
+            start=current, view_normal_rad=map_normal,
+            purpose=(purpose if current_estimate is None else "current_lidar_target"),
             view_index=index, source_observation_path=source_path,
             camera_alignment=None if prepared_plan is None else prepared_plan.camera_alignment,
+            validated_target_center=current_estimate, current_lidar_targets_path=current_support_path,
         )
         request = request_type(
             map_yaml=frame.config.map_yaml, semantic_map_id=frame.config.semantic_map_id,

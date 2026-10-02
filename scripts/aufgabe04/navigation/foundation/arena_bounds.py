@@ -1,4 +1,10 @@
-"""Measured physical arena bounds for Aufgabe 04 dry-run placement."""
+"""Rectangular arena approximation for Aufgabe 04 placement and filtering.
+
+The physical long walls are 3.70 m; 3.90 m is the measured span from one
+short wall to the spot corridor at the opposite short wall. This rectangle
+does not encode that corridor geometry. See the physical arena measurements
+in docs/setups/aufgabe04_real_pipeline.md (clarified 2026-10-02).
+"""
 
 from __future__ import annotations
 
@@ -41,9 +47,9 @@ class ArenaBounds:
         return self.boundary_clearance_m(pose) >= self.margin_m
 
     def boundary_clearance_m(self, pose: Pose2D) -> float:
-        """Return signed clearance from a pose to the nearest arena wall.
+        """Return signed clearance from a pose to the configured rectangle.
 
-        Positive values are inside the measured arena, zero is on its
+        Positive values are inside the configured rectangle, zero is on its
         boundary, and negative values are outside.  Keeping this independent
         of ``margin_m`` lets perception reject wall returns while route
         planning can continue to apply its own placement margin.

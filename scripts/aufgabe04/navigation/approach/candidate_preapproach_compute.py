@@ -110,7 +110,7 @@ def load_candidate_planning_context(
                 0.0,
             ),
             0.0,
-            candidate_transit_radius_m,
+            max(candidate_transit_radius_m, candidate.geometry.keepout_radius_m),
         )
         for candidate in snapshot.candidates
     }
@@ -126,9 +126,10 @@ def load_candidate_planning_context(
         transit_keepout_radius_m=candidate_transit_radius_m,
         arena_bounds=plan.arena_bounds,
     )
-    if validated_target_center is not None:
-        costmaps = replace(costmaps, planning_costmap=costmaps.planning_costmap.with_station_keepouts(
-            (keepouts['current_target'],)))
+    # Fusion can enlarge an individual historical keepout. Rasterize the
+    # actual envelopes too, so search and continuous route admission agree.
+    costmaps = replace(costmaps, planning_costmap=costmaps.planning_costmap.with_station_keepouts(
+        tuple(keepouts.values())))
     return CandidatePlanningContext(
         grid=grid,
         map_bundle=map_bundle,
@@ -181,8 +182,14 @@ def compute_candidate_preapproach_plan(
     geometry = planning_target_geometry(candidate, validated_target_center)
     alignment_target = None
     extra_uncertainty = 0. if validated_target_center is None else geometry.uncertainty_m
-    if validated_target_center is not None and (approach_normal_rad is None or planning_context is not None):
-        raise ValueError('reconciled target requires a fresh certified opposite-face plan')
+    current_lidar_target = (validated_target_center is not None
+                           and validated_target_center.get('policy') == 'current_stopped_lidar_surface')
+    if validated_target_center is not None:
+        if current_lidar_target:
+            if inspection_view_normal_rad is None or approach_normal_rad is not None or planning_context is not None:
+                raise ValueError('current LiDAR target requires a fresh inspection plan')
+        elif approach_normal_rad is None or planning_context is not None:
+            raise ValueError('reconciled target requires a fresh certified opposite-face plan')
     if snapshot.map_bundle_sha256 != plan.map_bundle_sha256:
         raise ValueError("candidate snapshot map differs from coverage plan")
     if camera_alignment is not None:

@@ -32,7 +32,7 @@ def planning_target_geometry(candidate, estimate):
     from dataclasses import replace
     if estimate is None:
         return candidate.geometry
-    if (estimate.get('policy') not in ('reconciled_scan_surface_with_center_uncertainty', 'reconciled_metric_head_position_engineering_bound')
+    if (estimate.get('policy') not in ('reconciled_scan_surface_with_center_uncertainty', 'reconciled_metric_head_position_engineering_bound', 'current_stopped_lidar_surface')
             or any(type(estimate.get(k)) not in (int,float) or not math.isfinite(estimate[k])
                    for k in ('x_m','y_m','uncertainty_m'))
             or not 0 < estimate['uncertainty_m'] <= .3

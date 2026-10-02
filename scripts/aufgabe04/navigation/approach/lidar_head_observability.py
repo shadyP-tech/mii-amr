@@ -36,14 +36,17 @@ def lidar_head_model_admission(stand_model) -> dict[str, object]:
 
 
 def verify_lidar_head_observability(
-    *, stand_model, base_frame, mount_evidence, target_range_m,
+    *, stand_model, base_frame, mount_evidence, target_range_m, source_scan_stamps_sec,
 ) -> dict[str, object]:
-    """Check all three beam planes stay inside the head at the target range.
+    """Check every beam plane in one complete captured cohort against the head.
 
     ``target_range_m`` must upper-bound scan-origin to head range, including
     center uncertainty and head half-width. Bounding every ray direction at
     that radius is conservative without retaining per-fit beam indices.
-    Capture/arrival admission independently owns freshness and receipt binding.
+    Source stamps come from the validated capture receipts, independently of
+    mount records. Both production eight-scan and legacy three-scan cohorts
+    require one exact-time mount record for every scan, in the same order.
+    Capture/arrival admission independently owns freshness.
     """
     model_review = lidar_head_model_admission(stand_model)
     result = {**model_review, "accepted": False,
@@ -57,22 +60,33 @@ def verify_lidar_head_observability(
             return reject("ground_referenced_base_footprint_required")
         if isinstance(target_range_m, bool) or not math.isfinite(target_range_m) or target_range_m <= 0:
             return reject("head_slice_target_range_invalid")
+        source_stamps = tuple(source_scan_stamps_sec)
+        if (len(source_stamps) not in (3, 8)
+                or any(isinstance(stamp, bool) or not math.isfinite(stamp) or stamp <= 0
+                       for stamp in source_stamps)
+                or any(a >= b for a, b in zip(source_stamps, source_stamps[1:]))):
+            return reject("head_slice_source_scan_stamps_invalid")
         records = tuple(mount_evidence)
-        if len(records) != 3:
-            return reject("three_exact_scan_mount_records_required")
+        result.update(source_scan_count=len(source_stamps), mount_record_count=len(records))
+        if len(records) != len(source_stamps):
+            return reject("complete_exact_scan_mount_records_required")
         lower = stand_model.head_top_height_m - stand_model.head_height_m + stand_model.tolerance_m
         upper = stand_model.head_top_height_m - stand_model.tolerance_m
         intervals, stamps = [], []
-        for record in records:
+        for record, source_stamp in zip(records, source_stamps):
             if record["ground_frame"] != base_frame:
                 return reject("head_slice_ground_frame_mismatch")
             stamp = record["stamp_sec"]
             keys = ("scan_height_above_ground_m", "scan_vertical_direction_x",
                     "scan_vertical_direction_y", "scan_vertical_direction_z")
             values = [record[key] for key in keys]
-            if (any(isinstance(v, bool) or not math.isfinite(v) for v in (*values, stamp))
+            exact_stamp = record["exact_transform_stamp_sec"]
+            if (any(isinstance(v, bool) or not math.isfinite(v)
+                    for v in (*values, stamp, exact_stamp))
                     or stamp <= 0 or record["exact_transform_stamp_sec"] != stamp):
                 return reject("head_slice_exact_transform_invalid")
+            if stamp != source_stamp:
+                return reject("head_slice_mount_scan_stamp_mismatch")
             height, vx, vy, vz = values
             if abs(vx*vx + vy*vy + vz*vz - 1.) > 1e-6 or vz <= 0:
                 return reject("head_slice_vertical_direction_invalid")

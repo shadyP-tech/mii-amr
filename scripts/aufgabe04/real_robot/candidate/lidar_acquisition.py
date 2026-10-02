@@ -317,7 +317,8 @@ def create_lidar_camera_recovery(*, source_config, source_registry, effects,
                               for r in captured.receipts) + margin
             mount_review = verify_lidar_head_observability(
                 stand_model=source_config.measured_stand_model, base_frame=request.base_frame,
-                mount_evidence=captured.mount_evidence, target_range_m=range_bound)
+                mount_evidence=captured.mount_evidence, target_range_m=range_bound,
+                source_scan_stamps_sec=tuple(r.scan_stamp_sec for r in captured.receipts))
             if mount_review["accepted"] and mount_review["source_scan_stamps_sec"] != [r.scan_stamp_sec for r in captured.receipts]:
                 raise ValueError("LiDAR head plane evidence differs from captured scan stamps")
             capture_paths.append(str(captured.evidence_path))

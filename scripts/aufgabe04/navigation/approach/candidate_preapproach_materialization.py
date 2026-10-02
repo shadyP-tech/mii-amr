@@ -157,7 +157,9 @@ def materialize_candidate_preapproach_plan(
             candidate_y_m=candidate.geometry.y_m,
         )
     estimate = None if axis_observation is None else axis_observation.validated_target_center
-    if estimate is not None:
+    if inspection_view is not None and inspection_view.get("validated_target_center") is not None:
+        estimate = inspection_view["validated_target_center"]
+    if estimate is not None and axis_observation is not None:
         if isinstance(axis_observation, BacksideAxisFrameProjection):
             binding = json.loads(axis_observation.target_candidate_projection_path.read_text())
             bound_snapshot = binding['projected_candidate_snapshot_sha256']
@@ -392,6 +394,10 @@ def plan_candidate_preapproach(
             inspection_view, snapshot=snapshot, candidate_uid=candidate_uid, start=start,
         )
     estimate = None if axis_observation_path is None else load_backside_axis_planning_observation(axis_observation_path).validated_target_center
+    if inspection_view is not None and inspection_view.get("validated_target_center") is not None:
+        validate_candidate_inspection_view_binding(inspection_view, snapshot=snapshot,
+            candidate_uid=candidate_uid, start=start)
+        estimate = inspection_view["validated_target_center"]
     selected = prepared_plan or compute_candidate_preapproach_plan(
         map_yaml=map_yaml,
         semantic_map_id=semantic_map_id,

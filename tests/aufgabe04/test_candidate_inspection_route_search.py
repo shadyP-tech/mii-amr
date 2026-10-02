@@ -152,8 +152,10 @@ class CandidateInspectionRouteSearchTest(unittest.TestCase):
 
     def adapter_setup(self):
         fixture = fixtures.AutonomousCandidateApproachTest()
-        config = fixture._config(self.root, (fixture._candidate("candidate", 0.0, 0.0),))
+        # Seal the final fixture map; replacing it after _config invalidates
+        # the snapshot's map binding before any route-search behavior runs.
         write_free_map(self.root, resolution=0.05)
+        config = fixture._config(self.root, (fixture._candidate("candidate", 0.0, 0.0),))
         return fixture, replace(config, max_candidate_inspection_views=2)
 
     def adapter_effects(self, fixture, config, *, reject_kind):

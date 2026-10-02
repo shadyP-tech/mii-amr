@@ -108,6 +108,7 @@ def plan_and_select_camera_candidate(
     lidar_hint_diagnostics: Mapping[str, object] | None = None,
     camera_calibration=None,
     camera_alignment_uncertainty: Mapping[str, float] | None = None,
+    current_target_estimates: Mapping[str, dict] | None = None,
 ) -> PlannedCameraCandidateSelection:
     """Preview all unresolved routes, admit/rank them, and retain the winner.
 
@@ -124,6 +125,11 @@ def plan_and_select_camera_candidate(
         raise ValueError(
             "unresolved candidates are absent from snapshot: " + ", ".join(unknown)
         )
+    if current_target_estimates is not None and (
+            set(current_target_estimates) != set(unresolved_uids)
+            or any(value.get("policy") != "current_stopped_lidar_surface"
+                   for value in current_target_estimates.values())):
+        raise ValueError("current LiDAR estimates must cover exactly the current selection population")
     if support_class_by_uid is not None:
         missing_support = sorted(unresolved_uids.difference(support_class_by_uid))
         if missing_support:
@@ -145,7 +151,10 @@ def plan_and_select_camera_candidate(
     for candidate in snapshot.candidates:
         if candidate.candidate_uid not in unresolved_uids:
             continue
-        decision = evaluate_candidate_target_admission(candidate, context.costmaps.base_costmap)
+        from scripts.aufgabe04.artifacts.current_target_estimate import planning_target_geometry
+        estimate = (current_target_estimates or {}).get(candidate.candidate_uid)
+        decision = evaluate_candidate_target_admission(candidate, context.costmaps.base_costmap,
+            target_geometry=planning_target_geometry(candidate, estimate))
         hint = (lidar_inspection_hints or {}).get(candidate.candidate_uid)
         if (not decision.accepted and UNRESOLVED_MORPHOLOGY_CONFLICT not in decision.reasons
                 and hint is not None):
@@ -207,7 +216,20 @@ def plan_and_select_camera_candidate(
             )
             hint = (lidar_inspection_hints or {}).get(candidate.candidate_uid)
             prepared = None
-            if hint is not None:
+            estimate = (current_target_estimates or {}).get(candidate.candidate_uid)
+            if estimate is not None:
+                # This surface selects a viewing point, never a head axis.
+                # Rebuild costmaps with both historical and current keepouts.
+                compute_kwargs["planning_context"] = None
+                compute_kwargs["validated_target_center"] = estimate
+                compute_kwargs["inspection_view_normal_rad"] = math.atan2(
+                    current_pose.y_m-estimate["y_m"], current_pose.x_m-estimate["x_m"])
+                prepared = compute_candidate_preapproach_plan(**compute_kwargs)
+                view_evidence[candidate.candidate_uid] = {
+                    "fallback": False, "reason": "current_stopped_lidar_surface",
+                    "head_alignment_verified": False, "arrival_verification_required": True,
+                }
+            elif hint is not None:
                 prepared, view_evidence[candidate.candidate_uid] = _preview_lidar_views(
                     hint=hint, compute_kwargs=compute_kwargs, candidate=candidate,
                     support_class=support_class, selection_config=selection_config,
@@ -243,7 +265,7 @@ def plan_and_select_camera_candidate(
                 )
             )
             continue
-        selected_geometry = candidate.geometry
+        selected_geometry = planning_target_geometry(candidate, estimate)
         if prepared.camera_alignment is not None:
             alignment = prepared.camera_alignment
             selected_geometry = replace(selected_geometry,

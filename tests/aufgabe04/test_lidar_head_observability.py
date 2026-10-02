@@ -30,7 +30,8 @@ class LidarHeadObservabilityTest(unittest.TestCase):
     def verify(self, *, scans=None, **overrides):
         scans = scans or [self.mount(v) for v in (100., 100.1, 100.2)]
         values = dict(stand_model=self.model, base_frame="base_footprint", target_range_m=.75,
-                      mount_evidence=[{**s["head_plane_mount"], "stamp_sec":s["stamp_sec"]} for s in scans])
+                      mount_evidence=[{**s["head_plane_mount"], "stamp_sec":s["stamp_sec"]} for s in scans],
+                      source_scan_stamps_sec=[s["stamp_sec"] for s in scans])
         values.update(overrides)
         return verify_lidar_head_observability(**values)
 
@@ -81,6 +82,46 @@ class LidarHeadObservabilityTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timestamp"):
             capture_payload(scans, tour_id="test", odom_frame="odom", base_frame="base_footprint",
                             scan_frame="laser", captured_at_unix_sec=100.21)
+
+    def test_complete_eight_scan_cohort_checks_every_beam_plane(self):
+        scans = [self.mount(100. + index*.1) for index in range(8)]
+        result = self.verify(scans=scans)
+        self.assertTrue(result["accepted"], result)
+        self.assertEqual(result["source_scan_stamps_sec"], [s["stamp_sec"] for s in scans])
+        self.assertEqual(result["source_scan_count"], 8)
+        self.assertEqual(len(result["beam_height_intervals_m"]), 8)
+        scans[-1]["head_plane_mount"]["scan_height_above_ground_m"] = .25
+        result = self.verify(scans=scans)
+        self.assertEqual(result["reason"], "laser_plane_not_inside_measured_head")
+
+    def test_partial_mount_records_cannot_stand_in_for_complete_source_cohort(self):
+        scans = [self.mount(100. + index*.1) for index in range(8)]
+        mounts = [{**s["head_plane_mount"], "stamp_sec": s["stamp_sec"]} for s in scans]
+        for count in (0, 2, 3, 7):
+            with self.subTest(count=count):
+                result = self.verify(scans=scans, mount_evidence=mounts[:count])
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["reason"], "complete_exact_scan_mount_records_required")
+
+    def test_mounts_must_match_complete_source_scan_order(self):
+        scans = [self.mount(100. + index*.1) for index in range(8)]
+        mounts = [{**s["head_plane_mount"], "stamp_sec": s["stamp_sec"]} for s in scans]
+        changed = [dict(record) for record in mounts]
+        changed[-1].update(stamp_sec=101., exact_transform_stamp_sec=101.)
+        for records in (mounts[:-1] + [mounts[-2]], list(reversed(mounts)), changed):
+            with self.subTest(records=records):
+                result = self.verify(scans=scans, mount_evidence=records)
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["reason"], "head_slice_mount_scan_stamp_mismatch")
+
+    def test_source_cohort_cardinality_and_stamps_fail_closed(self):
+        for stamps in ((), [100.], [100.+index*.1 for index in range(4)],
+                       [100., 100., 100.2], [100.2, 100.1, 100.],
+                       [100., True, 100.2], [100., float("nan"), 100.2]):
+            with self.subTest(stamps=stamps):
+                result = self.verify(source_scan_stamps_sec=stamps)
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["reason"], "head_slice_source_scan_stamps_invalid")
 
 
 if __name__ == "__main__":

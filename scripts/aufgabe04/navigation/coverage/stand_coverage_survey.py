@@ -1495,6 +1495,27 @@ def _merge_candidate(
         return candidate
     incoming_weight = max(stand.hit_count, len(new_observation_ids))
     total_hits = candidate.hit_count + incoming_weight
+    existing_points, incoming_points = candidate_spatial_match_points(
+        ((candidate.x_m, candidate.y_m),),
+        ((stand.x_m, stand.y_m),),
+        candidate_frames=(candidate.frame_provenance,),
+        stand_frames=(incoming_frame_provenance,),
+    )
+    center_disagreement_m = math.dist(existing_points[0], incoming_points[0])
+    existing_center_shift_m = center_disagreement_m * incoming_weight / total_hits
+    incoming_center_shift_m = center_disagreement_m * candidate.hit_count / total_hits
+    # Enclose both observation envelopes around the weighted center. Repeated
+    # hits do not make disagreement between viewpoints disappear, and moving
+    # the center must not clip the already retained obstacle keepout.
+    uncertainty_m = max(
+        candidate.uncertainty_m + existing_center_shift_m,
+        config.candidate_uncertainty_m + incoming_center_shift_m,
+    )
+    keepout_radius_m = max(
+        candidate.keepout_radius_m + existing_center_shift_m,
+        config.candidate_keepout_radius_m + incoming_center_shift_m,
+        candidate.radius_m + uncertainty_m,
+    )
     merged_frame_provenance = merge_candidate_frame_provenance(
         candidate.frame_provenance,
         incoming_frame_provenance,
@@ -1520,6 +1541,8 @@ def _merge_candidate(
         candidate,
         x_m=merged_x_m,
         y_m=merged_y_m,
+        uncertainty_m=uncertainty_m,
+        keepout_radius_m=keepout_radius_m,
         confidence=(
             candidate.confidence * candidate.hit_count
             + stand.confidence * incoming_weight
