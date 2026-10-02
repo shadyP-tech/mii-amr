@@ -22,7 +22,9 @@ from scripts.aufgabe04.navigation.execution.startup_reseal_motion_authorization 
 )
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+import hashlib
+import json
 import math
 from pathlib import Path
 import re
@@ -38,6 +40,7 @@ from scripts.aufgabe04.navigation.localization.runtime_localization_reseal impor
 from scripts.aufgabe04.real_robot.candidate.no_motion_route_rejection import (
     NoMotionPreflightClassification,
     classify_no_motion_preflight_failure,
+    classify_no_motion_route_uncertainty_rejection,
 )
 from scripts.aufgabe04.real_robot.candidate.recovery_failure import (
     issued_motion_permit_kinds,
@@ -75,10 +78,13 @@ class CandidateRuntimeRecoveryConfig:
     recovery_root: Path
     event_log_path: Path
     max_runtime_reseals: int
+    original_identity: CandidateRoutineIdentity | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.initial_identity, CandidateRoutineIdentity):
             raise TypeError("initial_identity must be CandidateRoutineIdentity")
+        if self.original_identity is not None:
+            _validate_routine_lineage(self.original_identity, self.initial_identity)
         if (
             type(self.max_runtime_reseals) is not int
             or self.max_runtime_reseals < 0
@@ -106,6 +112,24 @@ class CandidateRuntimeRecoveryAttempt:
     attempt_root: Path
     fresh_localization_evidence_path: Path
     source_root: Path
+
+
+@dataclass(frozen=True)
+class CandidateRuntimeRouteRejectionContext:
+    """Stopped-routine evidence for bounded replanning, never motion authority."""
+
+    original_identity: CandidateRoutineIdentity
+    runtime_base_identity: CandidateRoutineIdentity
+    attempt: CandidateRuntimeRecoveryAttempt
+    replacement_outcome: MotionLegOutcome
+    source_permit_kind: str
+    source_permit_path: Path
+    source_permit_sha256: str
+    source_permit_file_sha256: str
+    fresh_localization_evidence_sha256: str
+    source_outcome_sha256: str
+    replacement_outcome_sha256: str
+    attempt_sha256: str
 
 
 RequestT = TypeVar("RequestT")
@@ -183,9 +207,11 @@ class CandidateRuntimeRecoveryError(RuntimeError):
         *,
         phase: str,
         rejected_child: CandidateRuntimeRejectedOutcome | None = None,
+        route_rejection_context: CandidateRuntimeRouteRejectionContext | None = None,
     ) -> None:
         self.phase = phase
         self.rejected_child = rejected_child
+        self.route_rejection_context = route_rejection_context
         super().__init__(message)
 
     def to_failure_fields(self) -> dict[str, object]:
@@ -224,6 +250,151 @@ def _runtime_identity(
             f"{base.run_id}_runtime_localization_reseal_{reseal_index:03d}"
         ),
     )
+
+
+def _validate_routine_lineage(
+    original: CandidateRoutineIdentity, observed: CandidateRoutineIdentity,
+) -> None:
+    if not isinstance(original, CandidateRoutineIdentity) or not isinstance(
+        observed, CandidateRoutineIdentity
+    ):
+        raise ValueError("runtime route context requires typed routine identities")
+    if replace(observed, run_id=original.run_id) != original:
+        raise ValueError("runtime route context changed the original routine")
+    if not observed.run_id.startswith(original.run_id):
+        raise ValueError("runtime route context has unrelated run lineage")
+    suffix = observed.run_id[len(original.run_id):]
+    pattern = r"_(startup_reseal|runtime_localization_reseal)_([0-9]{3,})"
+    parts = list(re.finditer(pattern, suffix))
+    if "".join(part.group(0) for part in parts) != suffix:
+        raise ValueError("runtime route context has invalid run lineage")
+    previous: dict[str, int] = {}
+    for part in parts:
+        owner, raw_index = part.groups()
+        index = int(raw_index)
+        if index <= previous.get(owner, 0) or raw_index != f"{index:03d}":
+            raise ValueError("runtime route context has replayed reseal lineage")
+        previous[owner] = index
+
+
+def _evidence_sha256(evidence: object) -> str:
+    def encode_path(value: object) -> str:
+        if isinstance(value, Path):
+            return str(value)
+        raise TypeError("outcome evidence must be JSON-compatible")
+
+    return hashlib.sha256(json.dumps(
+        asdict(evidence), sort_keys=True, separators=(",", ":"),
+        allow_nan=False, default=encode_path,
+    ).encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_runtime_route_rejection_context(
+    error: CandidateRuntimeRecoveryError, *,
+    expected_identity: CandidateRoutineIdentity,
+) -> CandidateRuntimeRouteRejectionContext:
+    """Recheck the exact stopped lineage before considering another route.
+
+    Consumed source permits are evidence only. This does not make them reusable
+    and does not replace fresh localization, a route certificate, or a new permit.
+    """
+
+    try:
+        if not isinstance(error, CandidateRuntimeRecoveryError):
+            raise ValueError("runtime route fallback requires a typed error")
+        context = error.route_rejection_context
+        if not isinstance(context, CandidateRuntimeRouteRejectionContext):
+            raise ValueError("runtime route rejection context is missing")
+        if error.phase != "replacement_preflight_failed":
+            raise ValueError("runtime route rejection phase mismatch")
+        if context.original_identity != expected_identity:
+            raise ValueError("runtime route rejection original identity mismatch")
+        if expected_identity.routine_kind != "opposite_face":
+            raise ValueError("runtime route rejection is not an opposite routine")
+        _validate_routine_lineage(expected_identity, context.runtime_base_identity)
+        attempt = context.attempt
+        if not isinstance(attempt, CandidateRuntimeRecoveryAttempt):
+            raise ValueError("runtime route rejection attempt is malformed")
+        if attempt.identity != _runtime_identity(
+            context.runtime_base_identity, attempt.reseal_index,
+        ):
+            raise ValueError("runtime route rejection replacement identity mismatch")
+        _validate_routine_lineage(expected_identity, attempt.identity)
+        source = attempt.rejected_outcome
+        allowed_source_runs = {context.runtime_base_identity.run_id}
+        if attempt.reseal_index > 1:
+            allowed_source_runs.add(_runtime_identity(
+                context.runtime_base_identity, attempt.reseal_index - 1,
+            ).run_id)
+        if source.run_id not in allowed_source_runs:
+            raise ValueError("runtime route rejection source run lineage mismatch")
+        validate_child_outcome(source, expected_run_id=source.run_id)
+        decision = _eligible_decision(source)
+        if not decision.eligible or decision != attempt.runtime_localization_decision:
+            raise ValueError("runtime route rejection source is not a validated stop")
+        if _evidence_sha256(attempt) != context.attempt_sha256:
+            raise ValueError("runtime route rejection attempt evidence changed")
+        if _evidence_sha256(source) != context.source_outcome_sha256:
+            raise ValueError("runtime route rejection source evidence changed")
+        if context.source_permit_kind == "runtime_localization":
+            permit_path, permit_digest = _validate_runtime_permit_evidence(source)
+            source_permit = ("runtime_localization", permit_path, permit_digest)
+        else:
+            source_permit = _validate_source_motion_permit_evidence(source)
+        if source_permit != (
+            context.source_permit_kind, context.source_permit_path,
+            context.source_permit_sha256,
+        ):
+            raise ValueError("runtime route rejection source permit mismatch")
+        if _file_sha256(context.source_permit_path) != context.source_permit_file_sha256:
+            raise ValueError("runtime route rejection source permit changed")
+        attempt_root = _normal_directory(attempt.attempt_root, "runtime attempt")
+        if attempt_root.name != f"runtime_localization_reseal_{attempt.reseal_index:03d}":
+            raise ValueError("runtime route rejection attempt path mismatch")
+        if attempt.source_root != attempt_root / "route_source":
+            raise ValueError("runtime route rejection route source path mismatch")
+        _normal_directory(attempt.source_root, "runtime route source")
+        if attempt.fresh_localization_evidence_path != attempt_root / "fresh_stationary_localization.json":
+            raise ValueError("runtime route rejection localization path mismatch")
+        evidence_path = _normal_file(
+            attempt.fresh_localization_evidence_path, "fresh localization evidence",
+        )
+        if _file_sha256(evidence_path) != context.fresh_localization_evidence_sha256:
+            raise ValueError("runtime route rejection fresh localization changed")
+        _validate_pose(attempt.fresh_start_pose)
+        replacement = context.replacement_outcome
+        validate_child_outcome(replacement, expected_run_id=attempt.identity.run_id)
+        if _evidence_sha256(replacement) != context.replacement_outcome_sha256:
+            raise ValueError("runtime route rejection replacement evidence changed")
+        preflight = classify_no_motion_preflight_failure(
+            status=replacement.status, stop_reason=replacement.stop_reason,
+            stop_details=replacement.stop_details,
+            motion_published=replacement.motion_published,
+            issued_motion_permit_kinds=issued_motion_permit_kinds(replacement),
+            returncode=replacement.returncode,
+        )
+        route = classify_no_motion_route_uncertainty_rejection(
+            status=replacement.status, stop_reason=replacement.stop_reason,
+            stop_details=replacement.stop_details,
+            motion_published=replacement.motion_published,
+            issued_motion_permit_kinds=issued_motion_permit_kinds(replacement),
+        )
+        if not preflight.evidence_valid or not route.eligible:
+            raise ValueError("runtime route rejection is not the exact no-permit route failure")
+        expected_child = CandidateRuntimeRejectedOutcome.from_outcome(
+            replacement,
+            policy_reason="runtime replacement failed a structured preflight before motion",
+            decision_reason=preflight.reason,
+        )
+        if error.rejected_child != expected_child:
+            raise ValueError("runtime route rejection child evidence mismatch")
+        return context
+    except (AttributeError, KeyError, OSError, TypeError, OverflowError) as exc:
+        raise ValueError(f"invalid runtime route rejection context: {exc}") from exc
 
 
 def _attempt_paths(
@@ -483,6 +654,7 @@ def _raise_replacement_preflight_failure(
     outcome: MotionLegOutcome,
     reseal_index: int,
     classification: NoMotionPreflightClassification,
+    route_rejection_context: CandidateRuntimeRouteRejectionContext | None = None,
 ) -> None:
     """Persist and raise one replacement rejection without motion authority."""
 
@@ -529,12 +701,23 @@ def _raise_replacement_preflight_failure(
         else "replacement_preflight_contract"
     )
     child_reason = outcome.stop_reason.strip() or "missing child stop reason"
-    raise CandidateRuntimeRecoveryError(
+    error = CandidateRuntimeRecoveryError(
         f"candidate runtime replacement {outcome.run_id} failed before motion: "
         f"{child_reason}; fail-closed policy: {policy_reason}",
         phase=phase,
         rejected_child=rejection,
+        route_rejection_context=route_rejection_context,
     )
+    if route_rejection_context is not None:
+        try:
+            validate_runtime_route_rejection_context(
+                error, expected_identity=route_rejection_context.original_identity,
+            )
+        except ValueError:
+            # Invalid optional fallback evidence never changes the terminal
+            # child failure or introduces a new recovery authority.
+            error.route_rejection_context = None
+    raise error
 
 
 def _reject_outcome(
@@ -738,6 +921,15 @@ def execute_candidate_runtime_localization_recovery(
                 exc=exc,
             ) from exc
 
+        original_identity = config.original_identity or config.initial_identity
+        context_source_digests: tuple[str, str] | None = None
+        if original_identity.routine_kind == "opposite_face":
+            try:
+                context_source_digests = (
+                    _file_sha256(source_permit_path), _evidence_sha256(outcome),
+                )
+            except (OSError, TypeError, ValueError):
+                pass  # The optional context cannot weaken terminal handling.
         _emit(
             config,
             effects,
@@ -782,6 +974,13 @@ def execute_candidate_runtime_localization_recovery(
             fresh_localization_evidence_path=evidence_path,
             source_root=source_root,
         )
+        fresh_evidence_sha256 = attempt_sha256 = None
+        if context_source_digests is not None:
+            try:
+                fresh_evidence_sha256 = _file_sha256(evidence_path)
+                attempt_sha256 = _evidence_sha256(attempt)
+            except (OSError, TypeError, ValueError):
+                context_source_digests = None
         _emit(
             config,
             effects,
@@ -926,12 +1125,47 @@ def execute_candidate_runtime_localization_recovery(
             returncode=replacement_outcome.returncode,
         )
         if preflight_classification.applies and not typed_startup_handoff:
+            # This replacement used the reseal budget even though its dry
+            # admission prevented permit issuance and motion.
+            if recovery_state is not None:
+                recovery_state.runtime_reseal_count = reseal_index
+            route_context = None
+            exact_route_rejection = classify_no_motion_route_uncertainty_rejection(
+                status=replacement_outcome.status,
+                stop_reason=replacement_outcome.stop_reason,
+                stop_details=replacement_outcome.stop_details,
+                motion_published=replacement_outcome.motion_published,
+                issued_motion_permit_kinds=issued_motion_permit_kinds(replacement_outcome),
+            )
+            if (context_source_digests is not None
+                    and fresh_evidence_sha256 is not None
+                    and attempt_sha256 is not None
+                    and preflight_classification.evidence_valid
+                    and exact_route_rejection.eligible):
+                try:
+                    route_context = CandidateRuntimeRouteRejectionContext(
+                        original_identity=original_identity,
+                        runtime_base_identity=config.initial_identity,
+                        attempt=attempt,
+                        replacement_outcome=replacement_outcome,
+                        source_permit_kind=source_permit_kind,
+                        source_permit_path=source_permit_path,
+                        source_permit_sha256=source_permit_sha256,
+                        source_permit_file_sha256=context_source_digests[0],
+                        source_outcome_sha256=context_source_digests[1],
+                        fresh_localization_evidence_sha256=fresh_evidence_sha256,
+                        replacement_outcome_sha256=_evidence_sha256(replacement_outcome),
+                        attempt_sha256=attempt_sha256,
+                    )
+                except (TypeError, ValueError):
+                    pass
             _raise_replacement_preflight_failure(
                 config,
                 effects,
                 outcome=replacement_outcome,
                 reseal_index=reseal_index,
                 classification=preflight_classification,
+                route_rejection_context=route_context,
             )
         try:
             permit_path, permit_digest = _validate_runtime_permit_evidence(
@@ -1034,8 +1268,10 @@ __all__ = [
     "CandidateRuntimeRecoveryConfig",
     "CandidateRuntimeRecoveryEffects",
     "CandidateRuntimeRecoveryError",
+    "CandidateRuntimeRouteRejectionContext",
     "CandidateRuntimeRejectedOutcome",
     "execute_candidate_motion_with_runtime_recovery",
     "execute_candidate_runtime_localization_recovery",
     "recover_candidate_runtime_localization",
+    "validate_runtime_route_rejection_context",
 ]

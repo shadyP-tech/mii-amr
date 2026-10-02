@@ -35,6 +35,9 @@ from scripts.aufgabe04.navigation.missions.plan_first_detected_station import (
     validate_route_commitment_ready,
 )
 from scripts.aufgabe04.navigation.execution.route_context import build_station_route_dry_run
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+)
 
 try:  # pragma: no cover - exercised on ROS hosts.
     import rclpy
@@ -151,7 +154,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stand-radius-m", type=float, default=0.06)
     parser.add_argument("--stand-position-uncertainty-m", type=float, default=0.02)
     parser.add_argument("--robot-radius-m", type=float, default=0.105)
-    parser.add_argument("--collision-margin-m", type=float, default=0.02)
+    parser.add_argument(
+        "--collision-margin-m", type=float, default=DEFAULT_COLLISION_MARGIN_M
+    )
     parser.add_argument("--tracking-margin-m", type=float, default=0.0)
     parser.add_argument("--lidar-stop-distance-m", type=float, default=0.18)
     parser.add_argument("--scan-origin-to-base-offset-m", type=float, default=0.0)

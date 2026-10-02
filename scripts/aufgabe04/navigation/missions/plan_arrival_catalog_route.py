@@ -31,6 +31,9 @@ from scripts.aufgabe04.navigation.missions.arrival_route_graph import (  # noqa:
     selected_edges,
 )
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds  # noqa: E402
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (  # noqa: E402
+    DEFAULT_COLLISION_MARGIN_M,
+)
 from scripts.aufgabe04.navigation.planning.costmap import Costmap  # noqa: E402
 from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (  # noqa: E402
     DynamicApproachConfig,
@@ -375,7 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exact-station-limit", type=int, default=12)
     parser.add_argument("--robot-radius-m", type=float, default=0.105)
     parser.add_argument("--tracking-margin-m", type=float, default=0.03)
-    parser.add_argument("--collision-margin-m", type=float, default=0.02)
+    parser.add_argument(
+        "--collision-margin-m", type=float, default=DEFAULT_COLLISION_MARGIN_M
+    )
     parser.add_argument("--inflation-radius-m", type=float, default=None)
     parser.add_argument("--corridor-sample-spacing-m", type=float, default=0.05)
     parser.add_argument("--lidar-stop-distance-m", type=float, default=0.18)

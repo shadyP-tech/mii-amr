@@ -24,6 +24,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.foundation.arena_bounds import ArenaBounds
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+)
 from scripts.aufgabe04.navigation.coverage.axis_acquisition_feedback import (
     AXIS_ACQUISITION_FEEDBACK_CONTRACT,
     AXIS_ACQUISITION_FEEDBACK_SCHEMA_VERSION,
@@ -1190,7 +1193,9 @@ def main(argv=None) -> int:
     parser.add_argument("--arena-margin-m", type=float, default=ArenaBounds.margin_m)
     parser.add_argument("--robot-radius-m", type=float, default=0.105)
     parser.add_argument("--tracking-margin-m", type=float, default=0.03)
-    parser.add_argument("--collision-margin-m", type=float, default=0.02)
+    parser.add_argument(
+        "--collision-margin-m", type=float, default=DEFAULT_COLLISION_MARGIN_M
+    )
     parser.add_argument("--inflation-radius-m", type=float, default=None)
     parser.add_argument(
         "--known-stand-keepout",

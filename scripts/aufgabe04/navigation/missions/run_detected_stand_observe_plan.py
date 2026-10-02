@@ -18,6 +18,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.aufgabe04.navigation.foundation.models import Pose2D
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+)
 from scripts.aufgabe04.navigation.approach.dynamic_approach_planner import (
     DynamicApproachConfig,
     minimum_static_obstacle_inflation_m,
@@ -102,7 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stand-radius-m", type=float, default=0.06)
     parser.add_argument("--stand-position-uncertainty-m", type=float, default=0.02)
     parser.add_argument("--robot-radius-m", type=float, default=0.105)
-    parser.add_argument("--collision-margin-m", type=float, default=0.02)
+    parser.add_argument(
+        "--collision-margin-m", type=float, default=DEFAULT_COLLISION_MARGIN_M
+    )
     parser.add_argument("--tracking-margin-m", type=float, default=0.03)
     parser.add_argument("--lidar-stop-distance-m", type=float, default=0.20)
     parser.add_argument("--scan-origin-to-base-offset-m", type=float, default=0.0)

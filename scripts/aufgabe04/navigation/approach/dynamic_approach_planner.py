@@ -12,6 +12,9 @@ import math
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+)
 from scripts.aufgabe04.navigation.planning.costmap import CELL_SOURCE_RUN_LOCAL, Costmap
 from scripts.aufgabe04.navigation.planning.global_planner import plan_route
 from scripts.aufgabe04.navigation.foundation.models import GridCell, Pose2D
@@ -76,7 +79,7 @@ class DynamicApproachConfig:
     stand_radius_m: float = 0.06
     stand_position_uncertainty_m: float = 0.02
     robot_radius_m: float = 0.105
-    collision_margin_m: float = 0.02
+    collision_margin_m: float = DEFAULT_COLLISION_MARGIN_M
     # Maximum certified deviation of the executed robot centre from the
     # nominal planned polyline.  Dynamic stand obstacles are not part of the
     # statically inflated occupancy grid, so their nominal keepouts must carry

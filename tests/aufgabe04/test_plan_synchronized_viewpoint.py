@@ -336,7 +336,7 @@ class PlanSynchronizedViewpointTest(unittest.TestCase):
         self.assertEqual(terminal.route_hash, active.route_hash)
         self.assertAlmostEqual(
             active.manifest["safety_diagnostics"]["keepout_radius_m"],
-            0.235,
+            0.225,
         )
         self.assertEqual(route_after, route_before)
         self.assertEqual(len(catalog.records), 1)

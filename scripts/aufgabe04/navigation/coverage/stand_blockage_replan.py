@@ -24,6 +24,9 @@ import math
 from pathlib import Path
 from typing import Sequence
 
+from scripts.aufgabe04.navigation.execution.route_uncertainty_defaults import (
+    DEFAULT_COLLISION_MARGIN_M,
+)
 from scripts.aufgabe04.navigation.foundation.artifacts import (
     write_diagnostics_json,
     write_route_csv,
@@ -78,7 +81,6 @@ from scripts.aufgabe04.stations.models import Station, StationPose
 
 BLOCKAGE_REPLAN_SCHEMA_VERSION = 1
 TRANSIENT_OBSTACLE_OVERLAY_SCHEMA_VERSION = 1
-DEFAULT_COLLISION_MARGIN_M = 0.02
 DEFAULT_TRACKING_TUBE_RADIUS_M = 0.03
 DEFAULT_BLOCKER_MAX_RANGE_M = 0.70
 DEFAULT_BLOCKER_HALF_ANGLE_RAD = math.radians(70.0)

@@ -36,6 +36,8 @@ from scripts.aufgabe04.navigation.waypoint_follower.terminal_heading_budget impo
 
 
 DEFAULT_LIDAR_STOP_DISTANCE_M = 0.20
+# Keep the live emergency scan reserve independent of tunable route padding.
+DEFAULT_OMNIDIRECTIONAL_HARD_STOP_MARGIN_M = 0.02
 
 
 @dataclass(frozen=True)
@@ -290,7 +292,7 @@ def build_child_runner_command(
                 "--omnidirectional-hard-stop-distance-m",
                 str(
                     float(coverage_transient_replan["robot_radius_m"])
-                    + DEFAULT_COLLISION_MARGIN_M
+                    + DEFAULT_OMNIDIRECTIONAL_HARD_STOP_MARGIN_M
                 ),
             ]
         )

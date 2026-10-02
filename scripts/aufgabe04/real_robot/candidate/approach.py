@@ -132,6 +132,10 @@ from scripts.aufgabe04.real_robot.candidate.runtime_recovery import (
     CandidateRuntimeRecoveryAttempt,
     CandidateRuntimeRecoveryConfig,
     CandidateRuntimeRecoveryEffects,
+    CandidateRuntimeRecoveryError,
+)
+from scripts.aufgabe04.real_robot.candidate.opposite_runtime_retry import (
+    OppositeRuntimeRouteRejected, with_opposite_runtime_retry,
 )
 from scripts.aufgabe04.real_robot.candidate.recovery_dispatch import (
     execute_candidate_motion_with_recovery,
@@ -1954,13 +1958,38 @@ def _move_certified_opposite_face(
             allow_checkpoint=(epoch == 1),
         )
 
-    return with_opposite_localization_retry(
-        attempt=attempt, enabled=effects.admit_planning_frame is not None,
-        event_sink=lambda payload: effects.event_sink(
+    def event_sink(payload):
+        effects.event_sink(
             source_config.session_root / "candidate_selection.jsonl",
             {"schema_version": 1, "timestamp_unix_sec": effects.clock(),
              "candidate_uid": observation_frame.candidate.candidate_uid, **payload},
-        ),
+        )
+
+    def post_motion_attempt():
+        # An already spent reseal budget is never reset by changing route IDs.
+        # Every alternative still gets its own normal dry/live motion gates.
+        root = candidate_root / "post_motion_001"
+        root.mkdir(parents=True, exist_ok=False)
+        bounded_config = replace(source_config, max_startup_reseals_per_leg=0,
+                                 max_runtime_localization_reseals_per_leg=0)
+        return _move_certified_opposite_face_epoch(
+            observation_frame=observation_frame, observation=observation,
+            source_config=bounded_config, effects=effects, source_registry=source_registry,
+            candidate_root=root,
+            candidate_run_id=candidate_run_id + "_post_motion_001",
+            candidate_index=candidate_index, observed_view_normals=observed_view_normals,
+            allow_checkpoint=True, allow_runtime_route_retry=False,
+        )
+
+    return with_opposite_runtime_retry(
+        attempt=lambda: with_opposite_localization_retry(
+            attempt=attempt, enabled=effects.admit_planning_frame is not None,
+            event_sink=event_sink),
+        retry=post_motion_attempt,
+        enabled=(effects.admit_planning_frame is not None and source_registry is not None
+                 and observation_frame.planning_frame is not None
+                 and observation_frame.decision_binding is not None),
+        event_sink=event_sink,
     )
 
 
@@ -1976,6 +2005,7 @@ def _move_certified_opposite_face_epoch(
     candidate_index: int,
     observed_view_normals: tuple[float, ...] = (),
     allow_checkpoint: bool = False,
+    allow_runtime_route_retry: bool = True,
 ) -> _CandidateObservationFrame:
     """Execute the unchanged certified backside-to-opposite-face motion contract."""
 
@@ -2151,6 +2181,23 @@ def _move_certified_opposite_face_epoch(
                 recovery_artifact_suffix=route_attempt.artifact_suffix,
             )
             break
+        except CandidateRuntimeRecoveryError as exc:
+            if not allow_runtime_route_retry:
+                raise
+            expected_identity = CandidateRoutineIdentity(
+                session_id=opposite_config.session_id,
+                semantic_map_id=opposite_config.semantic_map_id,
+                routine_kind=MissionLegKind.OPPOSITE_FACE.value,
+                routine_index=candidate_index, target_id=candidate.candidate_uid,
+                run_id=route_attempt.run_id,
+            )
+            try:
+                scoped_rejection = OppositeRuntimeRouteRejected(
+                    exc, expected_identity=expected_identity)
+            except (OSError, TypeError, ValueError):
+                raise exc
+            # Do not continue this offsets loop: its start pose predates motion.
+            raise scoped_rejection from exc
         except CandidateStartupRecoveryError as exc:
             decision = evaluate_opposite_face_route_fallback(
                 exc,
@@ -2209,6 +2256,7 @@ def _move_certified_opposite_face_epoch(
                     candidate_run_id=candidate_run_id + "_after_checkpoint",
                     candidate_index=candidate_index, observed_view_normals=observed_view_normals,
                     allow_checkpoint=False,
+                    allow_runtime_route_retry=allow_runtime_route_retry,
                 )
 
             checkpoint_result = try_opposite_checkpoint(

@@ -110,6 +110,7 @@ def execute_candidate_motion_with_recovery(
             active_config = replace(
                 runtime_config,
                 initial_identity=replace(runtime_config.initial_identity, run_id=handoff.outcome.run_id),
+                original_identity=runtime_config.original_identity or runtime_config.initial_identity,
             )
             result = execute_candidate_runtime_localization_recovery(
                 handoff.outcome, config=active_config, effects=runtime_effects,

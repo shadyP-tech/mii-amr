@@ -130,6 +130,24 @@ class AutonomousChildRunnerRouteIdentityTest(unittest.TestCase):
             build_child_runner_command(**self._base_arguments(), dry_run=True,
                 stored_pose_tour_obstacle_monitor=True, mission_leg_evidence_kind=MissionLegKind.RETURN_TO_START)
 
+    def test_reduced_route_padding_preserves_live_scan_stop_distances(self):
+        for dry in (True, False):
+            with self.subTest(dry=dry):
+                command = build_child_runner_command(
+                    **self._base_arguments(),
+                    coverage_transient_replan=self._coverage_replan(1),
+                    dry_run=dry,
+                    uncertainty_map_yaml=Path("maps/arena.yaml"),
+                    localization_branch_proof_id="known_start",
+                    odom_execution_certificate_json=Path("session/odom_certificate.json"),
+                    uncertainty_budget_json=Path("session/uncertainty_budget.json"),
+                )
+                parsed = build_parser().parse_args(command[2:])
+                self.assertEqual(parsed.uncertainty_collision_margin_m, .01)
+                self.assertEqual(parsed.uncertainty_robot_radius_m, .105)
+                self.assertEqual(parsed.min_obstacle_distance_m, .20)
+                self.assertEqual(parsed.omnidirectional_hard_stop_distance_m, .125)
+
     def test_coverage_transient_index_does_not_select_route_artifact_leg(self):
         command = build_child_runner_command(
             **self._base_arguments(),

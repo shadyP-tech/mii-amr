@@ -494,7 +494,8 @@ class CorridorSafetyTest(unittest.TestCase):
         config = DynamicApproachConfig(tracking_margin_m=0.03)
         result = plan_dynamic_approach(base, self.start, self.stand, 0.0, config=config)
         self.assertIsNotNone(result.plan)
-        self.assertAlmostEqual(result.diagnostics.keepout_radius_m, 0.235)
+        # 60 mm stand + 20 mm uncertainty + 105 mm robot + 10 mm padding + 30 mm tracking.
+        self.assertAlmostEqual(result.diagnostics.keepout_radius_m, 0.225)
         augmented, keepout = with_dynamic_stand_keepout(base, self.stand, config)
         poses = [item.pose for item in result.plan.waypoints]
         for first, second in zip(poses, poses[1:]):
