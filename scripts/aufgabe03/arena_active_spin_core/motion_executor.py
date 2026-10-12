@@ -14,10 +14,8 @@ from .models import (
     DEFAULT_STOP_COUNT,
     DEFAULT_STOP_HZ,
     ActiveExploreMotionError,
-    CenterRepositionStep,
 )
 from .scan_safety import (
-    dynamic_lateral_heading_from_scan,
     evaluate_clearance,
     evaluate_reposition_clearance,
 )
@@ -64,7 +62,6 @@ class ActiveSpinMotionExecutor:
             if session.now() - start > session.config.max_spin_sec:
                 session.diagnostics["spin"]["timeout"] = True
                 raise RuntimeError("arena_active_spin_timeout")
-            session.publish_spin_command(publisher)
             session.rclpy.spin_once(session.node, timeout_sec=period)
             now = session.now()
             scan_age = session.fresh_scan_age_sec()
@@ -96,145 +93,10 @@ class ActiveSpinMotionExecutor:
                     raise RuntimeError("insufficient_angular_progress")
                 last_progress_time = now
                 last_progress_yaw = accumulated
+            session.publish_spin_command(publisher)
 
         raise RuntimeError("ros_shutdown_during_arena_active_spin")
 
-    def turn_to_heading(self, publisher, target_yaw_rad):
-        session = self.session
-        tolerance = math.radians(session.config.center_reposition_heading_tolerance_deg)
-        deadline = session.now() + max(
-            8.0,
-            math.pi
-            / max(0.01, abs(session.config.center_reposition_angular_speed_rad_s))
-            + 3.0,
-        )
-        period = 1.0 / session.config.control_rate_hz
-        while session.rclpy.ok() and session.now() <= deadline:
-            session.rclpy.spin_once(session.node, timeout_sec=period)
-            scan_age = session.fresh_scan_age_sec()
-            odom_age = session.fresh_odom_age_sec()
-            if scan_age is None or scan_age > session.config.max_odom_scan_age_sec:
-                raise RuntimeError("stale_scan_during_reposition_turn")
-            if odom_age is None or odom_age > session.config.max_odom_scan_age_sec:
-                raise RuntimeError("stale_odom_during_reposition_turn")
-            clearance = evaluate_clearance(session.latest_scan, session.config)
-            update_safety_minima(session.diagnostics, clearance)
-            if not clearance.ok:
-                raise RuntimeError(
-                    f"reposition_turn_clearance_failed:{clearance.reason}"
-                )
-            delta = shortest_angle_delta_rad(
-                session.latest_odom_yaw_rad,
-                target_yaw_rad,
-            )
-            if abs(delta) <= tolerance:
-                return
-            session.publish_turn_command(publisher, target_yaw_rad)
-        raise RuntimeError("center_reposition_turn_timeout")
-
-    def drive_forward(self, publisher, distance_m):
-        session = self.session
-        if session.latest_odom_pose is None:
-            raise RuntimeError("fresh_odom_unavailable_before_reposition_drive")
-        start_x = session.latest_odom_pose.x
-        start_y = session.latest_odom_pose.y
-        deadline = session.now() + max(
-            8.0,
-            distance_m
-            / max(0.01, abs(session.config.center_reposition_linear_speed_mps))
-            + 3.0,
-        )
-        period = 1.0 / session.config.control_rate_hz
-        while session.rclpy.ok() and session.now() <= deadline:
-            session.rclpy.spin_once(session.node, timeout_sec=period)
-            scan_age = session.fresh_scan_age_sec()
-            odom_age = session.fresh_odom_age_sec()
-            if scan_age is None or scan_age > session.config.max_odom_scan_age_sec:
-                raise RuntimeError("stale_scan_during_reposition_drive")
-            if odom_age is None or odom_age > session.config.max_odom_scan_age_sec:
-                raise RuntimeError("stale_odom_during_reposition_drive")
-            clearance = evaluate_reposition_clearance(session.latest_scan, session.config)
-            update_safety_minima(session.diagnostics, clearance)
-            if not clearance.ok:
-                raise RuntimeError(
-                    f"reposition_drive_clearance_failed:{clearance.reason}"
-                )
-            dx = session.latest_odom_pose.x - start_x
-            dy = session.latest_odom_pose.y - start_y
-            driven = math.hypot(dx, dy)
-            if driven >= distance_m:
-                return driven
-            session.publish_drive_command(publisher)
-        raise RuntimeError("center_reposition_drive_timeout")
-
-    def execute_center_reposition(self, publisher, action):
-        session = self.session
-        steps = list(action.steps)
-        if (
-            not steps
-            and action.odom_heading_rad is not None
-            and action.planned_distance_m is not None
-        ):
-            steps = [
-                CenterRepositionStep(
-                    kind="legacy",
-                    reason=action.reason,
-                    planned_distance_m=action.planned_distance_m,
-                    local_heading_rad=action.local_heading_rad,
-                    odom_heading_rad=action.odom_heading_rad,
-                )
-            ]
-        if not action.ok or not steps:
-            raise RuntimeError(action.reason)
-        session.wait_for_fresh_inputs()
-        session.print_reposition_prompt(action)
-        session.refresh_fresh_inputs_after_prompt()
-        clearance = evaluate_reposition_clearance(session.latest_scan, session.config)
-        update_safety_minima(session.diagnostics, clearance)
-        if not clearance.ok:
-            raise RuntimeError(
-                f"reposition_precheck_clearance_failed:{clearance.reason}"
-            )
-
-        start = session.now()
-        total_driven = 0.0
-        step_records = []
-        for index, step in enumerate(steps):
-            if index > 0:
-                session.wait_for_fresh_inputs()
-            step_start = session.now()
-            step_record = step.to_dict()
-            target_heading = step.odom_heading_rad
-            if step.dynamic_heading:
-                if session.latest_odom_yaw_rad is None:
-                    raise RuntimeError(
-                        "fresh_odom_unavailable_before_dynamic_lateral_turn"
-                    )
-                dynamic_heading = dynamic_lateral_heading_from_scan(
-                    session.latest_scan,
-                    session.latest_odom_yaw_rad,
-                )
-                target_heading = dynamic_heading["odom_heading_rad"]
-                step_record["dynamic_heading_result"] = dynamic_heading
-                step_record["odom_heading_rad"] = target_heading
-            session.turn_to_heading(publisher, target_heading)
-            stop_repeatedly(publisher, session.twist_factory, session.sleep_fn)
-            session.wait_for_fresh_inputs()
-            driven = session.drive_forward(publisher, step.planned_distance_m)
-            stop_repeatedly(publisher, session.twist_factory, session.sleep_fn)
-            total_driven += driven
-            step_records.append(
-                {
-                    **step_record,
-                    "driven_distance_m": driven,
-                    "duration_sec": session.now() - step_start,
-                }
-            )
-        record = action.to_dict()
-        record["steps"] = step_records
-        record["driven_distance_m"] = total_driven
-        record["duration_sec"] = session.now() - start
-        return record
 
     def execute_active_explore_cmd_vel(self, publisher, candidate, distance_limit_m=None):
         session = self.session

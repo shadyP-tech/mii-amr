@@ -1,9 +1,27 @@
 import csv
+import json
 import math
 import re
 from pathlib import Path
 
-from .errors import DataError
+class DataError(ValueError):
+    """Raised when measurement CSV data is missing or unusable."""
+
+
+def pose_columns(prefix):
+    return ["run_id"] + [
+        f"{prefix}_{phase}_{axis}"
+        for phase in ("start", "final")
+        for axis in ("x", "y", "yaw_deg")
+    ]
+
+
+def write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as file:
+        json.dump(data, file, indent=2)
+        file.write("\n")
 
 
 def parse_run_number(run_id):

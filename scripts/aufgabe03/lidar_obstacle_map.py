@@ -4,16 +4,13 @@ Run-local obstacle overlay and A* replanning helpers.
 
 This module is intentionally stdlib-only and ROS-free. Runtime code may convert
 sensor messages into map-frame observations, but this module only sees pure
-points/cells, composes a temporary obstacle overlay, writes artifacts, and
+points/cells, composes a temporary obstacle overlay, and
 replans with the existing A* planner. It does not modify the source map.
 """
 
 from __future__ import annotations
 
-import argparse
-import csv
 import math
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,15 +18,6 @@ from typing import Sequence
 
 import map_path_planner as planner
 from waypoint_following.models import Waypoint
-from waypoint_following.path_progress import (
-    DEFAULT_TRACKING_PATH_SMOOTHING,
-    DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
-    TRACKING_PATH_SMOOTHING_OFF,
-    TRACKING_PATH_SMOOTHING_SHORTCUT,
-)
-
-
-DEFAULT_STATIC_MAP = Path("maps/aufgabe03/arena_1p898x3p9_auto.yaml")
 DEFAULT_OUTPUT_DIR = Path("results/aufgabe03")
 
 CELL_SOURCE_STATIC_OCCUPIED = "static_occupied"
@@ -99,10 +87,6 @@ class RunLocalMapConfig:
     planner_snap_radius_m: float = planner.DEFAULT_SNAP_RADIUS_M
     max_start_snap_m: float = 0.20
     max_goal_snap_m: float = 0.30
-    tracking_path_smoothing: str = DEFAULT_TRACKING_PATH_SMOOTHING
-    tracking_path_smoothing_spacing_m: float = DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M
-
-
 @dataclass
 class RunLocalMapDiagnostics:
     total_observations: int = 0
@@ -152,20 +136,6 @@ class RunLocalPlanDiagnostics:
     old_remaining_waypoint_count: int = 0
     new_waypoint_count: int = 0
     replan_duration_sec: float | None = None
-    artifact_prefix: str = ""
-
-
-@dataclass(frozen=True)
-class RunLocalPruneResult:
-    requested_cells: int = 0
-    removed_raw_cells: int = 0
-    removed_inflated_cells: int = 0
-    raw_cells_before: int = 0
-    raw_cells_after: int = 0
-    inflated_cells_before: int = 0
-    inflated_cells_after: int = 0
-
-
 @dataclass(frozen=True)
 class ObstacleOverlayConfig:
     forward_distance_m: float = 0.55
@@ -173,23 +143,6 @@ class ObstacleOverlayConfig:
     angle_window_deg: float = 45.0
     min_range_m: float = 0.12
     robot_footprint_radius_m: float = 0.10
-    min_cluster_size: int = 3
-    min_cluster_width_m: float = 0.05
-    inflate_radius_m: float = 0.15
-    max_start_snap_m: float = 0.20
-    max_goal_snap_m: float = 0.30
-    max_replan_path_length_ratio: float = 3.0
-    min_replan_path_length_baseline_m: float = DEFAULT_MIN_REPLAN_PATH_LENGTH_BASELINE_M
-    planner_inflate_radius_m: float = 0.0
-    planner_snap_radius_m: float = planner.DEFAULT_SNAP_RADIUS_M
-    run_local_min_hit_count: int = 2
-    run_local_clearance_margin_m: float = 0.04
-    run_local_min_used_points: int = 3
-    run_local_max_rejected_ratio: float = 0.90
-    tracking_path_smoothing: str = DEFAULT_TRACKING_PATH_SMOOTHING
-    tracking_path_smoothing_spacing_m: float = DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M
-
-
 @dataclass
 class ObstacleOverlayDiagnostics:
     candidate_scan_points: int = 0
@@ -230,31 +183,12 @@ class ObstacleOverlayDiagnostics:
     run_local_initial_scan_count: int = 0
     run_local_corridor_check_distance_m: float | None = None
     run_local_inflation_radius_m: float | None = None
-    run_local_map_yaml: str = ""
-    run_local_waypoints_csv: str = ""
     run_local_cell_source_counts: dict[str, int] = field(default_factory=dict)
-    tracking_path_smoothing_mode: str = TRACKING_PATH_SMOOTHING_OFF
-    tracking_path_smoothing_status: str = TRACKING_PATH_SMOOTHING_OFF
-    tracking_path_smoothing_raw_point_count: int = 0
-    tracking_path_smoothing_smoothed_point_count: int = 0
-    tracking_path_smoothing_raw_length_m: float | None = None
-    tracking_path_smoothing_smoothed_length_m: float | None = None
-    tracking_path_smoothing_artifact: str = ""
-    tracking_path_smoothing_reason: str = ""
-
-
 @dataclass
 class ReplanResult:
     success: bool
     reason: str
     diagnostics: ObstacleOverlayDiagnostics = field(default_factory=ObstacleOverlayDiagnostics)
-    updated_map_yaml: str | None = None
-    updated_map_pgm: str | None = None
-    updated_path_csv: str | None = None
-    updated_waypoints_csv: str | None = None
-    updated_tracking_path_csv: str | None = None
-    updated_path_ppm: str | None = None
-    detected_obstacles_csv: str | None = None
     waypoints: list[tuple[int, float, float]] = field(default_factory=list)
     path_points: list[Waypoint] = field(default_factory=list)
     raw_path_points: list[Waypoint] = field(default_factory=list)
@@ -265,26 +199,6 @@ class ReplanResult:
 
 class ObstacleOverlayError(RuntimeError):
     pass
-
-
-def parse_pose(text):
-    values = [part.strip() for part in text.split(",")]
-    if len(values) != 3:
-        raise argparse.ArgumentTypeError("pose must be x,y,yaw_deg")
-    try:
-        return Pose2D(float(values[0]), float(values[1]), float(values[2]))
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("pose values must be numeric") from exc
-
-
-def finite_base_points(points: Sequence[BaseFramePoint | tuple[float, float]]):
-    result = []
-    for point in points:
-        x = float(point.x if hasattr(point, "x") else point[0])
-        y = float(point.y if hasattr(point, "y") else point[1])
-        if math.isfinite(x) and math.isfinite(y):
-            result.append(BaseFramePoint(x, y))
-    return result
 
 
 def scan_ranges_to_base_points(
@@ -308,28 +222,6 @@ def scan_ranges_to_base_points(
     return points
 
 
-def base_point_to_map(point, robot_pose):
-    yaw = math.radians(robot_pose.yaw_deg)
-    cos_yaw = math.cos(yaw)
-    sin_yaw = math.sin(yaw)
-    return (
-        robot_pose.x + cos_yaw * point.x - sin_yaw * point.y,
-        robot_pose.y + sin_yaw * point.x + cos_yaw * point.y,
-    )
-
-
-def map_point_to_base(map_x, map_y, robot_pose):
-    yaw = math.radians(robot_pose.yaw_deg)
-    dx = map_x - robot_pose.x
-    dy = map_y - robot_pose.y
-    cos_yaw = math.cos(yaw)
-    sin_yaw = math.sin(yaw)
-    return BaseFramePoint(
-        cos_yaw * dx + sin_yaw * dy,
-        -sin_yaw * dx + cos_yaw * dy,
-    )
-
-
 def base_point_passes_roi(point, config):
     distance = math.hypot(point.x, point.y)
     if point.x <= 0.0 or point.x > config.forward_distance_m:
@@ -343,14 +235,6 @@ def base_point_passes_roi(point, config):
     if distance < config.robot_footprint_radius_m:
         return False
     return True
-
-
-def cluster_width(points):
-    if not points:
-        return 0.0
-    xs = [point.x for point in points]
-    ys = [point.y for point in points]
-    return max(max(xs) - min(xs), max(ys) - min(ys))
 
 
 def inflate_cells(occupancy_map, source_cells, radius_m):
@@ -400,14 +284,6 @@ def observation_to_cell(occupancy_map, observation):
     if not (math.isfinite(observation.x_m) and math.isfinite(observation.y_m)):
         return None
     return planner.world_to_grid(observation.x_m, observation.y_m, occupancy_map.metadata)
-
-
-def map_frame_observations_from_base_points(base_points, robot_pose):
-    observations = []
-    for point in finite_base_points(base_points):
-        map_x, map_y = base_point_to_map(point, robot_pose)
-        observations.append(MapFrameObservation(map_x, map_y))
-    return observations
 
 
 class RunLocalObstacleMap:
@@ -504,38 +380,6 @@ class RunLocalObstacleMap:
             self.config.inflation_radius_m,
         )
 
-    def remove_raw_cells(self, cells):
-        requested = set(cells or ())
-        raw_before = set(self.confirmed_raw_cells)
-        inflated_before = set(self.inflated_obstacle_cells)
-        removable = raw_before.intersection(requested)
-        if not removable:
-            return RunLocalPruneResult(
-                requested_cells=len(requested),
-                raw_cells_before=len(raw_before),
-                raw_cells_after=len(raw_before),
-                inflated_cells_before=len(inflated_before),
-                inflated_cells_after=len(inflated_before),
-            )
-
-        for cell in removable:
-            self.hit_counts.pop(cell, None)
-        self.rebuild_confirmed_cells()
-        inflated_after = set(self.inflated_obstacle_cells)
-        return RunLocalPruneResult(
-            requested_cells=len(requested),
-            removed_raw_cells=len(removable),
-            removed_inflated_cells=max(0, len(inflated_before) - len(inflated_after)),
-            raw_cells_before=len(raw_before),
-            raw_cells_after=len(self.confirmed_raw_cells),
-            inflated_cells_before=len(inflated_before),
-            inflated_cells_after=len(inflated_after),
-        )
-
-    def raw_cells_in_radius(self, center_cell, radius_m):
-        disk = cells_within_radius(self.static_map, center_cell, radius_m)
-        return self.confirmed_raw_cells.intersection(disk)
-
     def raw_cells_within_world_radius(self, center_world, radius_m):
         center_x, center_y = center_world
         cells = set()
@@ -594,177 +438,6 @@ class RunLocalObstacleMap:
         return counts
 
 
-def run_local_artifact_paths(output_dir, prefix):
-    output_dir = Path(output_dir)
-    return {
-        "map_yaml": output_dir / f"{prefix}_map.yaml",
-        "map_pgm": output_dir / f"{prefix}_map.pgm",
-        "path_csv": output_dir / f"{prefix}_path.csv",
-        "waypoints_csv": output_dir / f"{prefix}_waypoints.csv",
-        "tracking_path_csv": output_dir / f"{prefix}_tracking_path.csv",
-        "path_ppm": output_dir / f"{prefix}_path.ppm",
-        "obstacles_csv": output_dir / f"{prefix}_obstacles.csv",
-    }
-
-
-def _record_tracking_path_smoothing(
-    diagnostics,
-    *,
-    mode,
-    status,
-    raw_point_count=0,
-    smoothed_point_count=0,
-    raw_length_m=None,
-    smoothed_length_m=None,
-    artifact="",
-    reason="",
-):
-    diagnostics.tracking_path_smoothing_mode = mode
-    diagnostics.tracking_path_smoothing_status = status
-    diagnostics.tracking_path_smoothing_raw_point_count = int(raw_point_count)
-    diagnostics.tracking_path_smoothing_smoothed_point_count = int(
-        smoothed_point_count,
-    )
-    diagnostics.tracking_path_smoothing_raw_length_m = raw_length_m
-    diagnostics.tracking_path_smoothing_smoothed_length_m = smoothed_length_m
-    diagnostics.tracking_path_smoothing_artifact = str(artifact or "")
-    diagnostics.tracking_path_smoothing_reason = str(reason or "")
-
-
-def tracking_path_rows_for_plan(
-    occupancy_map,
-    inflated_blocked,
-    plan,
-    artifact_path,
-    config,
-    diagnostics,
-):
-    raw_rows = planner.build_path_rows(plan.path, occupancy_map.metadata)
-    mode = getattr(
-        config,
-        "tracking_path_smoothing",
-        TRACKING_PATH_SMOOTHING_OFF,
-    )
-    if mode != TRACKING_PATH_SMOOTHING_SHORTCUT:
-        _record_tracking_path_smoothing(
-            diagnostics,
-            mode=mode,
-            status=TRACKING_PATH_SMOOTHING_OFF,
-            raw_point_count=len(plan.path),
-            smoothed_point_count=len(plan.path),
-            raw_length_m=plan.path_length_m,
-            smoothed_length_m=plan.path_length_m,
-        )
-        return raw_rows, None
-
-    try:
-        result = planner.smooth_cell_path_for_tracking(
-            occupancy_map,
-            inflated_blocked,
-            plan.path,
-            getattr(
-                config,
-                "tracking_path_smoothing_spacing_m",
-                DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
-            ),
-        )
-        rows = planner.build_world_path_rows(result.points, occupancy_map.metadata)
-        planner.write_path_csv(artifact_path, rows)
-        _record_tracking_path_smoothing(
-            diagnostics,
-            mode=mode,
-            status="smoothed",
-            raw_point_count=result.raw_point_count,
-            smoothed_point_count=result.smoothed_point_count,
-            raw_length_m=result.raw_length_m,
-            smoothed_length_m=result.smoothed_length_m,
-            artifact=artifact_path,
-        )
-        return rows, str(artifact_path)
-    except Exception as exc:
-        _record_tracking_path_smoothing(
-            diagnostics,
-            mode=mode,
-            status="fallback_raw",
-            raw_point_count=len(plan.path),
-            smoothed_point_count=len(plan.path),
-            raw_length_m=plan.path_length_m,
-            smoothed_length_m=plan.path_length_m,
-            reason=str(exc),
-        )
-        return raw_rows, None
-
-
-def write_run_local_obstacle_csv(path, run_local_map):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow([
-            "grid_x",
-            "grid_y",
-            "world_x_m",
-            "world_y_m",
-            "hit_count",
-            "cell_source",
-        ])
-        for cell in sorted(run_local_map.confirmed_raw_cells):
-            world_x, world_y = planner.grid_to_world(
-                cell[0],
-                cell[1],
-                run_local_map.static_map.metadata,
-            )
-            writer.writerow([
-                cell[0],
-                cell[1],
-                world_x,
-                world_y,
-                run_local_map.hit_counts.get(cell, 0),
-                run_local_map.cell_source(cell),
-            ])
-
-
-def render_run_local_pixels(run_local_map, planning_overlay, path, waypoints):
-    path_cells = set(path)
-    waypoint_cells = set(waypoints)
-    start = path[0] if path else None
-    goal = path[-1] if path else None
-    rows = []
-    for image_row in range(run_local_map.static_map.height):
-        row = []
-        for image_col in range(run_local_map.static_map.width):
-            grid_x, grid_y = planner.image_to_grid(
-                image_col,
-                image_row,
-                run_local_map.static_map.height,
-            )
-            cell = (grid_x, grid_y)
-            source = run_local_map.cell_source(cell)
-            if source == CELL_SOURCE_STATIC_OCCUPIED:
-                color = planner.COLOR_OCCUPIED
-            elif source == CELL_SOURCE_UNKNOWN:
-                color = planner.COLOR_UNKNOWN
-            elif source == CELL_SOURCE_RUN_LOCAL_RAW:
-                color = (230, 80, 30)
-            elif source == CELL_SOURCE_RUN_LOCAL_INFLATED:
-                color = planner.COLOR_INFLATED
-            else:
-                color = planner.COLOR_FREE
-            if cell in planning_overlay and source == CELL_SOURCE_FREE:
-                color = planner.COLOR_INFLATED
-            if cell in path_cells:
-                color = planner.COLOR_PATH
-            if cell in waypoint_cells:
-                color = planner.COLOR_WAYPOINT
-            if cell == start:
-                color = planner.COLOR_START
-            if cell == goal:
-                color = planner.COLOR_GOAL
-            row.append(color)
-        rows.append(row)
-    return rows
-
-
 def populate_overlay_diagnostics_from_run_local(target, update_diag, plan_diag=None):
     target.run_local_map_updates = update_diag.update_count
     target.run_local_scan_points_valid = update_diag.total_observations
@@ -807,11 +480,9 @@ def plan_with_run_local_map(
     old_remaining_waypoints=None,
 ):
     start_time = time.time()
-    artifact_prefix = artifact_prefix or f"{run_id}_run_local"
     overlay_diag = ObstacleOverlayDiagnostics()
     plan_diag = RunLocalPlanDiagnostics(
         update_diagnostics=run_local_map.last_update_diagnostics,
-        artifact_prefix=artifact_prefix,
     )
     try:
         start_world = (robot_pose.x, robot_pose.y)
@@ -871,32 +542,7 @@ def plan_with_run_local_map(
             ):
                 raise ObstacleOverlayError("replan_path_too_long")
 
-        paths = run_local_artifact_paths(output_dir, artifact_prefix)
-        planner.write_occupancy_map_copy(planning_map, paths["map_yaml"], paths["map_pgm"])
         path_rows = planner.build_path_rows(plan.path, planning_map.metadata)
-        planner.write_path_csv(paths["path_csv"], path_rows)
-        planner.write_path_csv(
-            paths["waypoints_csv"],
-            planner.build_path_rows(plan.waypoints, planning_map.metadata),
-        )
-        planner.write_ppm(
-            paths["path_ppm"],
-            render_run_local_pixels(
-                run_local_map,
-                planning_overlay,
-                plan.path,
-                plan.waypoints,
-            ),
-        )
-        write_run_local_obstacle_csv(paths["obstacles_csv"], run_local_map)
-        tracking_path_rows, tracking_path_csv = tracking_path_rows_for_plan(
-            planning_map,
-            inflated_blocked,
-            plan,
-            paths["tracking_path_csv"],
-            run_local_map.config,
-            overlay_diag,
-        )
         waypoint_rows = planner.build_path_rows(plan.waypoints, planning_map.metadata)
         plan_diag.replan_duration_sec = time.time() - start_time
         populate_overlay_diagnostics_from_run_local(
@@ -906,35 +552,24 @@ def plan_with_run_local_map(
         )
         overlay_diag.run_local_replan_count = 1
         overlay_diag.run_local_last_replan_reason = "run_local_replan_completed"
-        overlay_diag.updated_map_yaml = str(paths["map_yaml"])
-        overlay_diag.updated_waypoints_csv = str(paths["waypoints_csv"])
-        overlay_diag.run_local_map_yaml = str(paths["map_yaml"])
-        overlay_diag.run_local_waypoints_csv = str(paths["waypoints_csv"])
         return ReplanResult(
             success=True,
             reason="run_local_replan_completed",
             diagnostics=overlay_diag,
-            updated_map_yaml=str(paths["map_yaml"]),
-            updated_map_pgm=str(paths["map_pgm"]),
-            updated_path_csv=str(paths["path_csv"]),
-            updated_waypoints_csv=str(paths["waypoints_csv"]),
-            updated_tracking_path_csv=tracking_path_csv,
-            updated_path_ppm=str(paths["path_ppm"]),
-            detected_obstacles_csv=str(paths["obstacles_csv"]),
             waypoints=[
                 (int(row[0]), float(row[3]), float(row[4]))
                 for row in waypoint_rows
             ],
             path_points=[
                 Waypoint(int(row[0]), float(row[3]), float(row[4]))
-                for row in tracking_path_rows
+                for row in path_rows
             ],
             raw_path_points=[
                 Waypoint(int(row[0]), float(row[3]), float(row[4]))
                 for row in path_rows
             ],
             path_cells=list(plan.path),
-            inflated_obstacle_cells=set(planning_overlay),
+            inflated_obstacle_cells=set(inflated_blocked),
             run_local_map=run_local_map,
         )
     except Exception as exc:
@@ -999,7 +634,6 @@ def build_run_local_replan_result(
         goal_pose,
         run_id,
         output_dir=output_dir,
-        artifact_prefix=artifact_prefix,
         old_remaining_waypoints=old_remaining_waypoints,
     )
 
@@ -1079,62 +713,6 @@ def path_corridor_cells(
     return checked
 
 
-def build_overlay_map(occupancy_map, base_points, robot_pose, config):
-    diagnostics = ObstacleOverlayDiagnostics()
-    finite_points = finite_base_points(base_points)
-    diagnostics.candidate_scan_points = len(finite_points)
-
-    filtered_points = [
-        point for point in finite_points
-        if base_point_passes_roi(point, config)
-    ]
-    diagnostics.filtered_obstacle_points = len(filtered_points)
-    diagnostics.obstacle_cluster_width_m = cluster_width(filtered_points)
-    if len(filtered_points) < config.min_cluster_size:
-        raise ObstacleOverlayError("insufficient_obstacle_points")
-    if diagnostics.obstacle_cluster_width_m < config.min_cluster_width_m:
-        raise ObstacleOverlayError("obstacle_cluster_too_narrow")
-
-    raw_cells = set()
-    free_cells = set()
-    obstacle_rows = []
-    for point in filtered_points:
-        map_x, map_y = base_point_to_map(point, robot_pose)
-        cell = planner.world_to_grid(map_x, map_y, occupancy_map.metadata)
-        if not planner.in_bounds(occupancy_map, cell):
-            continue
-        raw_cells.add(cell)
-        cell_state = occupancy_map.cells[cell[1]][cell[0]]
-        if cell_state == planner.CELL_FREE:
-            free_cells.add(cell)
-            obstacle_rows.append([
-                point.x,
-                point.y,
-                map_x,
-                map_y,
-                cell[0],
-                cell[1],
-            ])
-
-    diagnostics.raw_obstacle_cells = len(raw_cells)
-    diagnostics.free_obstacle_cells = len(free_cells)
-    diagnostics.detected_obstacle_count = len(free_cells)
-    if not free_cells:
-        raise ObstacleOverlayError("no_obstacle_candidates")
-
-    inflated_cells = inflate_cells(occupancy_map, free_cells, config.inflate_radius_m)
-    diagnostics.inflated_cells_total = len(inflated_cells)
-    for cell in inflated_cells:
-        cell_state = occupancy_map.cells[cell[1]][cell[0]]
-        if cell_state == planner.CELL_OCCUPIED:
-            diagnostics.inflated_cells_over_static_occupied += 1
-        else:
-            diagnostics.inflated_cells_newly_occupied += 1
-
-    updated_map = planner.map_with_occupied_cells(occupancy_map, inflated_cells)
-    return updated_map, inflated_cells, obstacle_rows, diagnostics
-
-
 def waypoint_path_length_m(waypoints):
     if not waypoints or len(waypoints) < 2:
         return 0.0
@@ -1160,267 +738,3 @@ def replan_path_length_limit(old_path_length_m, max_ratio, min_baseline_m):
 def replan_path_too_long(new_path_length_m, old_path_length_m, max_ratio, min_baseline_m):
     limit = replan_path_length_limit(old_path_length_m, max_ratio, min_baseline_m)
     return limit is not None and float(new_path_length_m) > limit
-
-
-def artifact_paths(output_dir, run_id, sequence=1):
-    output_dir = Path(output_dir)
-    stem = f"{run_id}_updated_{sequence:03d}"
-    return {
-        "map_yaml": output_dir / f"{stem}_map.yaml",
-        "map_pgm": output_dir / f"{stem}_map.pgm",
-        "path_csv": output_dir / f"{stem}_path.csv",
-        "waypoints_csv": output_dir / f"{stem}_waypoints.csv",
-        "tracking_path_csv": output_dir / f"{stem}_tracking_path.csv",
-        "path_ppm": output_dir / f"{stem}_path.ppm",
-        "obstacles_csv": output_dir / f"{stem}_detected_obstacles.csv",
-    }
-
-
-def write_obstacle_csv(path, rows):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow([
-            "base_x_m",
-            "base_y_m",
-            "map_x_m",
-            "map_y_m",
-            "grid_x",
-            "grid_y",
-        ])
-        writer.writerows(rows)
-
-
-def build_replan_result(
-    static_map,
-    base_points,
-    robot_pose,
-    goal_pose,
-    run_id,
-    output_dir=DEFAULT_OUTPUT_DIR,
-    sequence=1,
-    config=None,
-    old_remaining_waypoints=None,
-):
-    start_time = time.time()
-    config = config or ObstacleOverlayConfig()
-    diagnostics = ObstacleOverlayDiagnostics()
-    try:
-        occupancy_map = (
-            static_map
-            if isinstance(static_map, planner.OccupancyMap)
-            else planner.load_occupancy_map(static_map)
-        )
-        updated_map, inflated_cells, obstacle_rows, diagnostics = build_overlay_map(
-            occupancy_map,
-            base_points,
-            robot_pose,
-            config,
-        )
-        plan, inflated_blocked, _inflation_cells = planner.plan_path(
-            updated_map,
-            (robot_pose.x, robot_pose.y),
-            (goal_pose.x, goal_pose.y),
-            inflate_radius_m=config.planner_inflate_radius_m,
-            snap_radius_m=max(config.max_start_snap_m, config.max_goal_snap_m, config.planner_snap_radius_m),
-        )
-        diagnostics.start_snap_distance_m = planner.snapped_distance_m(
-            (robot_pose.x, robot_pose.y),
-            plan.start_snapped_world,
-        )
-        diagnostics.goal_snap_distance_m = planner.snapped_distance_m(
-            (goal_pose.x, goal_pose.y),
-            plan.goal_snapped_world,
-        )
-        if diagnostics.start_snap_distance_m > config.max_start_snap_m:
-            raise ObstacleOverlayError("start_snap_distance_exceeded")
-        if diagnostics.goal_snap_distance_m > config.max_goal_snap_m:
-            raise ObstacleOverlayError("goal_snap_distance_exceeded")
-
-        diagnostics.new_path_length_m = plan.path_length_m
-        diagnostics.new_waypoint_count = len(plan.waypoints)
-        if old_remaining_waypoints is not None:
-            diagnostics.old_remaining_waypoint_count = len(old_remaining_waypoints)
-            diagnostics.old_path_length_m = waypoint_path_length_m(old_remaining_waypoints)
-            if replan_path_too_long(
-                plan.path_length_m,
-                diagnostics.old_path_length_m,
-                config.max_replan_path_length_ratio,
-                config.min_replan_path_length_baseline_m,
-            ):
-                raise ObstacleOverlayError("replan_path_too_long")
-
-        paths = artifact_paths(output_dir, run_id, sequence=sequence)
-        planner.write_occupancy_map_copy(updated_map, paths["map_yaml"], paths["map_pgm"])
-        path_rows = planner.build_path_rows(plan.path, updated_map.metadata)
-        planner.write_path_csv(paths["path_csv"], path_rows)
-        planner.write_path_csv(
-            paths["waypoints_csv"],
-            planner.build_path_rows(plan.waypoints, updated_map.metadata),
-        )
-        planner.write_ppm(
-            paths["path_ppm"],
-            planner.render_planner_pixels(
-                updated_map,
-                inflated_blocked,
-                plan.path,
-                plan.waypoints,
-            ),
-        )
-        write_obstacle_csv(paths["obstacles_csv"], obstacle_rows)
-        tracking_path_rows, tracking_path_csv = tracking_path_rows_for_plan(
-            updated_map,
-            inflated_blocked,
-            plan,
-            paths["tracking_path_csv"],
-            config,
-            diagnostics,
-        )
-        waypoint_rows = planner.build_path_rows(plan.waypoints, updated_map.metadata)
-        diagnostics.replan_duration_sec = time.time() - start_time
-        return ReplanResult(
-            success=True,
-            reason="replan_completed",
-            diagnostics=diagnostics,
-            updated_map_yaml=str(paths["map_yaml"]),
-            updated_map_pgm=str(paths["map_pgm"]),
-            updated_path_csv=str(paths["path_csv"]),
-            updated_waypoints_csv=str(paths["waypoints_csv"]),
-            updated_tracking_path_csv=tracking_path_csv,
-            updated_path_ppm=str(paths["path_ppm"]),
-            detected_obstacles_csv=str(paths["obstacles_csv"]),
-            waypoints=[
-                (int(row[0]), float(row[3]), float(row[4]))
-                for row in waypoint_rows
-            ],
-            path_points=[
-                Waypoint(int(row[0]), float(row[3]), float(row[4]))
-                for row in tracking_path_rows
-            ],
-            raw_path_points=[
-                Waypoint(int(row[0]), float(row[3]), float(row[4]))
-                for row in path_rows
-            ],
-            path_cells=list(plan.path),
-            inflated_obstacle_cells=inflated_cells,
-        )
-    except Exception as exc:
-        diagnostics.replan_duration_sec = time.time() - start_time
-        return ReplanResult(
-            success=False,
-            reason=str(exc),
-            diagnostics=diagnostics,
-        )
-
-
-def synthetic_obstacle_points(base_x, base_y, width_m, point_count):
-    if point_count <= 1:
-        return [BaseFramePoint(base_x, base_y)]
-    start_y = base_y - width_m / 2.0
-    step = width_m / float(point_count - 1)
-    return [
-        BaseFramePoint(base_x, start_y + index * step)
-        for index in range(point_count)
-    ]
-
-
-def parse_args(argv):
-    parser = argparse.ArgumentParser(
-        description="Create a one-shot LiDAR obstacle map overlay and replan artifacts.",
-    )
-    parser.add_argument("--static-map", default=DEFAULT_STATIC_MAP, type=Path)
-    parser.add_argument("--replan-output-dir", default=DEFAULT_OUTPUT_DIR, type=Path)
-    parser.add_argument("--run-id", default="synthetic_lidar_overlay_test")
-    parser.add_argument("--robot-pose", required=True, type=parse_pose)
-    parser.add_argument("--goal-pose", required=True, type=parse_pose)
-    parser.add_argument("--synthetic-obstacle-base-x", required=True, type=float)
-    parser.add_argument("--synthetic-obstacle-base-y", required=True, type=float)
-    parser.add_argument("--synthetic-obstacle-width-m", default=0.08, type=float)
-    parser.add_argument("--synthetic-obstacle-points", default=5, type=int)
-    parser.add_argument("--obstacle-forward-distance-m", default=ObstacleOverlayConfig.forward_distance_m, type=float)
-    parser.add_argument("--obstacle-forward-half-width-m", default=ObstacleOverlayConfig.forward_half_width_m, type=float)
-    parser.add_argument("--obstacle-angle-window-deg", default=ObstacleOverlayConfig.angle_window_deg, type=float)
-    parser.add_argument("--obstacle-min-range-m", default=ObstacleOverlayConfig.min_range_m, type=float)
-    parser.add_argument("--robot-footprint-radius-m", default=ObstacleOverlayConfig.robot_footprint_radius_m, type=float)
-    parser.add_argument("--obstacle-min-cluster-size", default=ObstacleOverlayConfig.min_cluster_size, type=int)
-    parser.add_argument("--obstacle-min-cluster-width-m", default=ObstacleOverlayConfig.min_cluster_width_m, type=float)
-    parser.add_argument("--obstacle-inflate-radius-m", default=ObstacleOverlayConfig.inflate_radius_m, type=float)
-    parser.add_argument(
-        "--tracking-path-smoothing",
-        default=DEFAULT_TRACKING_PATH_SMOOTHING,
-        choices=(TRACKING_PATH_SMOOTHING_OFF, TRACKING_PATH_SMOOTHING_SHORTCUT),
-    )
-    parser.add_argument(
-        "--tracking-path-smoothing-spacing-m",
-        default=DEFAULT_TRACKING_PATH_SMOOTHING_SPACING_M,
-        type=float,
-    )
-    args = parser.parse_args(argv)
-
-    positive_fields = [
-        "synthetic_obstacle_width_m",
-        "obstacle_forward_distance_m",
-        "obstacle_forward_half_width_m",
-        "obstacle_angle_window_deg",
-        "obstacle_min_range_m",
-        "robot_footprint_radius_m",
-        "obstacle_min_cluster_width_m",
-        "obstacle_inflate_radius_m",
-        "tracking_path_smoothing_spacing_m",
-    ]
-    for field in positive_fields:
-        if getattr(args, field) <= 0.0:
-            parser.error(f"--{field.replace('_', '-')} must be greater than zero")
-    if args.synthetic_obstacle_points < 1:
-        parser.error("--synthetic-obstacle-points must be >= 1")
-    if args.obstacle_min_cluster_size < 1:
-        parser.error("--obstacle-min-cluster-size must be >= 1")
-    return args
-
-
-def main(argv=None):
-    args = parse_args(argv if argv is not None else sys.argv[1:])
-    config = ObstacleOverlayConfig(
-        forward_distance_m=args.obstacle_forward_distance_m,
-        forward_half_width_m=args.obstacle_forward_half_width_m,
-        angle_window_deg=args.obstacle_angle_window_deg,
-        min_range_m=args.obstacle_min_range_m,
-        robot_footprint_radius_m=args.robot_footprint_radius_m,
-        min_cluster_size=args.obstacle_min_cluster_size,
-        min_cluster_width_m=args.obstacle_min_cluster_width_m,
-        inflate_radius_m=args.obstacle_inflate_radius_m,
-        tracking_path_smoothing=args.tracking_path_smoothing,
-        tracking_path_smoothing_spacing_m=args.tracking_path_smoothing_spacing_m,
-    )
-    points = synthetic_obstacle_points(
-        args.synthetic_obstacle_base_x,
-        args.synthetic_obstacle_base_y,
-        args.synthetic_obstacle_width_m,
-        args.synthetic_obstacle_points,
-    )
-    result = build_replan_result(
-        args.static_map,
-        points,
-        args.robot_pose,
-        args.goal_pose,
-        args.run_id,
-        output_dir=args.replan_output_dir,
-        config=config,
-    )
-    print(f"Status: {'completed' if result.success else 'failed'}")
-    print(f"Reason: {result.reason}")
-    print(f"Detected obstacle cells: {result.diagnostics.detected_obstacle_count}")
-    print(f"Filtered obstacle points: {result.diagnostics.filtered_obstacle_points}")
-    if result.success:
-        print(f"Updated map YAML: {result.updated_map_yaml}")
-        print(f"Updated waypoint CSV: {result.updated_waypoints_csv}")
-        if result.updated_tracking_path_csv:
-            print(f"Updated tracking path CSV: {result.updated_tracking_path_csv}")
-        print(f"Updated path PPM: {result.updated_path_ppm}")
-        return 0
-    return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

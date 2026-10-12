@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 
 import argparse
-import csv
 import json
 import math
-import os
 import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-try:
-    import rclpy
-    from rclpy.node import Node
-    from geometry_msgs.msg import Twist
-    from nav_msgs.msg import Odometry
-except ImportError:
-    rclpy = None
-    Node = object
-    Twist = None
-    Odometry = object
+if __package__:
+    from .motion import (
+        DriveNode, append_csv_row, close_motion_node, odom_to_xy_yaw,
+        pose_columns, pose_fields, rclpy, read_tracker_pose, shortest_angle_delta_deg,
+    )
+else:
+    from motion import (
+        DriveNode, append_csv_row, close_motion_node, odom_to_xy_yaw,
+        pose_columns, pose_fields, rclpy, read_tracker_pose, shortest_angle_delta_deg,
+    )
+
 
 
 DEFAULT_PREDICTION_FILE = Path("results/aufgabe02/supervisor_route_prediction.json")
@@ -40,123 +39,17 @@ COMMAND_PERIOD_SEC = 0.05
 ACTION_RE = re.compile(r"^(F|CW|CCW)([0-9]+(?:p[0-9]+)?(?:\.[0-9]+)?)$")
 COMPARISON_FRAME = "model_mirror_y"
 
-LEGACY_CSV_HEADER = [
-    "timestamp",
-    "run_id",
-    "prediction_file",
-    "actions",
-    "num_actions",
-    "nominal_final_x",
-    "nominal_final_y",
-    "predicted_final_x",
-    "predicted_final_y",
-    "predicted_final_yaw_deg",
-    "tracker_final_timestamp",
-    "tracker_final_x",
-    "tracker_final_y",
-    "tracker_final_yaw_deg",
-    "tracker_error_dx",
-    "tracker_error_dy",
-    "tracker_error_m",
-    "tracker_yaw_error_deg",
-    "odom_start_x",
-    "odom_start_y",
-    "odom_start_yaw_deg",
-    "odom_final_x",
-    "odom_final_y",
-    "odom_final_yaw_deg",
-    "odom_dx",
-    "odom_dy",
-    "odom_distance_m",
-    "linear_speed_mps",
-    "angular_speed_radps",
-    "notes",
-]
-
-CSV_HEADER_V1 = [
-    "timestamp",
-    "run_id",
-    "prediction_file",
-    "actions",
-    "num_actions",
-    "nominal_final_x",
-    "nominal_final_y",
-    "predicted_final_x",
-    "predicted_final_y",
-    "predicted_final_yaw_deg",
-    "comparison_frame",
-    "tracker_final_timestamp",
-    "tracker_final_x",
-    "tracker_final_y",
-    "tracker_final_yaw_deg",
-    "tracker_final_x_model",
-    "tracker_final_y_model",
-    "tracker_final_yaw_model_deg",
-    "tracker_error_dx",
-    "tracker_error_dy",
-    "tracker_error_m",
-    "tracker_yaw_error_deg",
-    "odom_start_x",
-    "odom_start_y",
-    "odom_start_yaw_deg",
-    "odom_final_x",
-    "odom_final_y",
-    "odom_final_yaw_deg",
-    "odom_final_x_model",
-    "odom_final_y_model",
-    "odom_final_yaw_model_deg",
-    "odom_dx",
-    "odom_dy",
-    "odom_distance_m",
-    "linear_speed_mps",
-    "angular_speed_radps",
-    "notes",
-]
-
 CSV_HEADER = [
-    "timestamp",
-    "run_id",
-    "prediction_file",
-    "actions",
-    "model_actions",
-    "num_actions",
-    "nominal_final_x",
-    "nominal_final_y",
-    "predicted_final_x",
-    "predicted_final_y",
-    "predicted_final_yaw_deg",
-    "comparison_frame",
-    "tracker_final_timestamp",
-    "tracker_final_x",
-    "tracker_final_y",
-    "tracker_final_yaw_deg",
-    "tracker_final_x_model",
-    "tracker_final_y_model",
-    "tracker_final_yaw_model_deg",
-    "tracker_error_dx",
-    "tracker_error_dy",
-    "tracker_error_m",
-    "tracker_yaw_error_deg",
-    "odom_start_x",
-    "odom_start_y",
-    "odom_start_yaw_deg",
-    "odom_final_x",
-    "odom_final_y",
-    "odom_final_yaw_deg",
-    "odom_final_x_model",
-    "odom_final_y_model",
-    "odom_final_yaw_model_deg",
-    "odom_dx",
-    "odom_dy",
-    "odom_distance_m",
-    "linear_speed_mps",
-    "angular_speed_radps",
-    "notes",
+    "timestamp", "run_id", "prediction_file", "actions", "model_actions", "num_actions",
+    "nominal_final_x", "nominal_final_y", "predicted_final_x", "predicted_final_y",
+    "predicted_final_yaw_deg", "comparison_frame", "tracker_final_timestamp",
+    *pose_columns("tracker_final"),
+    "tracker_final_x_model", "tracker_final_y_model", "tracker_final_yaw_model_deg",
+    "tracker_error_dx", "tracker_error_dy", "tracker_error_m", "tracker_yaw_error_deg",
+    *pose_columns("odom_start"), *pose_columns("odom_final"),
+    "odom_final_x_model", "odom_final_y_model", "odom_final_yaw_model_deg",
+    "odom_dx", "odom_dy", "odom_distance_m", "linear_speed_mps", "angular_speed_radps", "notes",
 ]
-
-
-def shortest_angle_delta_deg(start_deg, end_deg):
-    return (end_deg - start_deg + 180.0) % 360.0 - 180.0
 
 
 def normalize_angle_deg(angle_deg):
@@ -175,8 +68,8 @@ def parse_action(action):
 
     kind, amount_text = match.groups()
     amount = parse_action_number(amount_text)
-    if amount <= 0.0:
-        raise ValueError(f"action amount must be positive: {action!r}")
+    if not math.isfinite(amount) or amount <= 0.0:
+        raise ValueError(f"action amount must be finite and positive: {action!r}")
 
     if kind == "F":
         return {
@@ -195,27 +88,6 @@ def parse_action(action):
 
 def parse_actions(actions):
     return [parse_action(action) for action in actions]
-
-
-def mirror_action_label(action):
-    parsed = parse_action(action)
-    raw = parsed["raw"]
-    if raw.startswith("F"):
-        return raw
-    match = ACTION_RE.match(raw)
-    _kind, amount_text = match.groups()
-    amount = parse_action_number(amount_text)
-    if math.isclose(amount % 360.0, 180.0, abs_tol=1e-9):
-        return "CCW" + amount_text
-    if raw.startswith("CW"):
-        return "CCW" + raw[2:]
-    if raw.startswith("CCW"):
-        return "CW" + raw[3:]
-    return raw
-
-
-def mirror_action_labels(actions):
-    return [mirror_action_label(action) for action in actions]
 
 
 def normalized_action_labels(actions):
@@ -261,67 +133,6 @@ def load_prediction(path):
     }
 
 
-def odom_to_xy_yaw(msg):
-    if msg is None:
-        return None
-
-    p = msg.pose.pose.position
-    q = msg.pose.pose.orientation
-
-    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    return {
-        "x": p.x,
-        "y": p.y,
-        "yaw_deg": math.degrees(yaw),
-    }
-
-
-def read_tracker_pose(path=DEFAULT_TRACKER_POSE_FILE, min_mtime=None):
-    path = Path(path)
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return None
-
-    if min_mtime is not None and stat.st_mtime < min_mtime:
-        return None
-
-    with path.open(newline="") as f:
-        rows = list(csv.DictReader(f))
-
-    if not rows:
-        return None
-
-    row = rows[-1]
-    valid_pose = row.get("valid_pose")
-    if valid_pose is not None and valid_pose.strip().lower() not in {"1", "true"}:
-        return None
-
-    try:
-        num_detected = int(float(row.get("num_detected", 0) or 0))
-        pose = {
-            "timestamp": row.get("timestamp", ""),
-            "x": float(row["x"]),
-            "y": float(row["y"]),
-            "yaw_deg": float(row["yaw_deg"]),
-            "file_mtime": stat.st_mtime,
-            "num_detected": num_detected,
-        }
-    except (KeyError, TypeError, ValueError):
-        return None
-
-    if num_detected < 3:
-        return None
-
-    if not all(math.isfinite(pose[key]) for key in ("x", "y", "yaw_deg")):
-        return None
-
-    return pose
-
-
 def wait_for_tracker_pose(path, timeout_sec, min_mtime):
     deadline = time.time() + timeout_sec
 
@@ -332,12 +143,6 @@ def wait_for_tracker_pose(path, timeout_sec, min_mtime):
         time.sleep(0.25)
 
     return None
-
-
-def pose_fields(pose):
-    if pose is None:
-        return ["", "", ""]
-    return [pose["x"], pose["y"], pose["yaw_deg"]]
 
 
 def model_frame_pose(pose):
@@ -376,111 +181,6 @@ def tracker_error(prediction, tracker_final):
         yaw_error = shortest_angle_delta_deg(predicted_yaw, tracker_final["yaw_deg"])
 
     return dx, dy, error_m, yaw_error
-
-
-def migrate_legacy_results_file(path):
-    with path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    migrated = []
-    for row in rows:
-        tracker_final = row_pose(row, "tracker_final")
-        tracker_model = model_frame_pose(tracker_final)
-        odom_final = row_pose(row, "odom_final")
-        odom_model = model_frame_pose(odom_final)
-
-        upgraded = {field: row.get(field, "") for field in CSV_HEADER}
-        upgraded["comparison_frame"] = COMPARISON_FRAME
-        if not upgraded["model_actions"] and row.get("actions"):
-            upgraded["model_actions"] = ",".join(
-                mirror_action_labels(row["actions"].split(","))
-            )
-        fill_pose_fields(upgraded, "tracker_final", tracker_final)
-        fill_pose_fields(upgraded, "tracker_final", tracker_model, suffix="_model")
-        fill_pose_fields(upgraded, "odom_final", odom_final)
-        fill_pose_fields(upgraded, "odom_final", odom_model, suffix="_model")
-        recompute_tracker_error(upgraded)
-        migrated.append(upgraded)
-
-    tmp_path = path.with_suffix(".tmp")
-    with tmp_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
-        writer.writeheader()
-        writer.writerows(migrated)
-    tmp_path.replace(path)
-
-
-def row_pose(row, prefix):
-    try:
-        x = float(row[f"{prefix}_x"])
-        y = float(row[f"{prefix}_y"])
-        yaw = float(row[f"{prefix}_yaw_deg"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if not all(math.isfinite(value) for value in (x, y, yaw)):
-        return None
-    return {"x": x, "y": y, "yaw_deg": yaw}
-
-
-def fill_pose_fields(row, prefix, pose, suffix=""):
-    if pose is None:
-        return
-    row[f"{prefix}_x{suffix}"] = pose["x"]
-    row[f"{prefix}_y{suffix}"] = pose["y"]
-    row[f"{prefix}_yaw{suffix}_deg"] = pose["yaw_deg"]
-
-
-def recompute_tracker_error(row):
-    try:
-        predicted = {
-            "predicted_final": [
-                float(row["predicted_final_x"]),
-                float(row["predicted_final_y"]),
-            ],
-            "predicted_final_yaw_deg": float(row["predicted_final_yaw_deg"]),
-        }
-        tracker_final = {
-            "x": float(row["tracker_final_x_model"]),
-            "y": float(row["tracker_final_y_model"]),
-            "yaw_deg": float(row["tracker_final_yaw_model_deg"]),
-        }
-    except (KeyError, TypeError, ValueError):
-        row["tracker_error_dx"] = ""
-        row["tracker_error_dy"] = ""
-        row["tracker_error_m"] = ""
-        row["tracker_yaw_error_deg"] = ""
-        return
-
-    dx, dy, error_m, yaw_error = tracker_error(predicted, tracker_final)
-    row["tracker_error_dx"] = dx
-    row["tracker_error_dy"] = dy
-    row["tracker_error_m"] = error_m
-    row["tracker_yaw_error_deg"] = yaw_error
-
-
-def append_csv_row(path, header, row):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = path.exists() and path.stat().st_size > 0
-
-    if file_exists:
-        with path.open(newline="") as f:
-            existing_header = next(csv.reader(f), None)
-        if existing_header != header:
-            if existing_header in (LEGACY_CSV_HEADER, CSV_HEADER_V1):
-                migrate_legacy_results_file(path)
-            else:
-                raise RuntimeError(
-                    f"{path} has an unrecognized schema. Move or migrate it before "
-                    "appending supervisor validation results."
-                )
-
-    with path.open("a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(header)
-        writer.writerow(row)
 
 
 def build_result_row(
@@ -539,48 +239,9 @@ def build_result_row(
     ]
 
 
-class SupervisorRouteValidationNode(Node):
+class SupervisorRouteValidationNode(DriveNode):
     def __init__(self):
-        if rclpy is None:
-            raise RuntimeError(
-                "ROS 2 Python modules are unavailable. Source ROS 2 Humble before "
-                "running the validation route."
-            )
-
-        super().__init__("supervisor_route_validation")
-        self.last_odom = None
-        self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.sub = self.create_subscription(
-            Odometry,
-            "/odom",
-            self.odom_callback,
-            10,
-        )
-        time.sleep(1.0)
-
-    def odom_callback(self, msg):
-        self.last_odom = msg
-
-    def wait_for_odom(self, timeout_sec=5.0):
-        start = time.time()
-        while rclpy.ok() and self.last_odom is None:
-            if time.time() - start > timeout_sec:
-                return None
-            rclpy.spin_once(self, timeout_sec=0.1)
-        return self.last_odom
-
-    def publish_velocity(self, linear_x, angular_z):
-        msg = Twist()
-        msg.linear.x = linear_x
-        msg.angular.z = angular_z
-        self.pub.publish(msg)
-
-    def stop(self):
-        msg = Twist()
-        for _ in range(10):
-            if rclpy.ok():
-                self.pub.publish(msg)
-            time.sleep(0.05)
+        super().__init__(node_name="supervisor_route_validation")
 
     def drive_forward(self, distance_m, speed_mps, tolerance_m):
         start_msg = self.wait_for_odom()
@@ -590,8 +251,9 @@ class SupervisorRouteValidationNode(Node):
         start_pose = odom_to_xy_yaw(start_msg)
         start_yaw_rad = math.radians(start_pose["yaw_deg"])
         timeout_sec = distance_m / speed_mps + DEFAULT_FORWARD_TIMEOUT_MARGIN_SEC
+        if not math.isfinite(timeout_sec):
+            raise RuntimeError("Forward primitive timeout must be finite.")
         start_time = time.time()
-        last_log_time = start_time
 
         while rclpy.ok():
             current_pose = odom_to_xy_yaw(self.last_odom)
@@ -610,12 +272,6 @@ class SupervisorRouteValidationNode(Node):
                     "Timed out during forward primitive: "
                     f"progress={progress_m:.3f} m, target={distance_m:.3f} m"
                 )
-
-            if time.time() - last_log_time >= 2.0:
-                self.get_logger().info(
-                    f"Forward progress {progress_m:.3f}/{distance_m:.3f} m"
-                )
-                last_log_time = time.time()
 
             self.publish_velocity(speed_mps, 0.0)
             rclpy.spin_once(self, timeout_sec=COMMAND_PERIOD_SEC)
@@ -638,8 +294,9 @@ class SupervisorRouteValidationNode(Node):
             math.radians(target_abs) / abs(angular_speed_radps)
             + DEFAULT_ROTATION_TIMEOUT_MARGIN_SEC
         )
+        if not math.isfinite(timeout_sec):
+            raise RuntimeError("Rotation primitive timeout must be finite.")
         start_time = time.time()
-        last_log_time = start_time
 
         while rclpy.ok():
             current_pose = odom_to_xy_yaw(self.last_odom)
@@ -647,7 +304,7 @@ class SupervisorRouteValidationNode(Node):
             accumulated_deg += shortest_angle_delta_deg(previous_yaw, current_yaw)
             previous_yaw = current_yaw
 
-            if abs(accumulated_deg) >= target_abs - tolerance_deg:
+            if sign * accumulated_deg >= target_abs - tolerance_deg:
                 self.stop()
                 return
 
@@ -658,12 +315,6 @@ class SupervisorRouteValidationNode(Node):
                     "Timed out during rotation primitive: "
                     f"progress={accumulated_deg:.1f} deg, target={angle_deg:.1f} deg"
                 )
-
-            if time.time() - last_log_time >= 2.0:
-                self.get_logger().info(
-                    f"Rotation progress {accumulated_deg:.1f}/{angle_deg:.1f} deg"
-                )
-                last_log_time = time.time()
 
             self.publish_velocity(0.0, angular_z)
             rclpy.spin_once(self, timeout_sec=COMMAND_PERIOD_SEC)
@@ -742,100 +393,40 @@ def print_dry_run(prediction, args):
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(
-        description="Run the real supervisor-route validation experiment.",
-    )
+    parser = argparse.ArgumentParser(description="Run the real supervisor route.")
     parser.add_argument("run_id_arg", nargs="?", help="Optional run ID.")
     parser.add_argument("--run-id", help="Run ID for CSV and bag association.")
-    parser.add_argument(
-        "--prediction",
-        default=DEFAULT_PREDICTION_FILE,
-        type=Path,
-        help="Supervisor route prediction JSON.",
-    )
-    parser.add_argument(
-        "--results-csv",
-        default=DEFAULT_RESULTS_CSV,
-        type=Path,
-        help="CSV file for validation rows.",
-    )
-    parser.add_argument(
-        "--tracker-pose-file",
-        default=DEFAULT_TRACKER_POSE_FILE,
-        type=Path,
-        help="latest_tracker_pose.csv path visible on this host.",
-    )
-    parser.add_argument(
-        "--linear-speed",
-        default=DEFAULT_LINEAR_SPEED_MPS,
-        type=float,
-        help="Forward command speed in m/s.",
-    )
-    parser.add_argument(
-        "--angular-speed",
-        default=DEFAULT_ANGULAR_SPEED_RADPS,
-        type=float,
-        help="Absolute angular command speed in rad/s.",
-    )
-    parser.add_argument(
-        "--settle-sec",
-        default=DEFAULT_SETTLE_SEC,
-        type=float,
-        help="Pause after each primitive.",
-    )
-    parser.add_argument(
-        "--forward-tolerance-m",
-        default=DEFAULT_FORWARD_TOLERANCE_M,
-        type=float,
-        help="Odometry tolerance for forward primitives.",
-    )
-    parser.add_argument(
-        "--rotation-tolerance-deg",
-        default=DEFAULT_ROTATION_TOLERANCE_DEG,
-        type=float,
-        help="Odometry tolerance for rotation primitives.",
-    )
-    parser.add_argument(
-        "--final-tracker-timeout-sec",
-        default=DEFAULT_FINAL_TRACKER_TIMEOUT_SEC,
-        type=float,
-        help="Time to wait for a fresh valid final tracker pose.",
-    )
-    parser.add_argument(
-        "--skip-final-tracker",
-        action="store_true",
-        help="Do not wait for final tracker pose; write blank tracker fields.",
-    )
-    parser.add_argument(
-        "--notes",
-        default="supervisor_route_validation",
-        help="Notes value written to the validation CSV.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print the route and exit without ROS or /cmd_vel.",
-    )
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="Skip interactive safety confirmation.",
-    )
+    for option, default in (
+        ("prediction", DEFAULT_PREDICTION_FILE),
+        ("results-csv", DEFAULT_RESULTS_CSV),
+        ("tracker-pose-file", DEFAULT_TRACKER_POSE_FILE),
+    ):
+        parser.add_argument("--" + option, type=Path, default=default)
+    numeric_defaults = {
+        "linear-speed": DEFAULT_LINEAR_SPEED_MPS,
+        "angular-speed": DEFAULT_ANGULAR_SPEED_RADPS,
+        "settle-sec": DEFAULT_SETTLE_SEC,
+        "forward-tolerance-m": DEFAULT_FORWARD_TOLERANCE_M,
+        "rotation-tolerance-deg": DEFAULT_ROTATION_TOLERANCE_DEG,
+        "final-tracker-timeout-sec": DEFAULT_FINAL_TRACKER_TIMEOUT_SEC,
+    }
+    for option, default in numeric_defaults.items():
+        parser.add_argument("--" + option, type=float, default=default)
+    parser.add_argument("--skip-final-tracker", action="store_true", help="Write blank tracker fields.")
+    parser.add_argument("--notes", default="supervisor_route_validation")
+    parser.add_argument("--dry-run", action="store_true", help="Print route without ROS or motion.")
+    parser.add_argument("--yes", action="store_true", help="Skip interactive RUN confirmation.")
     args = parser.parse_args(argv)
-
-    args.run_id = args.run_id or args.run_id_arg
-    if not args.run_id:
-        args.run_id = datetime.now().strftime("supervisor_validation_%Y%m%d_%H%M%S")
-
-    if args.linear_speed <= 0.0:
-        parser.error("--linear-speed must be greater than zero")
-    if args.angular_speed <= 0.0:
-        parser.error("--angular-speed must be greater than zero")
-    if args.settle_sec < 0.0:
-        parser.error("--settle-sec must be non-negative")
-    if args.final_tracker_timeout_sec < 0.0:
-        parser.error("--final-tracker-timeout-sec must be non-negative")
-
+    args.run_id = args.run_id or args.run_id_arg or datetime.now().strftime("supervisor_validation_%Y%m%d_%H%M%S")
+    for option in numeric_defaults:
+        value = getattr(args, option.replace("-", "_"))
+        if not math.isfinite(value):
+            parser.error(f"--{option} must be finite")
+        if option in {"linear-speed", "angular-speed"}:
+            if value <= 0.0:
+                parser.error(f"--{option} must be greater than zero")
+        elif value < 0.0:
+            parser.error(f"--{option} must be non-negative")
     return args
 
 
@@ -870,13 +461,7 @@ def main(argv=None):
     tracker_final = None
 
     try:
-        node.get_logger().info(f"Starting supervisor validation run: {args.run_id}")
-        node.get_logger().info(
-            "Predicted final: "
-            f"x={prediction['predicted_final'][0]:.3f} m, "
-            f"y={prediction['predicted_final'][1]:.3f} m"
-        )
-        node.get_logger().info("Waiting for initial odometry...")
+        node.get_logger().info(f"{args.run_id}: {','.join(prediction['actions'])}")
         odom_start_msg = node.wait_for_odom()
         if odom_start_msg is None:
             raise RuntimeError("No initial /odom sample was received.")
@@ -915,13 +500,6 @@ def main(argv=None):
                     "Check that vision_tracker/main.py is running and that "
                     "results/aufgabe02/latest_tracker_pose.csv is visible on this host."
                 )
-            else:
-                node.get_logger().info(
-                    "Final tracker pose: "
-                    f"x={tracker_final['x']:.3f} m, "
-                    f"y={tracker_final['y']:.3f} m, "
-                    f"yaw={tracker_final['yaw_deg']:.1f} deg"
-                )
 
         row = build_result_row(
             args.run_id,
@@ -942,24 +520,14 @@ def main(argv=None):
 
     except KeyboardInterrupt:
         print("Interrupted. Sending stop command...")
-        try:
-            node.stop()
-        except Exception:
-            pass
         return 130
 
     except RuntimeError as exc:
         node.get_logger().error(str(exc))
-        try:
-            node.stop()
-        except Exception:
-            pass
         return 1
 
     finally:
-        if rclpy.ok():
-            node.destroy_node()
-            rclpy.shutdown()
+        close_motion_node(node, rclpy)
 
     return 0
 

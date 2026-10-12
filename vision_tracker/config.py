@@ -59,5 +59,3 @@ WORLD_RECT_METERS = np.array(
     ],
     dtype=np.float32,
 )
-
-DEBUG_CONTOURS = False

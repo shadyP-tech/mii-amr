@@ -1,16 +1,6 @@
-#!/usr/bin/env python3
-"""
-ROS-facing orchestration for run-local obstacle replanning.
-
-This module stops motion, reads fresh scan/TF state, converts sensor endpoints
-into map-frame observations, and delegates all map/replan work to the ROS-free
-lidar_obstacle_map module. It intentionally does not implement waypoint control.
-"""
-
-from __future__ import annotations
+"""Stopped, fresh-scan, timestamped-TF orchestration for run-local A* replans."""
 
 import math
-import copy
 import time
 
 try:
@@ -19,7 +9,6 @@ except ImportError:
     Time = None
 
 import lidar_obstacle_map
-
 
 FRESH_SCAN_STAMP_SLACK_SEC = 0.25
 
@@ -30,153 +19,70 @@ def stamp_to_sec(stamp):
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
 
+def scan_stamp_sec(scan):
+    return stamp_to_sec(getattr(getattr(scan, "header", None), "stamp", None))
+
+
+def now_sec(node):
+    return node.now_sec() if hasattr(node, "now_sec") else time.time()
+
+
 def time_from_stamp(stamp):
-    if Time is None:
-        return stamp
-    return Time.from_msg(stamp)
-
-
-def latest_time():
-    if Time is None:
-        return None
-    return Time()
+    return Time.from_msg(stamp) if Time is not None else stamp
 
 
 def yaw_from_quaternion(qx, qy, qz, qw):
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return math.atan2(siny_cosp, cosy_cosp)
-
-
-def transform_yaw_rad(transform):
-    rotation = transform.transform.rotation
-    return yaw_from_quaternion(rotation.x, rotation.y, rotation.z, rotation.w)
+    if not all(math.isfinite(value) for value in (qx, qy, qz, qw)):
+        raise RuntimeError("non-finite scan transform rotation")
+    if abs(qx * qx + qy * qy + qz * qz + qw * qw - 1.0) > 0.1:
+        raise RuntimeError("invalid scan transform quaternion")
+    return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
 
 def transform_point_2d(transform, x, y):
+    rotation = transform.transform.rotation
     translation = transform.transform.translation
-    yaw = transform_yaw_rad(transform)
-    cos_yaw = math.cos(yaw)
-    sin_yaw = math.sin(yaw)
-    return (
-        float(translation.x) + cos_yaw * x - sin_yaw * y,
-        float(translation.y) + sin_yaw * x + cos_yaw * y,
-    )
+    yaw = yaw_from_quaternion(rotation.x, rotation.y, rotation.z, rotation.w)
+    result = (float(translation.x) + math.cos(yaw) * x - math.sin(yaw) * y,
+              float(translation.y) + math.sin(yaw) * x + math.cos(yaw) * y)
+    if not all(math.isfinite(value) for value in result):
+        raise RuntimeError("non-finite scan transform position")
+    return result
 
 
 def scan_frame_points(scan):
     return lidar_obstacle_map.scan_ranges_to_base_points(
-        scan.ranges,
-        scan.angle_min,
-        scan.angle_increment,
-        scan.range_min,
-        scan.range_max,
+        scan.ranges, scan.angle_min, scan.angle_increment, scan.range_min, scan.range_max,
     )
 
 
-def scan_points_to_map_observations(scan, map_from_scan_transform, base_filter_config=None):
+def scan_points_to_map_observations(scan, map_from_scan_transform, base_filter_config=None,
+                                    base_from_scan_transform=None):
     observations = []
-    for scan_point in scan_frame_points(scan):
-        if (
-            base_filter_config is not None
-            and not lidar_obstacle_map.base_point_passes_roi(scan_point, base_filter_config)
-        ):
-            continue
-        map_x, map_y = transform_point_2d(
-            map_from_scan_transform,
-            scan_point.x,
-            scan_point.y,
-        )
-        observations.append(lidar_obstacle_map.MapFrameObservation(
-            map_x,
-            map_y,
-            stamp_sec=stamp_to_sec(scan.header.stamp),
-        ))
+    for point in scan_frame_points(scan):
+        if base_filter_config is not None:
+            if base_from_scan_transform is None:
+                raise RuntimeError("forward obstacle ROI requires timestamped laser-to-base TF")
+            base_x, base_y = transform_point_2d(base_from_scan_transform, point.x, point.y)
+            base_point = lidar_obstacle_map.BaseFramePoint(base_x, base_y)
+            if not lidar_obstacle_map.base_point_passes_roi(base_point, base_filter_config):
+                continue
+        x, y = transform_point_2d(map_from_scan_transform, point.x, point.y)
+        observations.append(lidar_obstacle_map.MapFrameObservation(x, y, stamp_sec=scan_stamp_sec(scan)))
     return observations
 
 
-def scan_points_to_base_frame(scan, map_from_scan_transform, robot_pose):
-    base_points = []
-    for scan_point in scan_frame_points(scan):
-        map_x, map_y = transform_point_2d(
-            map_from_scan_transform,
-            scan_point.x,
-            scan_point.y,
-        )
-        base_points.append(lidar_obstacle_map.map_point_to_base(
-            map_x,
-            map_y,
-            robot_pose,
-        ))
-    return base_points
-
-
-def unique_non_empty_frames(frames):
-    unique = []
-    for frame in frames:
-        if not frame:
-            continue
-        if frame not in unique:
-            unique.append(frame)
-    return unique
-
-
-def scan_tf_candidate_frames(node, args, scan_frame):
-    return unique_non_empty_frames([
-        scan_frame,
-        getattr(node, "base_frame_used", ""),
-        getattr(args, "base_frame", ""),
-        getattr(args, "fallback_base_frame", ""),
-    ])
-
-
-def lookup_transform_timestamped_or_latest(node, args, source_frame, stamp):
-    try:
-        transform = node.tf_buffer.lookup_transform(
-            args.map_frame,
-            source_frame,
-            time_from_stamp(stamp),
-        )
-        return transform, "timestamped"
-    except Exception as timestamped_exc:
-        if not args.allow_latest_tf_replan_fallback:
-            raise RuntimeError(
-                "timestamped TF lookup failed for LiDAR replan: "
-                f"{timestamped_exc}"
-            ) from timestamped_exc
-        try:
-            transform = node.tf_buffer.lookup_transform(
-                args.map_frame,
-                source_frame,
-                latest_time(),
-            )
-        except Exception as latest_exc:
-            raise RuntimeError(
-                "latest TF fallback failed for LiDAR replan: "
-                f"timestamped={timestamped_exc}; latest={latest_exc}"
-            ) from latest_exc
-        return transform, "latest_fallback"
-
-
 def lookup_map_from_scan_transform(node, args, scan):
-    scan_frame = getattr(scan.header, "frame_id", "")
-    if not scan_frame:
+    frame = getattr(scan.header, "frame_id", "")
+    if not frame:
         raise RuntimeError("scan frame is empty")
-    errors = []
-    for frame in scan_tf_candidate_frames(node, args, scan_frame):
-        try:
-            transform, lookup_mode = lookup_transform_timestamped_or_latest(
-                node,
-                args,
-                frame,
-                scan.header.stamp,
-            )
-            if frame == scan_frame:
-                return transform, lookup_mode
-            return transform, f"{lookup_mode}_frame_fallback:{frame}"
-        except RuntimeError as exc:
-            errors.append(f"{frame}: {exc}")
-    raise RuntimeError("; ".join(errors))
+    try:
+        transform = node.tf_buffer.lookup_transform(args.map_frame, frame, time_from_stamp(scan.header.stamp))
+    except Exception as exc:
+        raise RuntimeError(f"timestamped TF {args.map_frame}<-{frame} unavailable: {exc}") from exc
+    # Scan endpoints are in the actual laser frame. A base-frame transform is
+    # never a valid substitute, even when the laser and base are nearby.
+    return transform, "timestamped"
 
 
 def replan_config_from_args(args):
@@ -186,489 +92,139 @@ def replan_config_from_args(args):
         angle_window_deg=args.obstacle_angle_window_deg,
         min_range_m=args.obstacle_min_range_m,
         robot_footprint_radius_m=args.robot_footprint_radius_m,
-        min_cluster_size=args.obstacle_min_cluster_size,
-        min_cluster_width_m=args.obstacle_min_cluster_width_m,
-        inflate_radius_m=args.obstacle_inflate_radius_m,
-        max_start_snap_m=args.max_start_snap_m,
-        max_goal_snap_m=args.max_goal_snap_m,
-        max_replan_path_length_ratio=args.max_replan_path_length_ratio,
-        tracking_path_smoothing=getattr(args, "tracking_path_smoothing", "off"),
-        tracking_path_smoothing_spacing_m=getattr(
-            args,
-            "tracking_path_smoothing_spacing_m",
-            0.05,
-        ),
     )
 
 
 def run_local_config_from_args(args):
-    inflation_radius = getattr(
-        args,
-        "run_local_map_inflation_radius_m",
-        getattr(args, "obstacle_inflate_radius_m", 0.15),
-    )
     return lidar_obstacle_map.RunLocalMapConfig(
-        min_hit_count=getattr(args, "run_local_map_min_hit_count", 2),
-        inflation_radius_m=inflation_radius,
-        robot_footprint_radius_m=getattr(args, "robot_footprint_radius_m", 0.10),
-        clearance_margin_m=getattr(args, "run_local_map_clearance_margin_m", 0.04),
-        static_wall_exclusion_radius_m=getattr(
-            args,
-            "run_local_map_clearance_margin_m",
-            0.04,
-        ),
-        min_used_points=getattr(args, "run_local_map_min_used_points", 3),
-        max_rejected_ratio=getattr(args, "run_local_map_max_rejected_ratio", 0.90),
-        max_updates=getattr(args, "run_local_map_max_updates", 3),
-        max_replan_path_length_ratio=getattr(args, "max_replan_path_length_ratio", 3.0),
-        max_start_snap_m=getattr(args, "max_start_snap_m", 0.20),
-        max_goal_snap_m=getattr(args, "max_goal_snap_m", 0.30),
-        tracking_path_smoothing=getattr(args, "tracking_path_smoothing", "off"),
-        tracking_path_smoothing_spacing_m=getattr(
-            args,
-            "tracking_path_smoothing_spacing_m",
-            0.05,
-        ),
+        min_hit_count=args.run_local_map_min_hit_count,
+        inflation_radius_m=args.run_local_map_inflation_radius_m,
+        robot_footprint_radius_m=args.robot_footprint_radius_m,
+        clearance_margin_m=args.run_local_map_clearance_margin_m,
+        static_wall_exclusion_radius_m=args.run_local_map_clearance_margin_m,
+        min_used_points=args.run_local_map_min_used_points,
+        max_rejected_ratio=args.run_local_map_max_rejected_ratio,
+        max_updates=args.run_local_map_max_updates,
+        max_replan_path_length_ratio=args.max_replan_path_length_ratio,
+        max_start_snap_m=args.max_start_snap_m,
+        max_goal_snap_m=args.max_goal_snap_m,
+        planner_inflate_radius_m=args.robot_footprint_radius_m + args.run_local_map_clearance_margin_m,
     )
 
 
-def apply_tracking_path_smoothing_metadata(args, result):
-    diagnostics = getattr(result, "diagnostics", None)
-    if diagnostics is None:
-        return result
-    mode = getattr(diagnostics, "tracking_path_smoothing_mode", "off")
-    if mode == "off":
-        return result
-    args.tracking_path_smoothing_status = getattr(
-        diagnostics,
-        "tracking_path_smoothing_status",
-        "not_attempted",
-    )
-    args.tracking_path_smoothing_mode_resolved = mode
-    args.tracking_path_smoothing_raw_point_count = getattr(
-        diagnostics,
-        "tracking_path_smoothing_raw_point_count",
-        0,
-    )
-    args.tracking_path_smoothing_smoothed_point_count = getattr(
-        diagnostics,
-        "tracking_path_smoothing_smoothed_point_count",
-        0,
-    )
-    args.tracking_path_smoothing_raw_length_m = getattr(
-        diagnostics,
-        "tracking_path_smoothing_raw_length_m",
-        None,
-    )
-    args.tracking_path_smoothing_smoothed_length_m = getattr(
-        diagnostics,
-        "tracking_path_smoothing_smoothed_length_m",
-        None,
-    )
-    args.tracking_path_smoothing_artifact = getattr(
-        diagnostics,
-        "tracking_path_smoothing_artifact",
-        "",
-    )
-    args.tracking_path_smoothing_reason = getattr(
-        diagnostics,
-        "tracking_path_smoothing_reason",
-        "",
-    )
-    return result
+def fresh_scan_or_error(node, args, min_scan_received_sec=None, min_scan_stamp_sec=None):
+    scan = node.last_scan
+    received = node.last_scan_received_sec
+    if scan is None or received is None:
+        raise RuntimeError("No /scan sample available for LiDAR replan")
+    age = time.time() - received
+    stamp = scan_stamp_sec(scan)
+    stamp_age = None if stamp is None else now_sec(node) - stamp
+    limit = min(args.max_replan_scan_age_sec, args.run_local_map_max_scan_age_sec)
+    if (not math.isfinite(age) or age < 0 or age > limit or stamp is None or stamp <= 0
+            or not math.isfinite(stamp_age) or not -FRESH_SCAN_STAMP_SLACK_SEC <= stamp_age <= limit
+            or (min_scan_received_sec is not None and received <= min_scan_received_sec)
+            or (min_scan_stamp_sec is not None and stamp < min_scan_stamp_sec)):
+        raise RuntimeError(f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: received_age={age}, stamp_age={stamp_age}")
+    return scan, max(age, stamp_age)
 
 
-def args_with_obstacle_roi(
-    args,
-    *,
-    forward_distance_m=None,
-    forward_half_width_m=None,
-    angle_window_deg=None,
-):
-    retry_args = copy.copy(args)
-    if forward_distance_m is not None:
-        retry_args.obstacle_forward_distance_m = forward_distance_m
-    if forward_half_width_m is not None:
-        retry_args.obstacle_forward_half_width_m = forward_half_width_m
-    if angle_window_deg is not None:
-        retry_args.obstacle_angle_window_deg = angle_window_deg
-    return retry_args
-
-
-def artifact_prefix_from_args(args, sequence=None):
-    prefix = getattr(args, "run_local_map_artifact_prefix", None)
-    if not prefix:
-        prefix = f"{args.run_id}_run_local"
-    if sequence is not None and sequence > 1:
-        return f"{prefix}_{sequence:03d}"
-    return prefix
-
-
-def max_scan_age_from_args(args):
-    return getattr(
-        args,
-        "run_local_map_max_scan_age_sec",
-        getattr(args, "max_replan_scan_age_sec", 1.0),
-    )
-
-
-def max_tf_age_from_args(args):
-    return getattr(
-        args,
-        "run_local_map_max_tf_age_sec",
-        getattr(args, "max_replan_tf_age_sec", 1.0),
-    )
-
-
-def current_scan_age(node):
-    if node.last_scan is None or node.last_scan_received_sec is None:
-        return None
-    return time.time() - node.last_scan_received_sec
-
-
-def scan_stamp_sec(scan):
-    return stamp_to_sec(getattr(getattr(scan, "header", None), "stamp", None))
-
-
-def fresh_scan_or_error(
-    node,
-    args,
-    min_scan_received_sec=None,
-    min_scan_stamp_sec=None,
-):
-    if node.last_scan is None or node.last_scan_received_sec is None:
-        raise RuntimeError("No /scan sample is available for LiDAR replan.")
-    if (
-        min_scan_received_sec is not None
-        and node.last_scan_received_sec < min_scan_received_sec
-    ):
-        raise RuntimeError(
-            f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
-            f"received={node.last_scan_received_sec:.3f}, "
-            f"required_after={min_scan_received_sec:.3f}"
-        )
-    stamp_sec = scan_stamp_sec(node.last_scan)
-    if (
-        min_scan_stamp_sec is not None
-        and stamp_sec is not None
-        and stamp_sec < min_scan_stamp_sec - FRESH_SCAN_STAMP_SLACK_SEC
-    ):
-        raise RuntimeError(
-            f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
-            f"stamp={stamp_sec:.3f}, "
-            f"required_after={min_scan_stamp_sec:.3f}"
-        )
-    scan_age_sec = current_scan_age(node)
-    if scan_age_sec is None or scan_age_sec > max_scan_age_from_args(args):
-        raise RuntimeError(
-            f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
-            f"age={scan_age_sec}, limit={max_scan_age_from_args(args):.3f}s"
-        )
-    return node.last_scan, scan_age_sec
-
-
-def observations_from_latest_scan(
-    node,
-    args,
-    scan_mode=None,
-    min_scan_received_sec=None,
-    min_scan_stamp_sec=None,
-):
-    scan, scan_age_sec = fresh_scan_or_error(
-        node,
-        args,
-        min_scan_received_sec=min_scan_received_sec,
-        min_scan_stamp_sec=min_scan_stamp_sec,
-    )
+def observations_from_latest_scan(node, args, scan_mode=None,
+                                  min_scan_received_sec=None, min_scan_stamp_sec=None):
+    scan, scan_age = fresh_scan_or_error(node, args, min_scan_received_sec, min_scan_stamp_sec)
     transform, lookup_mode = lookup_map_from_scan_transform(node, args, scan)
-    tf_stamp_sec = stamp_to_sec(transform.header.stamp)
-    tf_age_sec = None if tf_stamp_sec is None else time.time() - tf_stamp_sec
-    if tf_age_sec is not None and tf_age_sec > max_tf_age_from_args(args):
-        raise RuntimeError(
-            f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_TF}: "
-            f"age={tf_age_sec:.3f}s, limit={max_tf_age_from_args(args):.3f}s"
-        )
-    mode = scan_mode or getattr(args, "run_local_map_update_mode", "forward")
-    base_filter_config = replan_config_from_args(args) if mode == "forward" else None
-    observations = scan_points_to_map_observations(scan, transform, base_filter_config)
-    return observations, scan, scan_age_sec, tf_age_sec, lookup_mode
-
-
-def wait_for_observations_from_fresh_scan(
-    node,
-    args,
-    scan_mode=None,
-    min_scan_received_sec=None,
-    min_scan_stamp_sec=None,
-    timeout_sec=None,
-):
-    timeout_sec = timeout_sec or max(1.0, max_scan_age_from_args(args))
-    deadline = time.time() + timeout_sec
-    last_error = None
-    while time.time() <= deadline:
+    stamp = stamp_to_sec(transform.header.stamp)
+    tf_age = None if stamp is None else now_sec(node) - stamp
+    limit = min(args.max_replan_tf_age_sec, args.run_local_map_max_tf_age_sec)
+    if (stamp is None or stamp <= 0 or not math.isfinite(tf_age)
+            or not -0.25 <= tf_age <= limit
+            or abs(stamp - scan_stamp_sec(scan)) > FRESH_SCAN_STAMP_SLACK_SEC):
+        raise RuntimeError(f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_TF}: age={tf_age}")
+    mode = scan_mode or args.run_local_map_update_mode
+    roi = replan_config_from_args(args) if mode == "forward" else None
+    base_transform = None
+    if roi is not None:
         try:
-            return observations_from_latest_scan(
-                node,
-                args,
-                scan_mode=scan_mode,
-                min_scan_received_sec=min_scan_received_sec,
-                min_scan_stamp_sec=min_scan_stamp_sec,
+            base_transform = node.tf_buffer.lookup_transform(
+                node.base_frame_used, scan.header.frame_id, time_from_stamp(scan.header.stamp),
             )
-        except RuntimeError as exc:
-            last_error = exc
-            if hasattr(node, "spin_once"):
-                node.spin_once(0.1)
-            time.sleep(0.05)
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError(
-        f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
-        f"no fresh /scan for LiDAR replan within {timeout_sec:.3f}s"
-    )
+        except Exception as exc:
+            raise RuntimeError(f"forward obstacle ROI laser-to-base TF unavailable: {exc}") from exc
+    observations = scan_points_to_map_observations(scan, transform, roi, base_transform)
+    return observations, scan, scan_age, tf_age, lookup_mode
 
 
-def collect_initial_observations(node, args):
-    scan_count = getattr(args, "run_local_map_initial_scan_count", 5)
-    scan_mode = getattr(args, "run_local_map_initial_scan_mode", "full")
-    observations = []
-    latest_scan = None
-    latest_scan_age = None
-    latest_tf_age = None
-    latest_lookup_mode = ""
-    seen_stamps = set()
+def collect_stopped_observations(node, args, scan_count, scan_mode,
+                                 min_scan_received_sec=None, min_scan_stamp_sec=None):
     node.stop_repeatedly()
-    min_scan_received_sec = time.time()
-    min_scan_stamp_sec = min_scan_received_sec
-    if hasattr(node, "spin_once"):
-        # stop_repeatedly intentionally publishes zero commands without spinning.
-        # Drain one queued sensor callback after setting the post-stop freshness
-        # boundary, so a scan received during this handoff can be used.
-        node.spin_once(0.1)
-    deadline = time.time() + max(5.0, scan_count * 1.0)
-    last_error = None
-    while len(seen_stamps) < scan_count and time.time() <= deadline:
+    received_after = time.time() if min_scan_received_sec is None else min_scan_received_sec
+    stamped_after = now_sec(node) if min_scan_stamp_sec is None else min_scan_stamp_sec
+    deadline = time.monotonic() + max(2.0, scan_count * 1.0)
+    observations, seen = [], set()
+    last_error = "no post-stop scan"
+    latest = None
+    while time.monotonic() < deadline:
+        if not node.is_running():
+            raise RuntimeError("ROS shutdown during replan scan collection")
+        node.publish_velocity(0.0, 0.0)
+        node.spin_once(0.05)
         try:
-            batch, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
-                node,
-                args,
-                scan_mode=scan_mode,
-                min_scan_received_sec=min_scan_received_sec,
-                min_scan_stamp_sec=min_scan_stamp_sec,
+            batch, scan, age, tf_age, mode = observations_from_latest_scan(
+                node, args, scan_mode, received_after, stamped_after,
             )
         except RuntimeError as exc:
-            last_error = exc
-            if hasattr(node, "spin_once"):
-                node.spin_once(0.1)
-            elif "rclpy" in globals() and globals()["rclpy"] is not None:
-                pass
-            time.sleep(0.05)
+            last_error = str(exc)
             continue
-        stamp = stamp_to_sec(scan.header.stamp)
-        key = stamp if stamp is not None else node.last_scan_received_sec
-        if key not in seen_stamps:
-            seen_stamps.add(key)
+        stamp = scan_stamp_sec(scan)
+        if stamp not in seen:
             observations.extend(batch)
-            latest_scan = scan
-            latest_scan_age = scan_age
-            latest_tf_age = tf_age
-            latest_lookup_mode = lookup_mode
-        if len(seen_stamps) >= scan_count:
-            break
-        if hasattr(node, "spin_once"):
-            node.spin_once(0.1)
-        time.sleep(0.05)
-    if len(seen_stamps) < scan_count:
-        detail = "" if last_error is None else f", last_error={last_error}"
-        raise RuntimeError(
-            f"{lidar_obstacle_map.RUN_LOCAL_FAILURE_STALE_SCAN}: "
-            f"collected={len(seen_stamps)}, required={scan_count}{detail}"
-        )
-    return observations, latest_scan, latest_scan_age, latest_tf_age, latest_lookup_mode, len(seen_stamps)
+            seen.add(stamp)
+            latest = (scan, age, tf_age, mode)
+        if len(seen) == scan_count:
+            return observations, *latest, len(seen)
+    raise RuntimeError(f"Fresh replan scans timed out ({len(seen)}/{scan_count}): {last_error}")
 
 
-def apply_runtime_diagnostics(result, scan, scan_age_sec, tf_age_sec, lookup_mode):
-    result.diagnostics.scan_frame = getattr(scan.header, "frame_id", "") if scan is not None else ""
-    result.diagnostics.scan_age_sec = scan_age_sec
-    result.diagnostics.tf_age_sec = tf_age_sec
-    result.diagnostics.tf_lookup_mode = lookup_mode
-    return result
-
-
-def build_run_local_replan(
-    args,
-    observations,
-    current_pose,
-    goal_waypoint,
-    old_remaining_waypoints,
-    sequence=1,
-    run_local_map=None,
-):
-    robot_pose = lidar_obstacle_map.Pose2D(
-        current_pose.x,
-        current_pose.y,
-        current_pose.yaw_deg,
-    )
-    goal_pose = lidar_obstacle_map.Pose2D(
-        goal_waypoint.x,
-        goal_waypoint.y,
-        0.0,
-    )
+def build_run_local_replan(args, observations, current_pose, goal_waypoint,
+                           old_remaining_waypoints, sequence=1, run_local_map=None):
+    started = time.monotonic()
     result = lidar_obstacle_map.build_run_local_replan_result(
-        args.static_map,
-        observations,
-        robot_pose,
-        goal_pose,
-        args.run_id,
-        output_dir=args.replan_output_dir,
-        artifact_prefix=artifact_prefix_from_args(args, sequence=sequence),
-        config=run_local_config_from_args(args),
-        old_remaining_waypoints=old_remaining_waypoints,
-        run_local_map=run_local_map,
+        args.static_map, observations,
+        lidar_obstacle_map.Pose2D(current_pose.x, current_pose.y, current_pose.yaw_deg),
+        lidar_obstacle_map.Pose2D(goal_waypoint.x, goal_waypoint.y, 0.0),
+        args.run_id, config=run_local_config_from_args(args),
+        old_remaining_waypoints=old_remaining_waypoints, run_local_map=run_local_map,
     )
-    apply_tracking_path_smoothing_metadata(args, result)
-    replan_duration_sec = result.diagnostics.replan_duration_sec
-    if (
-        replan_duration_sec is not None
-        and replan_duration_sec > args.replan_timeout_sec
-    ):
+    if time.monotonic() - started > args.replan_timeout_sec:
         result.success = False
-        result.reason = (
-            "replan_timeout_exceeded "
-            f"duration={replan_duration_sec:.3f}s "
-            f"limit={args.replan_timeout_sec:.3f}s"
-        )
+        result.reason = "replan_timeout_exceeded"
     return result
 
 
-def plan_existing_run_local_map(
-    args,
-    run_local_map,
-    current_pose,
-    goal_waypoint,
-    old_remaining_waypoints,
-    sequence=1,
-):
-    robot_pose = lidar_obstacle_map.Pose2D(
-        current_pose.x,
-        current_pose.y,
-        current_pose.yaw_deg,
+def _perform(node, args, current_pose, goal_waypoint, remaining, count, mode, sequence,
+             min_scan_received_sec=None, min_scan_stamp_sec=None):
+    observations, scan, age, tf_age, lookup_mode, collected = collect_stopped_observations(
+        node, args, count, mode, min_scan_received_sec, min_scan_stamp_sec,
     )
-    goal_pose = lidar_obstacle_map.Pose2D(
-        goal_waypoint.x,
-        goal_waypoint.y,
-        0.0,
-    )
-    result = lidar_obstacle_map.plan_with_run_local_map(
-        run_local_map,
-        robot_pose,
-        goal_pose,
-        args.run_id,
-        output_dir=args.replan_output_dir,
-        artifact_prefix=artifact_prefix_from_args(args, sequence=sequence),
-        old_remaining_waypoints=old_remaining_waypoints,
-    )
-    apply_tracking_path_smoothing_metadata(args, result)
-    replan_duration_sec = result.diagnostics.replan_duration_sec
-    if (
-        replan_duration_sec is not None
-        and replan_duration_sec > args.replan_timeout_sec
-    ):
-        result.success = False
-        result.reason = (
-            "replan_timeout_exceeded "
-            f"duration={replan_duration_sec:.3f}s "
-            f"limit={args.replan_timeout_sec:.3f}s"
-        )
+    # Collection can take seconds. Use a newly gated robot pose for planning.
+    current_pose = node.check_health_or_raise()
+    result = build_run_local_replan(args, observations, current_pose, goal_waypoint, remaining,
+                                   sequence, getattr(node, "run_local_map", None))
+    result.diagnostics.scan_frame = scan.header.frame_id
+    result.diagnostics.scan_age_sec = age
+    result.diagnostics.tf_age_sec = tf_age
+    result.diagnostics.tf_lookup_mode = lookup_mode
+    result.diagnostics.run_local_initial_scan_count = collected
     return result
 
 
-def perform_initial_run_local_replan(
-    node,
-    args,
-    current_pose,
-    goal_waypoint,
-    old_remaining_waypoints,
-):
-    observations, scan, scan_age, tf_age, lookup_mode, collected_count = collect_initial_observations(
-        node,
-        args,
-    )
-    result = build_run_local_replan(
-        args,
-        observations,
-        current_pose,
-        goal_waypoint,
-        old_remaining_waypoints,
-        sequence=1,
-        run_local_map=None,
-    )
-    result.diagnostics.run_local_initial_scan_count = collected_count
-    return apply_runtime_diagnostics(result, scan, scan_age, tf_age, lookup_mode)
+def perform_initial_run_local_replan(node, args, current_pose, goal_waypoint, old_remaining_waypoints):
+    return _perform(node, args, current_pose, goal_waypoint, old_remaining_waypoints,
+                    args.run_local_map_initial_scan_count, args.run_local_map_initial_scan_mode, 1)
 
 
-def update_run_local_map_from_latest_scan(
-    node,
-    args,
-    current_pose,
-    goal_waypoint,
-    old_remaining_waypoints,
-    sequence,
-    min_scan_received_sec=None,
-    min_scan_stamp_sec=None,
-    scan_args=None,
-):
-    scan_args = scan_args or args
-    scan_mode = getattr(scan_args, "run_local_map_update_mode", "forward")
-    if min_scan_received_sec is None and min_scan_stamp_sec is None:
-        observations, scan, scan_age, tf_age, lookup_mode = observations_from_latest_scan(
-            node,
-            scan_args,
-            scan_mode=scan_mode,
-        )
-    else:
-        observations, scan, scan_age, tf_age, lookup_mode = wait_for_observations_from_fresh_scan(
-            node,
-            scan_args,
-            scan_mode=scan_mode,
-            min_scan_received_sec=min_scan_received_sec,
-            min_scan_stamp_sec=min_scan_stamp_sec,
-        )
-    result = build_run_local_replan(
-        args,
-        observations,
-        current_pose,
-        goal_waypoint,
-        old_remaining_waypoints,
-        sequence=sequence,
-        run_local_map=getattr(node, "run_local_map", None),
-    )
-    return apply_runtime_diagnostics(result, scan, scan_age, tf_age, lookup_mode)
-
-
-def perform_lidar_replan(
-    node,
-    args,
-    current_pose,
-    goal_waypoint,
-    old_remaining_waypoints,
-    sequence,
-    scan_args=None,
-    min_scan_received_sec=None,
-    min_scan_stamp_sec=None,
-):
-    node.stop_repeatedly()
-    if min_scan_received_sec is None and hasattr(node, "spin_once"):
-        min_scan_received_sec = time.time()
-    if min_scan_stamp_sec is None:
-        min_scan_stamp_sec = min_scan_received_sec
-    return update_run_local_map_from_latest_scan(
-        node,
-        args,
-        current_pose,
-        goal_waypoint,
-        old_remaining_waypoints,
-        sequence=sequence,
-        min_scan_received_sec=min_scan_received_sec,
-        min_scan_stamp_sec=min_scan_stamp_sec,
-        scan_args=scan_args,
-    )
+def perform_lidar_replan(node, args, current_pose, goal_waypoint, old_remaining_waypoints,
+                         sequence, min_scan_received_sec=None, min_scan_stamp_sec=None):
+    return _perform(node, args, current_pose, goal_waypoint, old_remaining_waypoints,
+                    args.run_local_map_initial_scan_count, args.run_local_map_update_mode, sequence,
+                    min_scan_received_sec, min_scan_stamp_sec)

@@ -23,47 +23,8 @@ except ImportError:
     Odometry = object
     tf2_ros = None
 
-    class _FallbackStamp:
-        sec = 0
-        nanosec = 0
-
-    class _FallbackHeader:
-        def __init__(self):
-            self.frame_id = ""
-            self.stamp = _FallbackStamp()
-
-    class _FallbackPosition:
-        def __init__(self):
-            self.x = 0.0
-            self.y = 0.0
-            self.z = 0.0
-
-    class _FallbackOrientation:
-        def __init__(self):
-            self.x = 0.0
-            self.y = 0.0
-            self.z = 0.0
-            self.w = 1.0
-
-    class _FallbackPose:
-        def __init__(self):
-            self.position = _FallbackPosition()
-            self.orientation = _FallbackOrientation()
-
-    class _FallbackPoseWithCovariance:
-        def __init__(self):
-            self.pose = _FallbackPose()
-            self.covariance = [0.0] * 36
-
-    class PoseWithCovarianceStamped:
-        def __init__(self):
-            self.header = _FallbackHeader()
-            self.pose = _FallbackPoseWithCovariance()
-
-    class Twist:
-        def __init__(self):
-            self.linear = _FallbackPosition()
-            self.angular = _FallbackPosition()
+    PoseWithCovarianceStamped = None
+    Twist = None
 
 from arena_active_spin_core.diagnostics import write_diagnostics_json
 from arena_active_spin_core.models import ArenaActiveSpinConfig
@@ -71,6 +32,8 @@ from arena_active_spin_core.session import run_arena_active_spin
 from arena_geometry_localization import ArenaGeometryConfig
 
 from .model import (
+    geometry_arguments,
+    spin_arguments,
     STOP_PUBLISH_COUNT,
     STOP_PUBLISH_HZ,
     ArrivalCheck,
@@ -95,160 +58,14 @@ from .pure import (
 
 
 def arena_active_config_from_args(args):
-    arena_config = ArenaGeometryConfig(
-        arena_length_m=args.arena_length_m,
-        arena_width_m=args.arena_width_m,
-        heater_side_width_m=args.arena_heater_wall_width_m,
-        clean_side_width_m=args.arena_clean_wall_width_m,
-        width_match_min_margin_m=args.arena_width_match_min_margin_m,
-        max_short_wall_range_sum_error_m=args.arena_max_short_wall_range_sum_error_m,
-        map_center_x=args.arena_map_center_x,
-        map_center_y=args.arena_map_center_y,
-        map_yaw_deg=args.arena_map_yaw_deg,
-        heater_wall_side=args.heater_wall_side,
-        min_wall_points=args.arena_min_wall_points,
-        max_wall_separation_error_m=args.arena_max_wall_separation_error_m,
-        max_line_rmse_m=args.arena_max_line_rmse_m,
-        min_parallel_score=args.arena_min_parallel_score,
-        min_short_wall_confidence=args.arena_min_short_wall_confidence,
-        min_classification_margin=args.arena_min_classification_margin,
-        forced_short_wall_side=args.arena_force_short_wall_side,
-        forced_short_wall_type=args.arena_force_short_wall_type,
-    )
+    arena_config = ArenaGeometryConfig(**{
+        field: getattr(args, argument) for field, argument in geometry_arguments().items()
+    })
     return ArenaActiveSpinConfig(
-        run_id=args.run_id,
+        **{field: getattr(args, argument) for field, argument in spin_arguments().items()},
         diagnostics_path=arena_active_diagnostics_path(args),
-        cmd_vel_topic=args.cmd_vel_topic,
-        scan_topic=args.scan_topic,
-        odom_topic=args.odom_topic,
-        spin_direction=args.arena_active_spin_direction,
-        angular_speed_rad_s=args.arena_active_angular_speed_rad_s,
-        max_spin_sec=args.arena_active_max_spin_sec,
-        spin_complete_tolerance_deg=args.arena_active_spin_complete_tolerance_deg,
-        min_angular_progress_rad_s=args.arena_active_min_angular_progress_rad_s,
-        progress_check_sec=args.arena_active_progress_check_sec,
-        min_scan_samples=args.arena_active_min_scan_samples,
-        max_odom_scan_age_sec=args.arena_active_max_odom_scan_age_sec,
-        stop_settle_sec=args.arena_active_stop_settle_sec,
-        min_front_clearance_m=args.arena_active_min_front_clearance_m,
-        min_side_clearance_m=args.arena_active_min_side_clearance_m,
-        min_rear_clearance_m=args.arena_active_min_rear_clearance_m,
-        require_operator_confirmation=args.arena_active_require_operator_confirmation,
-        allow_extra_cmd_vel_publishers=args.arena_active_allow_extra_cmd_vel_publishers,
-        dry_run=False,
-        verbose=args.verbose,
-        range_stride=args.arena_active_range_stride,
-        max_points=args.arena_active_max_points,
-        control_rate_hz=args.control_rate_hz,
-        recovery_mode=args.arena_active_recovery_mode,
-        recovery_executor=args.arena_active_recovery_executor,
-        enable_center_reposition=args.arena_active_enable_center_reposition,
-        center_reposition_max_attempts=args.arena_active_center_reposition_max_attempts,
-        center_reposition_target_nearest_short_wall_range_m=(
-            args.arena_active_center_reposition_target_nearest_short_wall_range_m
-        ),
-        center_reposition_min_step_m=args.arena_active_center_reposition_min_step_m,
-        center_reposition_max_step_m=args.arena_active_center_reposition_max_step_m,
-        center_reposition_linear_speed_mps=(
-            args.arena_active_center_reposition_linear_speed_mps
-        ),
-        center_reposition_angular_speed_rad_s=(
-            args.arena_active_center_reposition_angular_speed_rad_s
-        ),
-        center_reposition_heading_tolerance_deg=(
-            args.arena_active_center_reposition_heading_tolerance_deg
-        ),
-        center_reposition_min_front_clearance_m=(
-            args.arena_active_center_reposition_min_front_clearance_m
-        ),
-        center_reposition_lateral_offset_threshold_m=(
-            args.arena_active_center_reposition_lateral_offset_threshold_m
-        ),
-        center_reposition_lateral_target_offset_m=(
-            args.arena_active_center_reposition_lateral_target_offset_m
-        ),
-        center_reposition_lateral_min_step_m=(
-            args.arena_active_center_reposition_lateral_min_step_m
-        ),
-        center_reposition_lateral_max_step_m=(
-            args.arena_active_center_reposition_lateral_max_step_m
-        ),
-        center_reposition_enable_heater_approach=(
-            args.arena_active_center_reposition_enable_heater_approach
-        ),
-        center_reposition_heater_approach_max_attempts=(
-            args.arena_active_center_reposition_heater_approach_max_attempts
-        ),
-        center_reposition_heater_approach_target_range_m=(
-            args.arena_active_center_reposition_heater_approach_target_range_m
-        ),
-        center_reposition_heater_approach_min_selected_score=(
-            args.arena_active_center_reposition_heater_approach_min_selected_score
-        ),
-        center_reposition_heater_approach_max_opposite_score=(
-            args.arena_active_center_reposition_heater_approach_max_opposite_score
-        ),
-        center_reposition_heater_approach_min_delta=(
-            args.arena_active_center_reposition_heater_approach_min_delta
-        ),
-        center_reposition_heater_approach_min_step_m=(
-            args.arena_active_center_reposition_heater_approach_min_step_m
-        ),
-        center_reposition_heater_approach_max_step_m=(
-            args.arena_active_center_reposition_heater_approach_max_step_m
-        ),
-        active_explore_max_attempts=args.arena_active_explore_max_attempts,
-        active_explore_max_single_move_m=args.arena_active_explore_max_single_move_m,
-        active_explore_max_total_distance_m=(
-            args.arena_active_explore_max_total_distance_m
-        ),
-        active_explore_max_candidate_path_m=(
-            args.arena_active_explore_max_candidate_path_m
-        ),
-        active_explore_grid_resolution_m=(
-            args.arena_active_explore_grid_resolution_m
-        ),
-        active_explore_grid_size_m=args.arena_active_explore_grid_size_m,
-        active_explore_inflation_radius_m=(
-            args.arena_active_explore_inflation_radius_m
-        ),
-        active_explore_soft_clearance_radius_m=(
-            args.arena_active_explore_soft_clearance_radius_m
-        ),
-        active_explore_soft_clearance_weight=(
-            args.arena_active_explore_soft_clearance_weight
-        ),
-        active_explore_unknown_blocked=args.arena_active_explore_unknown_blocked,
-        active_explore_max_path_segments=args.arena_active_explore_max_path_segments,
-        active_explore_use_accumulated_map=(
-            args.arena_active_explore_use_accumulated_map
-        ),
-        active_explore_map_max_samples=args.arena_active_explore_map_max_samples,
-        active_explore_shadow_completion_confirmations=(
-            args.arena_active_explore_shadow_completion_confirmations
-        ),
-        active_explore_max_shadow_stall_replans=(
-            args.arena_active_explore_max_shadow_stall_replans
-        ),
-        active_explore_max_localization_pose_attempts=(
-            args.arena_active_explore_max_localization_pose_attempts
-        ),
-        active_explore_curve_lookahead_m=(
-            args.arena_active_explore_curve_lookahead_m
-        ),
-        active_explore_curve_goal_tolerance_m=(
-            args.arena_active_explore_curve_goal_tolerance_m
-        ),
-        active_explore_curve_linear_speed_mps=(
-            args.arena_active_explore_curve_linear_speed_mps
-        ),
-        active_explore_curve_max_angular_rad_s=(
-            args.arena_active_explore_curve_max_angular_rad_s
-        ),
-        active_explore_min_progress_before_spin_m=(
-            args.arena_active_explore_min_progress_before_spin_m
-        ),
         arena_config=arena_config,
+        dry_run=False,
     )
 
 
@@ -262,6 +79,8 @@ def build_initial_pose_message(
     frame_id="map",
     stamp=None,
 ):
+    if PoseWithCovarianceStamped is None:
+        raise RuntimeError("ROS 2 Python messages are unavailable")
     msg = PoseWithCovarianceStamped()
     msg.header.frame_id = frame_id
     if stamp is not None:
@@ -305,6 +124,18 @@ def stamp_to_sec(stamp):
     return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
 
+def fresh_message(node, message, received_sec, max_age_sec):
+    """Receipt and ROS header time must both be fresh; never accept future data."""
+    if message is None or received_sec is None:
+        return False
+    receipt_age = time.time() - received_sec
+    stamp = stamp_to_sec(message.header.stamp)
+    ros_now = node.get_clock().now().nanoseconds / 1_000_000_000.0
+    return (0.0 <= receipt_age <= max_age_sec and stamp is not None
+            and math.isfinite(stamp) and stamp > 0.0
+            and -0.25 <= ros_now - stamp <= max_age_sec)
+
+
 def latest_tf_time():
     if Time is None:
         return None
@@ -335,6 +166,7 @@ class TwoStageCoordinator(Node):
         self.last_amcl = None
         self.last_amcl_received_sec = None
         self.active_goal_handle = None
+        self.initial_pose_stamp_sec = None
         self.selected_base_frame = ""
 
         self.cmd_vel_pub = self.create_publisher(Twist, args.cmd_vel_topic, 10)
@@ -393,9 +225,8 @@ class TwoStageCoordinator(Node):
         deadline = time.time() + timeout_sec
         while rclpy.ok() and time.time() <= deadline:
             rclpy.spin_once(self, timeout_sec=0.1)
-            if self.last_scan is None or self.last_scan_received_sec is None:
-                continue
-            if time.time() - self.last_scan_received_sec <= self.args.max_scan_age_sec:
+            if fresh_message(self, self.last_scan, self.last_scan_received_sec,
+                             self.args.max_scan_age_sec):
                 return self.last_scan
         raise RuntimeError(f"Timed out waiting for fresh {self.args.scan_topic}")
 
@@ -462,7 +293,9 @@ class TwoStageCoordinator(Node):
             var_y,
             var_yaw,
             frame_id=self.args.map_frame,
+            stamp=self.get_clock().now().to_msg(),
         )
+        self.initial_pose_stamp_sec = stamp_to_sec(msg.header.stamp)
         for _ in range(3):
             self.initial_pose_pub.publish(msg)
             rclpy.spin_once(self, timeout_sec=0.1)
@@ -502,12 +335,20 @@ class TwoStageCoordinator(Node):
             if min_received_sec is not None and self.last_amcl_received_sec < min_received_sec:
                 last_reason = "waiting_for_fresh_amcl"
                 continue
-            age_sec = now - self.last_amcl_received_sec
-            if age_sec > self.args.max_amcl_age_sec:
+            if not fresh_message(self, self.last_amcl, self.last_amcl_received_sec,
+                                 self.args.max_amcl_age_sec):
                 last_reason = "stale_amcl"
+                state = StabilityState()
                 continue
-            if processed_received_sec != self.last_amcl_received_sec:
-                processed_received_sec = self.last_amcl_received_sec
+            if self.last_amcl.header.frame_id != self.args.map_frame:
+                raise RuntimeError("AMCL pose is not in the configured map frame")
+            sample_stamp = stamp_to_sec(self.last_amcl.header.stamp)
+            if (min_received_sec is not None and self.initial_pose_stamp_sec is not None
+                    and sample_stamp < self.initial_pose_stamp_sec):
+                last_reason = "waiting_for_post_initialpose_amcl"
+                continue
+            if processed_received_sec is None or sample_stamp > processed_received_sec:
+                processed_received_sec = sample_stamp
                 pose = self.amcl_pose2d(self.last_amcl)
                 state = update_amcl_stability(
                     state,
@@ -534,7 +375,7 @@ class TwoStageCoordinator(Node):
         stamp_sec = stamp_to_sec(transform.header.stamp)
         if stamp_sec is None:
             return None
-        return time.time() - stamp_sec
+        return self.get_clock().now().nanoseconds / 1_000_000_000.0 - stamp_sec
 
     def lookup_robot_pose_tf(
         self,
@@ -559,13 +400,18 @@ class TwoStageCoordinator(Node):
                     continue
 
                 age_sec = self.transform_age_sec(transform)
-                if age_sec is not None and age_sec > self.args.max_pose_age_sec:
+                if (age_sec is None or not math.isfinite(age_sec)
+                        or not -0.25 <= age_sec <= self.args.max_pose_age_sec):
                     errors.append(
                         f"{frame}: stale_tf age={age_sec:.3f}s "
                         f"limit={self.args.max_pose_age_sec:.3f}s"
                     )
                     continue
 
+                pose = transform_to_pose2d(transform, frame)
+                if not all(math.isfinite(value) for value in (pose.x, pose.y, pose.yaw_deg)):
+                    errors.append(f"{frame}: non-finite TF pose")
+                    continue
                 self.selected_base_frame = frame
                 return transform, frame
 

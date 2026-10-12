@@ -4,7 +4,6 @@ from .diagnostics import *
 from .explore_mission import *
 from .math_utils import *
 from .models import *
-from .reposition import *
 from .scan_safety import *
 from .session import *
 from .temporary_map import *

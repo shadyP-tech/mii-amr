@@ -57,11 +57,9 @@ def config_diagnostics(config: ArenaActiveSpinConfig):
 
 
 def effective_recovery_mode(config: ArenaActiveSpinConfig):
-    if config.recovery_mode != "none":
-        return config.recovery_mode
-    if config.enable_center_reposition:
-        return "legacy"
-    return "none"
+    if config.recovery_mode not in {"none", "active_explore"}:
+        raise ValueError(f"Unsupported recovery mode: {config.recovery_mode}")
+    return config.recovery_mode
 
 
 def active_explore_config_from_arena_config(config: ArenaActiveSpinConfig):
@@ -110,10 +108,6 @@ def initial_diagnostics(config: ArenaActiveSpinConfig):
         "config": config_diagnostics(config),
         "spin": spin_diagnostics_template(),
         "spin_attempts": [],
-        "reposition": {
-            "enabled": recovery_mode == "legacy",
-            "attempts": [],
-        },
         "active_explore": {
             "enabled": recovery_mode == "active_explore",
             "mode": recovery_mode,

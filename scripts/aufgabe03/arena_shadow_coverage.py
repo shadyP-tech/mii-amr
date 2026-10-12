@@ -34,19 +34,6 @@ NO_SHADOW_REASONS = {
     "no_shadow_frontier",
 }
 
-RESIDUAL_SHADOW_REJECTION_REASONS = {
-    "too_close_to_obstacle",
-    "initial_heading_error_too_large",
-    "no_connected_path",
-    "path_too_long",
-    "path_too_many_segments",
-}
-
-FINAL_VERIFY_RESIDUAL_SHADOW_REJECTION_REASONS = (
-    RESIDUAL_SHADOW_REJECTION_REASONS | {"no_positive_gain"}
-)
-
-
 @dataclass(frozen=True)
 class ShadowCoverageConfig:
     max_attempts: int = 12
@@ -70,11 +57,7 @@ class ShadowCoverageConfig:
     min_endpoint_clearance_m: float = 0.16
     completion_confirmations: int = 2
     max_initial_heading_error_deg: float = 80.0
-    allow_initial_preturn: bool = False
-    preturn_max_heading_error_deg: float = 135.0
-    preturn_handoff_heading_error_deg: float = 45.0
     curve_lookahead_m: float = 0.16
-    preturn_handoff_deadband_deg: float = 3.0
 
     def active_explore_config(self):
         return ActiveExploreConfig(
@@ -370,38 +353,6 @@ def _shadow_status(grid, candidates, raw_shadow_unknown_count):
     }
 
 
-def is_residual_shadow_plan(plan, allow_no_positive_gain=False):
-    if plan is None or plan.reason != "shadow_blocked_or_incomplete":
-        return False
-    status = plan.shadow_status or {}
-    if int(status.get("moving_frontier_count") or 0) != 0:
-        return False
-    if int(status.get("raw_shadow_unknown_cell_count") or 0) <= 0:
-        return False
-    if int(status.get("frontier_candidate_count") or 0) <= 0:
-        return False
-    rejection_reasons = set((plan.candidate_rejections or {}).keys())
-    if not rejection_reasons:
-        return False
-    allowed_reasons = (
-        FINAL_VERIFY_RESIDUAL_SHADOW_REJECTION_REASONS
-        if allow_no_positive_gain
-        else RESIDUAL_SHADOW_REJECTION_REASONS
-    )
-    return rejection_reasons.issubset(allowed_reasons)
-
-
-def is_no_frontier_residual_shadow_plan(plan):
-    if plan is None or plan.reason != "shadow_blocked_or_incomplete":
-        return False
-    status = plan.shadow_status or {}
-    return (
-        int(status.get("raw_shadow_unknown_cell_count") or 0) > 0
-        and int(status.get("moving_frontier_count") or 0) == 0
-        and int(status.get("frontier_candidate_count") or 0) == 0
-    )
-
-
 def heading_error_to_point_deg(robot_pose, target_point):
     dx = float(target_point[0]) - float(robot_pose.x)
     dy = float(target_point[1]) - float(robot_pose.y)
@@ -426,7 +377,6 @@ def candidate_initial_heading_metadata(candidate, robot_pose, config: ShadowCove
     return {
         "initial_heading_error_deg": heading_error_deg,
         "initial_lookahead_target": [float(lookahead_target[0]), float(lookahead_target[1])],
-        "requires_initial_preturn": False,
         "heading_gate_stage": "planner",
     }
 
@@ -448,13 +398,6 @@ def apply_initial_heading_gate(candidate, robot_pose, config: ShadowCoverageConf
     if error_abs <= config.max_initial_heading_error_deg:
         metadata["heading_gate_reason"] = "accepted"
         return _annotate_candidate(candidate, metadata)
-    if (
-        config.allow_initial_preturn
-        and error_abs <= config.preturn_max_heading_error_deg
-    ):
-        metadata["requires_initial_preturn"] = True
-        metadata["heading_gate_reason"] = "preturn_required"
-        return _annotate_candidate(candidate, metadata)
     return _reject_candidate(
         candidate,
         "initial_heading_error_too_large",
@@ -462,7 +405,6 @@ def apply_initial_heading_gate(candidate, robot_pose, config: ShadowCoverageConf
             **metadata,
             "heading_gate_reason": "initial_heading_error_too_large",
             "max_initial_heading_error_deg": config.max_initial_heading_error_deg,
-            "preturn_max_heading_error_deg": config.preturn_max_heading_error_deg,
         },
     )
 

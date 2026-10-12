@@ -1,7 +1,10 @@
 import math
 
-from .constants import CHI2_95_2D, NEAR_SINGULAR_COND, NEAR_SINGULAR_DET
 from .geometry import mat_vec, normalize_angle_deg, vec_sub
+
+CHI2_95_2D = 5.991
+NEAR_SINGULAR_DET = 1e-14
+NEAR_SINGULAR_COND = 1e12
 
 
 def empirical_mean_cov(points):

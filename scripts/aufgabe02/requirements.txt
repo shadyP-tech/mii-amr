@@ -1,0 +1,3 @@
+# External camera tracker; ROS 2 comes from the ROS setup.
+numpy
+opencv-python

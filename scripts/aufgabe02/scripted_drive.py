@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import csv
 import math
 import os
 import re
@@ -8,16 +7,19 @@ import sys
 import time
 from datetime import datetime
 
-try:
-    import rclpy
-    from rclpy.node import Node
-    from geometry_msgs.msg import Twist
-    from nav_msgs.msg import Odometry
-except ImportError:
-    rclpy = None
-    Node = object
-    Twist = None
-    Odometry = object
+if __package__:
+    from .motion import (
+        DriveNode, FORWARD_CSV_HEADER as CSV_HEADER, append_csv_row, close_motion_node,
+        ensure_csv_schema, odom_to_xy_yaw, parse_float_env, pose_fields,
+        rclpy, shortest_angle_delta_deg,
+    )
+else:
+    from motion import (
+        DriveNode, FORWARD_CSV_HEADER as CSV_HEADER, append_csv_row, close_motion_node,
+        ensure_csv_schema, odom_to_xy_yaw, parse_float_env, pose_fields,
+        rclpy, shortest_angle_delta_deg,
+    )
+
 
 
 DEFAULT_RUN_MODE = "linear-forward"
@@ -41,48 +43,6 @@ DISTANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
-LEGACY_CSV_HEADER = [
-    "timestamp",
-    "run_id",
-    "x",
-    "y",
-    "z",
-    "qx",
-    "qy",
-    "qz",
-    "qw",
-    "notes",
-]
-
-CSV_HEADER = [
-    "timestamp",
-    "run_id",
-
-    "tracker_start_x",
-    "tracker_start_y",
-    "tracker_start_yaw_deg",
-
-    "tracker_final_x",
-    "tracker_final_y",
-    "tracker_final_yaw_deg",
-
-    "odom_start_x",
-    "odom_start_y",
-    "odom_start_yaw_deg",
-
-    "odom_final_x",
-    "odom_final_y",
-    "odom_final_yaw_deg",
-
-    "notes",
-]
-
-
-def quaternion_to_yaw_deg(qx, qy, qz, qw):
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return math.degrees(math.atan2(siny_cosp, cosy_cosp))
-
 
 def parse_distance_m(value):
     match = DISTANCE_RE.match(str(value))
@@ -90,6 +50,8 @@ def parse_distance_m(value):
         raise ValueError(f"invalid distance value: {value!r}")
 
     amount = float(match.group(1))
+    if not math.isfinite(amount):
+        raise ValueError("RUN_DISTANCE must be finite")
     unit = (match.group(2) or "m").lower()
 
     if unit in {"m", "meter", "meters"}:
@@ -100,13 +62,6 @@ def parse_distance_m(value):
         return amount / 1000.0
 
     raise ValueError(f"unsupported distance unit in {value!r}")
-
-
-def parse_float_env(env, name, default):
-    try:
-        return float(env.get(name, default))
-    except ValueError as exc:
-        raise ValueError(f"{name} must be numeric") from exc
 
 
 def configured_motion(env=os.environ):
@@ -123,6 +78,8 @@ def configured_motion(env=os.environ):
         raise ValueError("RUN_DISTANCE must be greater than zero")
 
     nominal_duration_sec = distance_m / speed_mps
+    if not math.isfinite(nominal_duration_sec):
+        raise ValueError("RUN_DISTANCE / RUN_SPEED must be finite")
     timeout_sec = parse_float_env(env, "RUN_TIMEOUT_SEC", DEFAULT_DRIVE_TIMEOUT_SEC)
     if timeout_sec <= 0.0:
         raise ValueError("RUN_TIMEOUT_SEC must be greater than zero")
@@ -138,50 +95,27 @@ def configured_motion(env=os.environ):
 
 
 def validation_config(env=os.environ):
-    return {
-        "validate_start_pose": env.get("SIM_VALIDATE_START_POSE", "1").lower()
-        not in {"0", "false", "no"},
-        "start_x": parse_float_env(env, "SIM_START_X", DEFAULT_SIM_START_X),
-        "start_y": parse_float_env(env, "SIM_START_Y", DEFAULT_SIM_START_Y),
-        "start_yaw_deg": parse_float_env(
-            env,
-            "SIM_START_YAW_DEG",
-            DEFAULT_SIM_START_YAW_DEG,
-        ),
-        "start_position_tol_m": parse_float_env(
-            env,
-            "SIM_START_POSITION_TOL_M",
-            DEFAULT_START_POSITION_TOL_M,
-        ),
-        "start_yaw_tol_deg": parse_float_env(
-            env,
-            "SIM_START_YAW_TOL_DEG",
-            DEFAULT_START_YAW_TOL_DEG,
-        ),
-        "distance_tol_m": parse_float_env(
-            env,
-            "SIM_DISTANCE_TOL_M",
-            DEFAULT_DISTANCE_TOL_M,
-        ),
-        "lateral_tol_m": parse_float_env(
-            env,
-            "SIM_LATERAL_TOL_M",
-            DEFAULT_LATERAL_TOL_M,
-        ),
-        "yaw_drift_tol_deg": parse_float_env(
-            env,
-            "SIM_YAW_DRIFT_TOL_DEG",
-            DEFAULT_YAW_DRIFT_TOL_DEG,
-        ),
+    defaults = {
+        "start_x": DEFAULT_SIM_START_X,
+        "start_y": DEFAULT_SIM_START_Y,
+        "start_yaw_deg": DEFAULT_SIM_START_YAW_DEG,
+        "start_position_tol_m": DEFAULT_START_POSITION_TOL_M,
+        "start_yaw_tol_deg": DEFAULT_START_YAW_TOL_DEG,
+        "distance_tol_m": DEFAULT_DISTANCE_TOL_M,
+        "lateral_tol_m": DEFAULT_LATERAL_TOL_M,
+        "yaw_drift_tol_deg": DEFAULT_YAW_DRIFT_TOL_DEG,
     }
+    config = {name: parse_float_env(env, "SIM_" + name.upper(), value)
+              for name, value in defaults.items()}
+    for name, value in config.items():
+        if "_tol_" in name and value < 0.0:
+            raise ValueError(f"{name} must be non-negative")
+    config["validate_start_pose"] = env.get("SIM_VALIDATE_START_POSE", "1").lower() not in {"0", "false", "no"}
+    return config
 
 
 def xy_distance(x1, y1, x2, y2):
     return math.hypot(x2 - x1, y2 - y1)
-
-
-def shortest_angle_delta_deg(start_deg, end_deg):
-    return (end_deg - start_deg + 180.0) % 360.0 - 180.0
 
 
 def motion_summary(start_pose, final_pose):
@@ -256,144 +190,11 @@ def validate_motion(summary, expected_distance_m, config):
     return errors
 
 
-def odom_to_xy_yaw(msg):
-    if msg is None:
-        return None
-
-    p = msg.pose.pose.position
-    q = msg.pose.pose.orientation
-
-    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    return {
-        "x": p.x,
-        "y": p.y,
-        "yaw_deg": math.degrees(yaw),
-    }
-
-
 def ensure_result_file_schema(file_path):
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return False
-
-    with open(file_path, newline="") as f:
-        reader = csv.reader(f)
-        existing_header = next(reader, None)
-        existing_rows = list(reader)
-
-    if existing_header == CSV_HEADER:
-        return True
-
-    if existing_header == LEGACY_CSV_HEADER:
-        migrate_legacy_result_file(file_path, existing_rows)
-        return True
-
-    raise RuntimeError(
-        f"{file_path} has an unrecognized schema. Move or migrate it before "
-        "running the simulation script so new rows match real-run logs."
-    )
+    return ensure_csv_schema(file_path, CSV_HEADER)
 
 
-def migrate_legacy_result_file(file_path, rows):
-    tmp_path = f"{file_path}.tmp"
-    with open(tmp_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(CSV_HEADER)
-
-        for row in rows:
-            if len(row) != len(LEGACY_CSV_HEADER):
-                continue
-
-            legacy = dict(zip(LEGACY_CSV_HEADER, row))
-            try:
-                yaw_deg = quaternion_to_yaw_deg(
-                    float(legacy["qx"]),
-                    float(legacy["qy"]),
-                    float(legacy["qz"]),
-                    float(legacy["qw"]),
-                )
-            except ValueError:
-                yaw_deg = ""
-
-            writer.writerow([
-                legacy["timestamp"],
-                legacy["run_id"],
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                legacy["x"],
-                legacy["y"],
-                yaw_deg,
-                legacy["notes"],
-            ])
-
-    os.replace(tmp_path, file_path)
-
-    return True
-
-
-class ScriptedDrive(Node):
-    def __init__(self, run_id: str):
-        if rclpy is None:
-            raise RuntimeError(
-                "ROS 2 Python modules are unavailable. Source ROS 2 Humble before "
-                "running the simulation drive."
-            )
-
-        super().__init__("scripted_drive")
-
-        self.run_id = run_id
-        self.last_odom = None
-
-        self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.sub = self.create_subscription(
-            Odometry,
-            "/odom",
-            self.odom_callback,
-            10,
-        )
-
-        time.sleep(1.0)
-
-    def odom_callback(self, msg: Odometry):
-        self.last_odom = msg
-
-    def wait_for_odom(self, timeout_sec=5.0):
-        start = time.time()
-
-        while rclpy.ok() and self.last_odom is None:
-            if time.time() - start > timeout_sec:
-                self.get_logger().warn("Timed out waiting for /odom")
-                return None
-
-            rclpy.spin_once(self, timeout_sec=0.1)
-
-        return self.last_odom
-
-    def publish_velocity(self, linear_x: float, angular_z: float):
-        msg = Twist()
-        msg.linear.x = linear_x
-        msg.angular.z = angular_z
-        self.pub.publish(msg)
-
-    def send_cmd(self, linear_x: float, angular_z: float, duration: float):
-        start = time.time()
-
-        while rclpy.ok() and time.time() - start < duration:
-            self.publish_velocity(linear_x, angular_z)
-            rclpy.spin_once(self, timeout_sec=0.01)
-            time.sleep(0.1)
-
-        self.stop()
-
+class ScriptedDrive(DriveNode):
     def drive_until_forward_distance(
         self,
         start_pose,
@@ -404,7 +205,6 @@ class ScriptedDrive(Node):
     ):
         start_time = time.time()
         last_summary = None
-        last_log_time = start_time
 
         while rclpy.ok():
             if self.last_odom is not None:
@@ -412,11 +212,6 @@ class ScriptedDrive(Node):
                 last_summary = motion_summary(start_pose, current_pose)
 
                 if last_summary["forward_m"] >= target_distance_m:
-                    self.get_logger().info(
-                        "Reached odometry target: "
-                        f"forward={last_summary['forward_m']:.3f} m, "
-                        f"target={target_distance_m:.3f} m"
-                    )
                     self.stop()
                     return self.last_odom
 
@@ -434,15 +229,6 @@ class ScriptedDrive(Node):
                     f"timeout={timeout_sec:.1f} s"
                 )
 
-            if time.time() - last_log_time >= 5.0:
-                if last_summary is not None:
-                    self.get_logger().info(
-                        "Driving toward odometry target: "
-                        f"forward={last_summary['forward_m']:.3f} m / "
-                        f"{target_distance_m:.3f} m"
-                    )
-                last_log_time = time.time()
-
             self.publish_velocity(linear_x, angular_z)
             rclpy.spin_once(self, timeout_sec=0.05)
             time.sleep(0.05)
@@ -450,50 +236,11 @@ class ScriptedDrive(Node):
         self.stop()
         raise RuntimeError("ROS shutdown before reaching odometry target.")
 
-    def stop(self):
-        msg = Twist()
-        for _ in range(10):
-            if rclpy.ok():
-                self.pub.publish(msg)
-            time.sleep(0.05)
-
     def save_result(self, odom_start_msg, odom_final_msg):
-        os.makedirs("results", exist_ok=True)
-
-        file_exists = ensure_result_file_schema(RESULTS_CSV)
-
-        odom_start = odom_to_xy_yaw(odom_start_msg)
-        odom_final = odom_to_xy_yaw(odom_final_msg)
-
-        with open(RESULTS_CSV, "a", newline="") as f:
-            writer = csv.writer(f)
-
-            if not file_exists:
-                writer.writerow(CSV_HEADER)
-
-            writer.writerow([
-                datetime.now().isoformat(),
-                self.run_id,
-
-                "",
-                "",
-                "",
-
-                "",
-                "",
-                "",
-
-                odom_start["x"] if odom_start else "",
-                odom_start["y"] if odom_start else "",
-                odom_start["yaw_deg"] if odom_start else "",
-
-                odom_final["x"] if odom_final else "",
-                odom_final["y"] if odom_final else "",
-                odom_final["yaw_deg"] if odom_final else "",
-
-                "simulation",
-            ])
-
+        row = [datetime.now().isoformat(), self.run_id, *([""] * 6),
+               *pose_fields(odom_to_xy_yaw(odom_start_msg)),
+               *pose_fields(odom_to_xy_yaw(odom_final_msg)), "simulation"]
+        append_csv_row(RESULTS_CSV, CSV_HEADER, row)
         self.get_logger().info(f"Saved result to {RESULTS_CSV}")
 
 
@@ -518,14 +265,7 @@ def main():
     node = ScriptedDrive(run_id)
 
     try:
-        node.get_logger().info(f"Starting run: {run_id}")
-        node.get_logger().info(
-            "Configured drive: "
-            f"{motion['speed_mps']:.3f} m/s until odometry reaches "
-            f"{motion['distance_m']:.3f} m "
-            f"(nominal {motion['duration_sec']:.3f} s, "
-            f"timeout {motion['timeout_sec']:.1f} s)"
-        )
+        node.get_logger().info(f"{run_id}: forward {motion['distance_m']:.3f}m at {motion['speed_mps']:.3f}m/s")
         if "RUN_DURATION_SEC" in os.environ:
             node.get_logger().warn(
                 "RUN_DURATION_SEC is ignored; simulation now stops from odometry. "
@@ -544,7 +284,6 @@ def main():
                 "Simulation start pose validation failed: " + "; ".join(start_errors)
             )
 
-        node.get_logger().info("Driving forward")
         node.drive_until_forward_distance(
             odom_start,
             motion["distance_m"],
@@ -553,7 +292,6 @@ def main():
             motion["timeout_sec"],
         )
 
-        node.get_logger().info("Done")
         node.stop()
 
         for _ in range(10):
@@ -582,24 +320,14 @@ def main():
 
     except KeyboardInterrupt:
         print("Interrupted. Sending stop command...")
-        try:
-            node.stop()
-        except Exception:
-            pass
         return 130
 
     except RuntimeError as exc:
         node.get_logger().error(str(exc))
-        try:
-            node.stop()
-        except Exception:
-            pass
         return 1
 
     finally:
-        if rclpy.ok():
-            node.destroy_node()
-            rclpy.shutdown()
+        close_motion_node(node, rclpy)
 
     return 0
 

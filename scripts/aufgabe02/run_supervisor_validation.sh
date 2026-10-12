@@ -8,7 +8,8 @@ if [ "$#" -gt 1 ]; then
 fi
 
 RUN_ID="${1:-}"
-PROJECT_DIR="${MII_AMR_PROJECT_DIR:-/workspace/mii-amr}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${MII_AMR_PROJECT_DIR:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 PREDICTION_FILE="${SUPERVISOR_PREDICTION_FILE:-results/aufgabe02/supervisor_route_prediction.json}"
 RESULTS_CSV="${SUPERVISOR_VALIDATION_RESULTS_CSV:-results/aufgabe02/supervisor_route_validation_runs.csv}"
 TRACKER_POSE_FILE="${TRACKER_POSE_FILE:-results/aufgabe02/latest_tracker_pose.csv}"
@@ -29,8 +30,8 @@ fi
 BAG_DIR="bags/real/$RUN_ID"
 BAG_LOG="results/aufgabe02/${RUN_ID}_bag.log"
 
-if [ -e "$BAG_DIR" ]; then
-  echo "ERROR: bag output already exists: $BAG_DIR"
+if [ -e "$BAG_DIR" ] || [ -e "$BAG_LOG" ]; then
+  echo "ERROR: bag output or log already exists for $RUN_ID"
   echo "Choose a new run ID or move the existing bag deliberately."
   exit 1
 fi
@@ -87,15 +88,18 @@ fi
 BAG_PID=""
 
 stop_robot() {
-  ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  timeout --kill-after=1s 3s ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
     "{linear: {x: 0.0}, angular: {z: 0.0}}" >/dev/null 2>&1 || true
 }
 
 stop_bag() {
-  if [ -n "$BAG_PID" ] && kill -0 "$BAG_PID" >/dev/null 2>&1; then
-    echo "Stopping bag recording..."
-    kill -INT "$BAG_PID" || true
+  if [ -n "$BAG_PID" ]; then
+    if kill -0 "$BAG_PID" >/dev/null 2>&1; then
+      echo "Stopping bag recording..."
+      kill -INT "$BAG_PID" || true
+    fi
     wait "$BAG_PID" || true
+    BAG_PID=""
   fi
 }
 
@@ -104,13 +108,20 @@ cleanup() {
   stop_bag
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "Starting bag recording for $RUN_ID..."
 ros2 bag record -o "$BAG_DIR" /cmd_vel /odom /imu /battery_state > "$BAG_LOG" 2>&1 &
 BAG_PID=$!
 
 sleep 2
+
+if ! kill -0 "$BAG_PID" >/dev/null 2>&1; then
+  echo "ERROR: bag recording failed. See $BAG_LOG."
+  exit 1
+fi
 
 echo "Running supervisor validation route..."
 python3 scripts/aufgabe02/supervisor_route_validation.py \

@@ -1,0 +1,69 @@
+{
+  "base_frame": "base_footprint",
+  "base_to_camera": {
+    "rotation_xyzw": [
+      -0.46711361711508237,
+      0.4831412431690852,
+      -0.5243683107680924,
+      0.5228931846150919
+    ],
+    "translation_xyz_m": [
+      0.045537245000000004,
+      -0.004971307,
+      0.125746635
+    ]
+  },
+  "calibration_id": "turtlebot1_camera_base_footprint_20260730",
+  "calibration_profile_sha256": "ef9251020036e0ab201ae6dc599594dfc382bd83a995bafdee6b194123b1b2c7",
+  "camera_matrix": [
+    640.977317007246,
+    0.0,
+    405.8708878028196,
+    0.0,
+    641.1612206204627,
+    300.7059996561025,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "camera_optical_frame": "camera",
+  "distortion_coefficients": [
+    0.22098627234105042,
+    -0.5816953750895016,
+    -0.0014375648979169753,
+    -0.0008374637688387152,
+    0.446372026692927
+  ],
+  "distortion_model": "plumb_bob",
+  "height_px": 600,
+  "measured_unix_sec": 1785415078.3013303,
+  "profile_kind": "real_camera_calibration",
+  "projection_matrix": [
+    640.977317007246,
+    0.0,
+    405.8708878028196,
+    0.0,
+    0.0,
+    641.1612206204627,
+    300.7059996561025,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0
+  ],
+  "rectification_matrix": [
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "schema_version": 1,
+  "source": "ChArUco 28x17 intrinsics plus paired camera-LiDAR plane solution camera_lidar_extrinsics_20260730_141911",
+  "width_px": 800
+}

@@ -1,121 +1,119 @@
+"""Arena localization, mandatory Nav2 staging, then isolated waypoint motion."""
 import argparse
+import math
 import shlex
 import subprocess
 import sys
 import time
+from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
 
-from .experiment_log import append_csv_row, build_log_row
-from .model import (
-    CSV_HEADER,
-    DEFAULT_AMCL_SETTLE_MIN_SEC,
-    DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M,
-    DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_YAW_ERROR_DEG,
-    DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
-    DEFAULT_ARRIVAL_TOLERANCE_M,
-    DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
-    DEFAULT_CONTROL_RATE_HZ,
-    DEFAULT_FOLLOWER_SCRIPT,
-    DEFAULT_FOLLOWER_HARD_STOP_RANGE_M,
-    DEFAULT_FOLLOWER_MIN_SCAN_RANGE_M,
-    DEFAULT_FOLLOWER_SCAN_HALF_ANGLE_DEG,
-    DEFAULT_FOLLOWER_START_ON_PATH_TOLERANCE_M,
-    DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
-    DEFAULT_GOAL_TOLERANCE_M,
-    DEFAULT_MAX_AMCL_AGE_SEC,
-    DEFAULT_MAX_AMCL_VAR_X,
-    DEFAULT_MAX_AMCL_VAR_Y,
-    DEFAULT_MAX_AMCL_VAR_YAW_RAD2,
-    DEFAULT_MAX_POSE_AGE_SEC,
-    DEFAULT_MAX_SCAN_AGE_SEC,
-    DEFAULT_MAX_STABLE_POSE_JUMP_M,
-    DEFAULT_MAX_STABLE_YAW_JUMP_DEG,
-    DEFAULT_MIN_WAYPOINT_SPACING_M,
-    DEFAULT_NAV_TO_START_TIMEOUT_SEC,
-    DEFAULT_MAX_GOAL_SNAP_M,
-    DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO,
-    DEFAULT_MAX_REPLAN_SCAN_AGE_SEC,
-    DEFAULT_MAX_REPLAN_TF_AGE_SEC,
-    DEFAULT_MAX_START_SNAP_M,
-    DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG,
-    DEFAULT_OBSTACLE_FORWARD_DISTANCE_M,
-    DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M,
-    DEFAULT_OBSTACLE_INFLATE_RADIUS_M,
-    DEFAULT_OBSTACLE_MIN_CLUSTER_SIZE,
-    DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M,
-    DEFAULT_OBSTACLE_MIN_RANGE_M,
-    DEFAULT_PREFLIGHT_TIMEOUT_SEC,
-    DEFAULT_REPLAN_OUTPUT_DIR,
-    DEFAULT_REPLAN_TIMEOUT_SEC,
-    DEFAULT_RESULTS_CSV,
-    DEFAULT_ROBOT_FOOTPRINT_RADIUS_M,
-    DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M,
-    DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M,
-    DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT,
-    DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
-    DEFAULT_RUN_LOCAL_MAP_INFLATION_RADIUS_M,
-    DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO,
-    DEFAULT_RUN_LOCAL_MAP_MAX_SCAN_AGE_SEC,
-    DEFAULT_RUN_LOCAL_MAP_MAX_TF_AGE_SEC,
-    DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES,
-    DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT,
-    DEFAULT_RUN_LOCAL_MAP_MIN_USED_POINTS,
-    DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE,
-    DEFAULT_SPIN_MIN_SCAN_RANGE_M,
-    DEFAULT_STATIC_MAP,
-    DEFAULT_SPIN_MIN_VALID_SCAN_COUNT,
-    DEFAULT_STABLE_AMCL_SAMPLES,
-    DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC,
-    DEFAULT_TF_LOOKUP_TIMEOUT_SEC,
-    DEFAULT_TF_READY_TIMEOUT_SEC,
-    DEFAULT_WAYPOINTS_CSV,
-    DEFAULT_WAYPOINT_TOLERANCE_M,
-    RunDiagnostics,
-)
-from .pure import (
-    build_follower_command,
-    load_waypoints,
-    staging_goal_from_waypoints,
-    timestamp_now,
-)
+from .model import (ArenaActiveSpinConfig, ArenaGeometryConfig, CoordinatorConfig,
+                    SPIN_SHARED_FIELDS, geometry_arguments, spin_arguments)
+from .pure import build_follower_command, load_waypoints, staging_goal_from_waypoints
 
-
-DEFAULT_ARENA_ACTIVE_PROFILE = "default"
-
-ARENA_ACTIVE_PROFILE_DEFAULTS = {
-    DEFAULT_ARENA_ACTIVE_PROFILE: {},
-    "real_shadow": {
-        "arena_active_explore_max_attempts": 12,
-        "arena_active_explore_max_single_move_m": 0.80,
-        "arena_active_explore_max_total_distance_m": 5.00,
-        "arena_active_explore_max_candidate_path_m": 3.00,
-        "arena_active_explore_grid_size_m": 5.0,
-        "arena_active_explore_inflation_radius_m": 0.12,
-        "arena_active_explore_soft_clearance_radius_m": 0.15,
-        "arena_active_explore_soft_clearance_weight": 2.0,
-        "arena_active_explore_max_path_segments": 24,
-        "arena_active_explore_curve_lookahead_m": 0.16,
-        "arena_active_explore_curve_linear_speed_mps": 0.05,
-        "arena_active_explore_curve_max_angular_rad_s": 0.40,
-        "arena_active_explore_map_max_samples": 1500,
-    },
+# Measured arena tuning changes exploration limits, never motion authorization.
+REAL_SHADOW_DEFAULTS = {
+    "arena_active_explore_max_attempts": 12,
+    "arena_active_explore_max_single_move_m": 0.80,
+    "arena_active_explore_max_total_distance_m": 5.00,
+    "arena_active_explore_max_candidate_path_m": 3.00,
+    "arena_active_explore_grid_size_m": 5.0,
+    "arena_active_explore_inflation_radius_m": 0.12,
+    "arena_active_explore_soft_clearance_radius_m": 0.15,
+    "arena_active_explore_soft_clearance_weight": 2.0,
+    "arena_active_explore_max_path_segments": 24,
+    "arena_active_explore_curve_lookahead_m": 0.16,
+    "arena_active_explore_curve_linear_speed_mps": 0.05,
+    "arena_active_explore_curve_max_angular_rad_s": 0.40,
+    "arena_active_explore_map_max_samples": 1500,
 }
+CHOICES = {
+    "arena_active_spin_direction": ("ccw", "cw"),
+    "arena_active_recovery_mode": ("none", "active_explore"),
+    "arena_active_recovery_executor": ("dry_run", "cmd_vel"),
+    "heater_wall_side": ("+x", "-x"),
+    "arena_force_short_wall_side": ("axis_negative", "axis_positive"),
+    "arena_force_short_wall_type": ("heater", "clean"),
+}
+NONNEGATIVE = {
+    "amcl_settle_min_sec", "min_waypoint_spacing_m", "arena_width_match_min_margin_m",
+    "arena_max_short_wall_range_sum_error_m", "arena_active_explore_soft_clearance_radius_m",
+    "arena_active_explore_soft_clearance_weight",
+}
+SIGNED = {"arena_map_center_x", "arena_map_center_y", "arena_map_yaw_deg"}
 
 
-def preparse_arena_active_profile(argv):
-    profile_parser = argparse.ArgumentParser(add_help=False)
-    profile_parser.add_argument(
-        "--arena-active-profile",
-        choices=tuple(ARENA_ACTIVE_PROFILE_DEFAULTS),
-        default=DEFAULT_ARENA_ACTIVE_PROFILE,
-    )
-    profile_args, _unknown = profile_parser.parse_known_args(argv or [])
-    return profile_args.arena_active_profile
+def add_options(parser, defaults, mapping):
+    for field, name in mapping.items():
+        default = getattr(defaults, field)
+        option = "--" + name.replace("_", "-")
+        if isinstance(default, bool):
+            parser.add_argument(option, default=default, action=argparse.BooleanOptionalAction)
+        else:
+            value_type = (str if name in CHOICES else float) if default is None else type(default)
+            parser.add_argument(option, default=default, type=value_type,
+                                choices=CHOICES.get(name))
 
 
-def arena_active_profile_default(profile, field, fallback):
-    return ARENA_ACTIVE_PROFILE_DEFAULTS[profile].get(field, fallback)
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Run arena-prior localization, Nav2 staging, and waypoint following.")
+    add_options(parser, CoordinatorConfig(), {field.name: field.name
+                                             for field in fields(CoordinatorConfig)})
+    add_options(parser, ArenaGeometryConfig(), geometry_arguments())
+    add_options(parser, ArenaActiveSpinConfig("", Path()), {
+        field: name for field, name in spin_arguments().items()
+        if field not in SPIN_SHARED_FIELDS
+    })
+    parser.add_argument("--arena-active-diagnostics-json", type=Path)
+    parser.add_argument("--arena-active-profile", choices=("default", "real_shadow"), default="default")
+    parser.set_defaults(arena_active_require_operator_confirmation=False)
+    parser.add_argument("--no-arena-active-operator-confirmation",
+                        dest="arena_active_require_operator_confirmation", action="store_false")
+    parser.add_argument("--arena-active-explore-allow-unknown",
+                        dest="arena_active_explore_unknown_blocked", action="store_false")
+    # Apply preset before the final parse so explicit arguments win.
+    profile = argparse.ArgumentParser(add_help=False)
+    profile.add_argument("--arena-active-profile", default="default")
+    if profile.parse_known_args(argv)[0].arena_active_profile == "real_shadow":
+        parser.set_defaults(**REAL_SHADOW_DEFAULTS)
+    args = parser.parse_args(argv)
+    if not args.run_id:
+        args.run_id = datetime.now().strftime("arena_prior_two_stage_%Y%m%d_%H%M%S")
+    validate_args(parser, args)
+    return args
+
+
+def validate_args(parser, args):
+    for name, value in vars(args).items():
+        if type(value) not in (int, float):
+            continue
+        if not math.isfinite(value):
+            parser.error(f"--{name.replace('_', '-')} must be finite")
+        if name in SIGNED:
+            continue
+        if value < 0 or (value == 0 and name not in NONNEGATIVE):
+            parser.error(f"--{name.replace('_', '-')} must be "
+                         + ("non-negative" if name in NONNEGATIVE else "greater than zero"))
+    if args.arena_active_recovery_executor != "dry_run" and args.arena_active_recovery_mode != "active_explore":
+        parser.error("--arena-active-recovery-executor cmd_vel requires active_explore mode")
+    if (args.arena_force_short_wall_side is None) != (args.arena_force_short_wall_type is None):
+        parser.error("--arena-force-short-wall-side and --arena-force-short-wall-type must be provided together")
+    if args.arena_active_explore_curve_goal_tolerance_m > args.arena_active_explore_curve_lookahead_m:
+        parser.error("exploration goal tolerance must not exceed lookahead")
+    if args.arena_active_explore_curve_linear_speed_mps > 0.10:
+        parser.error("exploration linear speed must be <= 0.10 m/s")
+    if args.arena_active_explore_curve_max_angular_rad_s > 0.80:
+        parser.error("exploration angular speed must be <= 0.80 rad/s")
+    for name in ("arena_min_parallel_score", "arena_min_short_wall_confidence",
+                 "arena_min_classification_margin",
+                 "arena_active_center_reposition_heater_approach_min_selected_score",
+                 "arena_active_center_reposition_heater_approach_max_opposite_score",
+                 "arena_active_center_reposition_heater_approach_min_delta"):
+        if getattr(args, name) > 1:
+            parser.error(f"--{name.replace('_', '-')} must be <= 1")
 
 
 def run_follower_command(command, runner=subprocess.run):
@@ -132,988 +130,26 @@ def cleanup_motion(node):
 def require_motion_confirmation(args, staging_goal, follower_command):
     if args.yes:
         return True
-    print("\nThis command may move the physical TurtleBot.")
-    print("Safety requirements:")
-    print("  - clear the arena and keep an operator near the robot")
-    print("  - keep Ctrl+C and physical stop available")
-    print("  - ensure no other controller is intentionally publishing /cmd_vel")
-    if args.arena_active_enable_center_reposition:
-        print("  - reposition recovery may drive before /initialpose is published")
-    if (
-        args.arena_active_recovery_mode == "active_explore"
-        and args.arena_active_recovery_executor != "dry_run"
-    ):
-        print("  - active-explore recovery may drive before /initialpose is published")
-    print(f"Run ID: {args.run_id}")
-    print(
-        "Staging goal: "
-        f"x={staging_goal.waypoint.x:.3f}, "
-        f"y={staging_goal.waypoint.y:.3f}, "
-        f"yaw={staging_goal.yaw_deg:.1f} deg"
-    )
+    print("This command moves the TurtleBot through localization, Nav2 staging, and path following.")
+    print("Keep the arena clear and physical stop available.")
+    print(f"Staging: ({staging_goal.waypoint.x:.3f}, {staging_goal.waypoint.y:.3f}), "
+          f"yaw {staging_goal.yaw_deg:.1f} deg")
+    print(f"Exploration: {args.arena_active_recovery_mode}/{args.arena_active_recovery_executor}")
     if args.verbose:
         print("Follower command:", shlex.join(follower_command))
-    else:
-        print("Follower command: hidden; use --dry-run --verbose to inspect")
-    response = input("Type RUN to start arena-prior two-stage run: ").strip()
-    return response == "RUN"
+    return input("Type RUN to start: ").strip() == "RUN"
 
 
 def print_dry_run(args, waypoints, staging_goal, follower_command):
     print("Arena-prior two-stage waypoint run dry run")
-    print(f"Waypoint CSV: {args.waypoints}")
-    print(f"Waypoints: {len(waypoints)}")
-    print(
-        "Selected waypoint 0: "
-        f"x={staging_goal.waypoint.x:.3f}, y={staging_goal.waypoint.y:.3f}"
-    )
+    print(f"Waypoints: {len(waypoints)} from {args.waypoints}")
+    print(f"Selected waypoint 0: {staging_goal.waypoint.x:.3f}, {staging_goal.waypoint.y:.3f}")
     print(f"Computed staging yaw: {staging_goal.yaw_deg:.1f} deg")
-    print(
-        "Arena-active: "
-        f"profile={args.arena_active_profile}, "
-        f"mode={args.arena_active_recovery_mode}, "
-        f"executor={args.arena_active_recovery_executor}"
-    )
-    print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
-    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
-    print(f"Follower command: {shlex.join(follower_command)}")
-    print(f"Log path: {args.results_csv}")
-    from .ros_runtime import rclpy
-
-    print(f"ROS imports available: {'yes' if rclpy is not None else 'no'}")
-    if not args.verbose:
-        print("Detailed config hidden; rerun with --verbose to print all parameters.")
-        return
-
-    print("ROS interfaces:")
-    print(f"  navigate action: {args.navigate_action}")
-    print(f"  initial pose topic: {args.initial_pose_topic}")
-    print(f"  amcl topic: {args.amcl_topic}")
-    print(f"  cmd_vel topic: {args.cmd_vel_topic}")
-    print(f"  scan topic: {args.scan_topic}")
-    print(f"  odom topic: {args.odom_topic}")
-    print("Arena-active recovery:")
-    print(f"  profile: {args.arena_active_profile}")
-    print(f"  mode: {args.arena_active_recovery_mode}")
-    print(f"  executor: {args.arena_active_recovery_executor}")
-    print(
-        "  active-explore max attempts: "
-        f"{args.arena_active_explore_max_attempts}"
-    )
-    print(
-        "  active-explore max path segments: "
-        f"{args.arena_active_explore_max_path_segments}"
-    )
-    print(
-        "  active-explore max single move: "
-        f"{args.arena_active_explore_max_single_move_m:.3f} m"
-    )
-    print(
-        "  active-explore max total distance: "
-        f"{args.arena_active_explore_max_total_distance_m:.3f} m"
-    )
-    if args.arena_active_explore_max_candidate_path_m is not None:
-        print(
-            "  active-explore max candidate path: "
-            f"{args.arena_active_explore_max_candidate_path_m:.3f} m"
-        )
-    print(
-        "  active-explore grid: "
-        f"{args.arena_active_explore_grid_size_m:.2f} m @ "
-        f"{args.arena_active_explore_grid_resolution_m:.3f} m"
-    )
-    print(
-        "  active-explore inflation: "
-        f"{args.arena_active_explore_inflation_radius_m:.3f} m"
-    )
-    print(
-        "  active-explore soft clearance: "
-        f"radius={args.arena_active_explore_soft_clearance_radius_m:.3f} m, "
-        f"weight={args.arena_active_explore_soft_clearance_weight:.3f}"
-    )
-    print(
-        "  active-explore unknown blocked: "
-        f"{'yes' if args.arena_active_explore_unknown_blocked else 'no'}"
-    )
-    print(
-        "  active-explore accumulated map: "
-        f"{'yes' if args.arena_active_explore_use_accumulated_map else 'no'}"
-    )
-    print(f"  active-explore map max samples: {args.arena_active_explore_map_max_samples}")
-    print(
-        "  active-explore curve follower: "
-        f"lookahead={args.arena_active_explore_curve_lookahead_m:.3f} m, "
-        f"goal tolerance={args.arena_active_explore_curve_goal_tolerance_m:.3f} m, "
-        f"linear={args.arena_active_explore_curve_linear_speed_mps:.3f} m/s, "
-        f"max angular={args.arena_active_explore_curve_max_angular_rad_s:.3f} rad/s"
-    )
-    print(
-        "  active-explore min progress before spin: "
-        f"{args.arena_active_explore_min_progress_before_spin_m:.3f} m"
-    )
-    print(
-        "  active-explore RViz helper: "
-        "use scripts/aufgabe03/arena_active_temporary_map_debug_viz.py separately"
-    )
-    print(f"Wait before custom follower: {'yes' if args.wait_before_follow else 'no'}")
-    print(
-        "Arena-active internal confirmations: "
-        f"{'yes' if args.arena_active_require_operator_confirmation else 'no'}"
-    )
-    print(f"LiDAR map replan: {'enabled' if args.enable_lidar_map_replan else 'disabled'}")
-    if args.enable_lidar_map_replan:
-        print(f"  artifact only: {'yes' if args.lidar_replan_artifact_only else 'no'}")
-        print(f"  static map: {args.static_map}")
-        print(f"  output dir: {args.replan_output_dir}")
-        print(
-            "  initial scans: "
-            f"{args.run_local_map_initial_scan_mode} x "
-            f"{args.run_local_map_initial_scan_count}"
-        )
-        print(f"  update mode: {args.run_local_map_update_mode}")
-        print(f"  min hit count: {args.run_local_map_min_hit_count}")
-        print(f"  inflation radius: {args.run_local_map_inflation_radius_m:.3f} m")
-
-
-def parse_args(argv):
-    arena_active_profile = preparse_arena_active_profile(argv)
-    parser = argparse.ArgumentParser(
-        description=(
-            "Run arena-prior localization, Nav2 staging, and waypoint following."
-        ),
-    )
-    parser.add_argument("--waypoints", default=DEFAULT_WAYPOINTS_CSV, type=Path)
-    parser.add_argument("--results-csv", default=DEFAULT_RESULTS_CSV, type=Path)
-    parser.add_argument("--run-id")
-    parser.add_argument("--notes", default="arena_prior_two_stage_run")
-    parser.add_argument("--map-frame", default="map")
-    parser.add_argument("--base-frame", default="base_footprint")
-    parser.add_argument("--fallback-base-frame", default="base_link")
-
-    parser.add_argument("--preflight-timeout-sec", default=DEFAULT_PREFLIGHT_TIMEOUT_SEC, type=float)
-    parser.add_argument(
-        "--nav-to-start-timeout-sec",
-        default=DEFAULT_NAV_TO_START_TIMEOUT_SEC,
-        type=float,
-    )
-    parser.add_argument("--tf-ready-timeout-sec", default=DEFAULT_TF_READY_TIMEOUT_SEC, type=float)
-    parser.add_argument(
-        "--tf-lookup-timeout-sec",
-        default=DEFAULT_TF_LOOKUP_TIMEOUT_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--tf-lookup-retry-period-sec",
-        default=DEFAULT_TF_LOOKUP_RETRY_PERIOD_SEC,
-        type=float,
-    )
-
-    parser.add_argument("--navigate-action", default="/navigate_to_pose")
-    parser.add_argument("--initial-pose-topic", default="/initialpose")
-    parser.add_argument("--amcl-topic", default="/amcl_pose")
-    parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
-    parser.add_argument("--scan-topic", default="/scan")
-    parser.add_argument("--odom-topic", default="/odom")
-    parser.add_argument(
-        "--arena-active-profile",
-        choices=tuple(ARENA_ACTIVE_PROFILE_DEFAULTS),
-        default=arena_active_profile,
-        help=(
-            "Apply a named arena-active tuning preset. real_shadow applies "
-            "the successful real-robot shadow exploration parameters; it does "
-            "not enable active_explore or cmd_vel by itself."
-        ),
-    )
-    parser.add_argument("--follower-script", default=DEFAULT_FOLLOWER_SCRIPT, type=Path)
-    parser.add_argument("--python-executable", default="python3")
-    parser.add_argument(
-        "--follower-startup-timeout-sec",
-        default=DEFAULT_FOLLOWER_STARTUP_TIMEOUT_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--follower-start-on-path-tolerance-m",
-        default=DEFAULT_FOLLOWER_START_ON_PATH_TOLERANCE_M,
-        type=float,
-        help=(
-            "Maximum distance from the planned waypoint path that is accepted "
-            "for handing off from Nav2 staging to the custom follower."
-        ),
-    )
-
-    parser.add_argument("--max-pose-age-sec", default=DEFAULT_MAX_POSE_AGE_SEC, type=float)
-    parser.add_argument("--max-scan-age-sec", default=DEFAULT_MAX_SCAN_AGE_SEC, type=float)
-    parser.add_argument("--max-amcl-age-sec", default=DEFAULT_MAX_AMCL_AGE_SEC, type=float)
-    parser.add_argument("--max-amcl-var-x", default=DEFAULT_MAX_AMCL_VAR_X, type=float)
-    parser.add_argument("--max-amcl-var-y", default=DEFAULT_MAX_AMCL_VAR_Y, type=float)
-    parser.add_argument(
-        "--max-amcl-var-yaw-rad2",
-        default=DEFAULT_MAX_AMCL_VAR_YAW_RAD2,
-        type=float,
-    )
-    parser.add_argument("--stable-amcl-samples", default=DEFAULT_STABLE_AMCL_SAMPLES, type=int)
-    parser.add_argument("--amcl-settle-min-sec", default=DEFAULT_AMCL_SETTLE_MIN_SEC, type=float)
-    parser.add_argument(
-        "--max-stable-pose-jump-m",
-        default=DEFAULT_MAX_STABLE_POSE_JUMP_M,
-        type=float,
-    )
-    parser.add_argument(
-        "--max-stable-yaw-jump-deg",
-        default=DEFAULT_MAX_STABLE_YAW_JUMP_DEG,
-        type=float,
-    )
-    parser.add_argument(
-        "--spin-min-scan-range-m",
-        default=DEFAULT_SPIN_MIN_SCAN_RANGE_M,
-        type=float,
-    )
-    parser.add_argument(
-        "--spin-min-valid-scan-count",
-        default=DEFAULT_SPIN_MIN_VALID_SCAN_COUNT,
-        type=int,
-    )
-    parser.add_argument(
-        "--follower-scan-half-angle-deg",
-        default=DEFAULT_FOLLOWER_SCAN_HALF_ANGLE_DEG,
-        type=float,
-    )
-    parser.add_argument(
-        "--follower-hard-stop-range-m",
-        default=DEFAULT_FOLLOWER_HARD_STOP_RANGE_M,
-        type=float,
-    )
-    parser.add_argument(
-        "--follower-min-scan-range-m",
-        default=DEFAULT_FOLLOWER_MIN_SCAN_RANGE_M,
-        type=float,
-    )
-    parser.add_argument("--arrival-tolerance-m", default=DEFAULT_ARRIVAL_TOLERANCE_M, type=float)
-    parser.add_argument(
-        "--arrival-yaw-tolerance-deg",
-        default=DEFAULT_ARRIVAL_YAW_TOLERANCE_DEG,
-        type=float,
-    )
-    parser.add_argument("--waypoint-tolerance-m", default=DEFAULT_WAYPOINT_TOLERANCE_M, type=float)
-    parser.add_argument("--goal-tolerance-m", default=DEFAULT_GOAL_TOLERANCE_M, type=float)
-    parser.add_argument(
-        "--min-waypoint-spacing-m",
-        default=DEFAULT_MIN_WAYPOINT_SPACING_M,
-        type=float,
-    )
-    parser.add_argument("--control-rate-hz", default=DEFAULT_CONTROL_RATE_HZ, type=float)
-    parser.add_argument("--wait-before-follow", action="store_true")
-    parser.add_argument("--enable-lidar-map-replan", action="store_true")
-    parser.add_argument("--lidar-replan-artifact-only", action="store_true")
-    parser.add_argument("--static-map", default=DEFAULT_STATIC_MAP, type=Path)
-    parser.add_argument("--replan-output-dir", default=DEFAULT_REPLAN_OUTPUT_DIR, type=Path)
-    parser.add_argument("--max-replans", default=1, type=int)
-    parser.add_argument("--replan-timeout-sec", default=DEFAULT_REPLAN_TIMEOUT_SEC, type=float)
-    parser.add_argument("--max-replan-scan-age-sec", default=DEFAULT_MAX_REPLAN_SCAN_AGE_SEC, type=float)
-    parser.add_argument("--max-replan-tf-age-sec", default=DEFAULT_MAX_REPLAN_TF_AGE_SEC, type=float)
-    parser.add_argument("--allow-latest-tf-replan-fallback", action="store_true")
-    parser.add_argument("--obstacle-forward-distance-m", default=DEFAULT_OBSTACLE_FORWARD_DISTANCE_M, type=float)
-    parser.add_argument("--obstacle-forward-half-width-m", default=DEFAULT_OBSTACLE_FORWARD_HALF_WIDTH_M, type=float)
-    parser.add_argument("--obstacle-angle-window-deg", default=DEFAULT_OBSTACLE_ANGLE_WINDOW_DEG, type=float)
-    parser.add_argument("--obstacle-min-range-m", default=DEFAULT_OBSTACLE_MIN_RANGE_M, type=float)
-    parser.add_argument("--robot-footprint-radius-m", default=DEFAULT_ROBOT_FOOTPRINT_RADIUS_M, type=float)
-    parser.add_argument("--obstacle-min-cluster-size", default=DEFAULT_OBSTACLE_MIN_CLUSTER_SIZE, type=int)
-    parser.add_argument("--obstacle-min-cluster-width-m", default=DEFAULT_OBSTACLE_MIN_CLUSTER_WIDTH_M, type=float)
-    parser.add_argument("--obstacle-inflate-radius-m", default=DEFAULT_OBSTACLE_INFLATE_RADIUS_M, type=float)
-    parser.add_argument("--max-start-snap-m", default=DEFAULT_MAX_START_SNAP_M, type=float)
-    parser.add_argument("--max-goal-snap-m", default=DEFAULT_MAX_GOAL_SNAP_M, type=float)
-    parser.add_argument(
-        "--max-replan-path-length-ratio",
-        default=DEFAULT_MAX_REPLAN_PATH_LENGTH_RATIO,
-        type=float,
-    )
-    parser.add_argument(
-        "--run-local-map-initial-scan-mode",
-        default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_MODE,
-        choices=["none", "forward", "full"],
-    )
-    parser.add_argument(
-        "--run-local-map-initial-scan-count",
-        default=DEFAULT_RUN_LOCAL_MAP_INITIAL_SCAN_COUNT,
-        type=int,
-    )
-    parser.add_argument(
-        "--run-local-map-update-mode",
-        default=DEFAULT_RUN_LOCAL_MAP_UPDATE_MODE,
-        choices=["none", "forward", "full"],
-    )
-    parser.add_argument(
-        "--run-local-map-min-hit-count",
-        default=DEFAULT_RUN_LOCAL_MAP_MIN_HIT_COUNT,
-        type=int,
-    )
-    parser.add_argument(
-        "--run-local-map-inflation-radius-m",
-        default=DEFAULT_RUN_LOCAL_MAP_INFLATION_RADIUS_M,
-        type=float,
-    )
-    parser.add_argument(
-        "--run-local-map-max-tf-age-sec",
-        default=DEFAULT_RUN_LOCAL_MAP_MAX_TF_AGE_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--run-local-map-max-scan-age-sec",
-        default=DEFAULT_RUN_LOCAL_MAP_MAX_SCAN_AGE_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--run-local-map-min-used-points",
-        default=DEFAULT_RUN_LOCAL_MAP_MIN_USED_POINTS,
-        type=int,
-    )
-    parser.add_argument(
-        "--run-local-map-max-rejected-ratio",
-        default=DEFAULT_RUN_LOCAL_MAP_MAX_REJECTED_RATIO,
-        type=float,
-    )
-    parser.add_argument(
-        "--run-local-map-corridor-check-distance-m",
-        default=DEFAULT_RUN_LOCAL_MAP_CORRIDOR_CHECK_DISTANCE_M,
-        type=float,
-    )
-    parser.add_argument("--run-local-map-corridor-radius-m", type=float)
-    parser.add_argument(
-        "--run-local-map-clearance-margin-m",
-        default=DEFAULT_RUN_LOCAL_MAP_CLEARANCE_MARGIN_M,
-        type=float,
-    )
-    parser.add_argument(
-        "--run-local-map-max-updates",
-        default=DEFAULT_RUN_LOCAL_MAP_MAX_UPDATES,
-        type=int,
-    )
-    parser.add_argument("--run-local-map-artifact-prefix")
-
-    parser.add_argument(
-        "--arena-active-spin-direction",
-        default="ccw",
-        choices=["ccw", "cw"],
-    )
-    parser.add_argument("--arena-active-angular-speed-rad-s", default=0.25, type=float)
-    parser.add_argument("--arena-active-max-spin-sec", default=30.0, type=float)
-    parser.add_argument("--arena-active-spin-complete-tolerance-deg", default=5.0, type=float)
-    parser.add_argument("--arena-active-min-angular-progress-rad-s", default=0.05, type=float)
-    parser.add_argument("--arena-active-progress-check-sec", default=2.0, type=float)
-    parser.add_argument("--arena-active-min-scan-samples", default=20, type=int)
-    parser.add_argument("--arena-active-max-odom-scan-age-sec", default=0.20, type=float)
-    parser.add_argument("--arena-active-stop-settle-sec", default=0.5, type=float)
-    parser.add_argument("--arena-active-min-front-clearance-m", default=0.35, type=float)
-    parser.add_argument("--arena-active-min-side-clearance-m", default=0.20, type=float)
-    parser.add_argument("--arena-active-min-rear-clearance-m", default=0.20, type=float)
-    parser.add_argument(
-        "--arena-active-require-operator-confirmation",
-        dest="arena_active_require_operator_confirmation",
-        action="store_true",
-        help=(
-            "Ask again before arena-active spin and center reposition. "
-            "By default the two-stage runner relies on the initial RUN prompt."
-        ),
-    )
-    parser.add_argument(
-        "--no-arena-active-operator-confirmation",
-        dest="arena_active_require_operator_confirmation",
-        action="store_false",
-        help="Use only the two-stage runner's initial RUN prompt for arena-active motion.",
-    )
-    parser.set_defaults(arena_active_require_operator_confirmation=False)
-    parser.add_argument("--arena-active-allow-extra-cmd-vel-publishers", action="store_true")
-    parser.add_argument(
-        "--arena-active-validation-timeout-sec",
-        default=DEFAULT_ARENA_ACTIVE_VALIDATION_TIMEOUT_SEC,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-max-post-amcl-prior-position-error-m",
-        default=DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_POSITION_ERROR_M,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-max-post-amcl-prior-yaw-error-deg",
-        default=DEFAULT_ARENA_ACTIVE_MAX_POST_AMCL_PRIOR_YAW_ERROR_DEG,
-        type=float,
-    )
-    parser.add_argument("--arena-active-diagnostics-json", type=Path)
-    parser.add_argument("--arena-active-range-stride", default=6, type=int)
-    parser.add_argument("--arena-active-max-points", default=3000, type=int)
-    parser.add_argument(
-        "--arena-active-enable-center-reposition",
-        "--arena-active-enable-reposition",
-        dest="arena_active_enable_center_reposition",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--arena-active-recovery-mode",
-        choices=["none", "legacy", "active_explore"],
-        default=None,
-        help=(
-            "Arena-active recovery after pose_not_unique. The legacy center "
-            "reposition flag maps to legacy when this is omitted."
-        ),
-    )
-    parser.add_argument(
-        "--arena-active-recovery-executor",
-        choices=["dry_run", "cmd_vel"],
-        default="dry_run",
-    )
-    parser.add_argument("--arena-active-center-reposition-max-attempts", default=1, type=int)
-    parser.add_argument(
-        "--arena-active-center-reposition-target-nearest-short-wall-range-m",
-        default=1.65,
-        type=float,
-    )
-    parser.add_argument("--arena-active-center-reposition-min-step-m", default=0.25, type=float)
-    parser.add_argument("--arena-active-center-reposition-max-step-m", default=1.10, type=float)
-    parser.add_argument(
-        "--arena-active-center-reposition-linear-speed-mps",
-        default=0.08,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-angular-speed-rad-s",
-        default=0.25,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heading-tolerance-deg",
-        default=8.0,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-min-front-clearance-m",
-        default=0.45,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-lateral-offset-threshold-m",
-        default=0.25,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-lateral-target-offset-m",
-        default=0.10,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-lateral-min-step-m",
-        default=0.15,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-lateral-max-step-m",
-        default=0.55,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-disable-heater-approach-reposition",
-        dest="arena_active_center_reposition_enable_heater_approach",
-        action="store_false",
-        default=True,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-max-attempts",
-        default=1,
-        type=int,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-target-range-m",
-        default=1.05,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-min-selected-score",
-        default=0.50,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-max-opposite-score",
-        default=0.30,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-min-delta",
-        default=0.35,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-min-step-m",
-        default=0.25,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-center-reposition-heater-approach-max-step-m",
-        default=1.10,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-attempts",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_max_attempts",
-            6,
-        ),
-        type=int,
-    )
-    parser.add_argument(
-        "--arena-active-explore-shadow-completion-confirmations",
-        default=2,
-        type=int,
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-shadow-stall-replans",
-        default=3,
-        type=int,
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-localization-pose-attempts",
-        default=2,
-        type=int,
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-single-move-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_max_single_move_m",
-            0.45,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-total-distance-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_max_total_distance_m",
-            0.90,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-candidate-path-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_max_candidate_path_m",
-            None,
-        ),
-        type=float,
-        help=(
-            "Maximum A* path length accepted for a recovery candidate. "
-            "The executed movement is still capped by max-single-move."
-        ),
-    )
-    parser.add_argument(
-        "--arena-active-explore-grid-resolution-m",
-        default=0.05,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-grid-size-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_grid_size_m",
-            4.0,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-inflation-radius-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_inflation_radius_m",
-            0.15,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-soft-clearance-radius-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_soft_clearance_radius_m",
-            0.20,
-        ),
-        type=float,
-        help=(
-            "Soft obstacle-clearance radius used as an A* cost. Unlike "
-            "inflation, this does not block cells; it biases paths toward "
-            "the middle of passable gaps."
-        ),
-    )
-    parser.add_argument(
-        "--arena-active-explore-soft-clearance-weight",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_soft_clearance_weight",
-            3.0,
-        ),
-        type=float,
-        help=(
-            "Weight for the active-explore soft obstacle-clearance A* cost. "
-            "Set to 0 to disable the soft preference."
-        ),
-    )
-    parser.add_argument(
-        "--arena-active-explore-unknown-blocked",
-        dest="arena_active_explore_unknown_blocked",
-        action="store_true",
-        default=True,
-    )
-    parser.add_argument(
-        "--arena-active-explore-allow-unknown",
-        dest="arena_active_explore_unknown_blocked",
-        action="store_false",
-    )
-    parser.add_argument(
-        "--arena-active-explore-max-path-segments",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_max_path_segments",
-            3,
-        ),
-        type=int,
-    )
-    parser.add_argument(
-        "--arena-active-explore-curve-lookahead-m",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_curve_lookahead_m",
-            0.18,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-curve-goal-tolerance-m",
-        default=0.05,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-curve-linear-speed-mps",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_curve_linear_speed_mps",
-            0.06,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-curve-max-angular-rad-s",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_curve_max_angular_rad_s",
-            0.45,
-        ),
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-min-progress-before-spin-m",
-        default=0.05,
-        type=float,
-    )
-    parser.add_argument(
-        "--arena-active-explore-use-accumulated-map",
-        dest="arena_active_explore_use_accumulated_map",
-        action="store_true",
-        default=True,
-        help=(
-            "Plan active-explore recovery with the temporary odom-frame map "
-            "accumulated from the first spin and recovery motion scans."
-        ),
-    )
-    parser.add_argument(
-        "--no-arena-active-explore-accumulated-map",
-        dest="arena_active_explore_use_accumulated_map",
-        action="store_false",
-        help="Plan active-explore recovery from only the latest scan.",
-    )
-    parser.add_argument(
-        "--arena-active-explore-map-max-samples",
-        default=arena_active_profile_default(
-            arena_active_profile,
-            "arena_active_explore_map_max_samples",
-            240,
-        ),
-        type=int,
-    )
-    parser.add_argument("--arena-length-m", default=3.90, type=float)
-    parser.add_argument("--arena-width-m", type=float)
-    parser.add_argument("--arena-heater-wall-width-m", default=2.016, type=float)
-    parser.add_argument("--arena-clean-wall-width-m", default=1.967, type=float)
-    parser.add_argument("--arena-width-match-min-margin-m", default=0.015, type=float)
-    parser.add_argument("--arena-max-short-wall-range-sum-error-m", default=0.15, type=float)
-    parser.add_argument("--arena-map-center-x", default=0.0, type=float)
-    parser.add_argument("--arena-map-center-y", default=0.0, type=float)
-    parser.add_argument("--arena-map-yaw-deg", default=0.0, type=float)
-    parser.add_argument("--heater-wall-side", default="+x", choices=["+x", "-x"])
-    parser.add_argument("--arena-min-wall-points", default=20, type=int)
-    parser.add_argument("--arena-max-wall-separation-error-m", default=0.20, type=float)
-    parser.add_argument("--arena-max-line-rmse-m", default=0.08, type=float)
-    parser.add_argument("--arena-min-parallel-score", default=0.90, type=float)
-    parser.add_argument("--arena-min-short-wall-confidence", default=0.75, type=float)
-    parser.add_argument("--arena-min-classification-margin", default=0.15, type=float)
-    parser.add_argument(
-        "--arena-force-short-wall-side",
-        choices=["axis_negative", "axis_positive"],
-    )
-    parser.add_argument(
-        "--arena-force-short-wall-type",
-        choices=["heater", "clean"],
-    )
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--yes", action="store_true")
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print detailed configuration and arena-active diagnostic prompts.",
-    )
-    parser.add_argument("--no-log", action="store_true")
-    args = parser.parse_args(argv)
-
-    if not args.run_id:
-        args.run_id = datetime.now().strftime("arena_prior_two_stage_%Y%m%d_%H%M%S")
-    if args.arena_active_recovery_mode is None:
-        args.arena_active_recovery_mode = (
-            "legacy" if args.arena_active_enable_center_reposition else "none"
-        )
-    elif args.arena_active_recovery_mode == "legacy":
-        args.arena_active_enable_center_reposition = True
-    else:
-        args.arena_active_enable_center_reposition = False
-    validate_args(parser, args)
-    return args
-
-
-def validate_args(parser, args):
-    positive_float_fields = [
-        "preflight_timeout_sec",
-        "nav_to_start_timeout_sec",
-        "tf_ready_timeout_sec",
-        "tf_lookup_timeout_sec",
-        "tf_lookup_retry_period_sec",
-        "follower_startup_timeout_sec",
-        "follower_start_on_path_tolerance_m",
-        "arena_active_validation_timeout_sec",
-        "arena_active_max_post_amcl_prior_position_error_m",
-        "arena_active_max_post_amcl_prior_yaw_error_deg",
-        "max_pose_age_sec",
-        "max_scan_age_sec",
-        "max_amcl_age_sec",
-        "max_amcl_var_x",
-        "max_amcl_var_y",
-        "max_amcl_var_yaw_rad2",
-        "max_stable_pose_jump_m",
-        "max_stable_yaw_jump_deg",
-        "spin_min_scan_range_m",
-        "follower_scan_half_angle_deg",
-        "follower_hard_stop_range_m",
-        "follower_min_scan_range_m",
-        "arrival_tolerance_m",
-        "arrival_yaw_tolerance_deg",
-        "waypoint_tolerance_m",
-        "goal_tolerance_m",
-        "control_rate_hz",
-        "replan_timeout_sec",
-        "max_replan_scan_age_sec",
-        "max_replan_tf_age_sec",
-        "obstacle_forward_distance_m",
-        "obstacle_forward_half_width_m",
-        "obstacle_angle_window_deg",
-        "obstacle_min_range_m",
-        "robot_footprint_radius_m",
-        "obstacle_min_cluster_width_m",
-        "obstacle_inflate_radius_m",
-        "max_start_snap_m",
-        "max_goal_snap_m",
-        "max_replan_path_length_ratio",
-        "run_local_map_inflation_radius_m",
-        "run_local_map_max_tf_age_sec",
-        "run_local_map_max_scan_age_sec",
-        "run_local_map_corridor_check_distance_m",
-        "run_local_map_clearance_margin_m",
-        "arena_active_angular_speed_rad_s",
-        "arena_active_max_spin_sec",
-        "arena_active_spin_complete_tolerance_deg",
-        "arena_active_min_angular_progress_rad_s",
-        "arena_active_progress_check_sec",
-        "arena_active_max_odom_scan_age_sec",
-        "arena_active_stop_settle_sec",
-        "arena_active_min_front_clearance_m",
-        "arena_active_min_side_clearance_m",
-        "arena_active_min_rear_clearance_m",
-        "arena_active_center_reposition_target_nearest_short_wall_range_m",
-        "arena_active_center_reposition_min_step_m",
-        "arena_active_center_reposition_max_step_m",
-        "arena_active_center_reposition_linear_speed_mps",
-        "arena_active_center_reposition_angular_speed_rad_s",
-        "arena_active_center_reposition_heading_tolerance_deg",
-        "arena_active_center_reposition_min_front_clearance_m",
-        "arena_active_center_reposition_lateral_offset_threshold_m",
-        "arena_active_center_reposition_lateral_target_offset_m",
-        "arena_active_center_reposition_lateral_min_step_m",
-        "arena_active_center_reposition_lateral_max_step_m",
-        "arena_active_center_reposition_heater_approach_target_range_m",
-        "arena_active_center_reposition_heater_approach_min_selected_score",
-        "arena_active_center_reposition_heater_approach_max_opposite_score",
-        "arena_active_center_reposition_heater_approach_min_delta",
-        "arena_active_center_reposition_heater_approach_min_step_m",
-        "arena_active_center_reposition_heater_approach_max_step_m",
-        "arena_active_explore_max_single_move_m",
-        "arena_active_explore_max_total_distance_m",
-        "arena_active_explore_grid_resolution_m",
-        "arena_active_explore_grid_size_m",
-        "arena_active_explore_inflation_radius_m",
-        "arena_active_explore_curve_lookahead_m",
-        "arena_active_explore_curve_goal_tolerance_m",
-        "arena_active_explore_curve_linear_speed_mps",
-        "arena_active_explore_curve_max_angular_rad_s",
-        "arena_active_explore_min_progress_before_spin_m",
-        "arena_length_m",
-        "arena_heater_wall_width_m",
-        "arena_clean_wall_width_m",
-        "arena_max_wall_separation_error_m",
-        "arena_max_line_rmse_m",
-        "arena_min_parallel_score",
-        "arena_min_short_wall_confidence",
-        "arena_min_classification_margin",
-    ]
-    for field in positive_float_fields:
-        if getattr(args, field) <= 0.0:
-            parser.error(f"--{field.replace('_', '-')} must be greater than zero")
-    if (
-        args.arena_active_explore_max_candidate_path_m is not None
-        and args.arena_active_explore_max_candidate_path_m <= 0.0
-    ):
-        parser.error("--arena-active-explore-max-candidate-path-m must be greater than zero")
-    if args.stable_amcl_samples < 1:
-        parser.error("--stable-amcl-samples must be >= 1")
-    if args.amcl_settle_min_sec < 0.0:
-        parser.error("--amcl-settle-min-sec must be non-negative")
-    if args.spin_min_valid_scan_count < 1:
-        parser.error("--spin-min-valid-scan-count must be >= 1")
-    if args.follower_hard_stop_range_m >= args.follower_min_scan_range_m:
-        parser.error("--follower-hard-stop-range-m must be < --follower-min-scan-range-m")
-    if args.max_replans < 1:
-        parser.error("--max-replans must be >= 1")
-    if args.run_local_map_initial_scan_count < 1:
-        parser.error("--run-local-map-initial-scan-count must be >= 1")
-    if args.run_local_map_min_hit_count < 1:
-        parser.error("--run-local-map-min-hit-count must be >= 1")
-    if args.run_local_map_min_used_points < 1:
-        parser.error("--run-local-map-min-used-points must be >= 1")
-    if not (0.0 <= args.run_local_map_max_rejected_ratio <= 1.0):
-        parser.error("--run-local-map-max-rejected-ratio must be between 0 and 1")
-    if (
-        args.run_local_map_corridor_radius_m is not None
-        and args.run_local_map_corridor_radius_m <= 0.0
-    ):
-        parser.error("--run-local-map-corridor-radius-m must be greater than zero")
-    if args.run_local_map_max_updates < 1:
-        parser.error("--run-local-map-max-updates must be >= 1")
-    if args.obstacle_min_cluster_size < 1:
-        parser.error("--obstacle-min-cluster-size must be >= 1")
-    if args.arena_active_min_scan_samples < 1:
-        parser.error("--arena-active-min-scan-samples must be >= 1")
-    if args.arena_active_range_stride < 1:
-        parser.error("--arena-active-range-stride must be >= 1")
-    if args.arena_active_max_points < 1:
-        parser.error("--arena-active-max-points must be >= 1")
-    if args.arena_active_center_reposition_max_attempts < 1:
-        parser.error("--arena-active-center-reposition-max-attempts must be >= 1")
-    if args.arena_active_center_reposition_heater_approach_max_attempts < 1:
-        parser.error(
-            "--arena-active-center-reposition-heater-approach-max-attempts must be >= 1"
-        )
-    if args.arena_active_explore_max_attempts < 1:
-        parser.error("--arena-active-explore-max-attempts must be >= 1")
-    if args.arena_active_explore_shadow_completion_confirmations < 1:
-        parser.error(
-            "--arena-active-explore-shadow-completion-confirmations must be >= 1"
-        )
-    if args.arena_active_explore_max_shadow_stall_replans < 1:
-        parser.error("--arena-active-explore-max-shadow-stall-replans must be >= 1")
-    if args.arena_active_explore_max_localization_pose_attempts < 1:
-        parser.error(
-            "--arena-active-explore-max-localization-pose-attempts must be >= 1"
-        )
-    if args.arena_active_explore_max_path_segments < 1:
-        parser.error("--arena-active-explore-max-path-segments must be >= 1")
-    if args.arena_active_explore_map_max_samples < 1:
-        parser.error("--arena-active-explore-map-max-samples must be >= 1")
-    if args.arena_active_explore_soft_clearance_radius_m < 0.0:
-        parser.error("--arena-active-explore-soft-clearance-radius-m must be >= 0")
-    if args.arena_active_explore_soft_clearance_weight < 0.0:
-        parser.error("--arena-active-explore-soft-clearance-weight must be >= 0")
-    if (
-        args.arena_active_explore_curve_goal_tolerance_m
-        > args.arena_active_explore_curve_lookahead_m
-    ):
-        parser.error(
-            "--arena-active-explore-curve-goal-tolerance-m must be <= "
-            "--arena-active-explore-curve-lookahead-m"
-        )
-    if args.arena_active_explore_curve_linear_speed_mps > 0.10:
-        parser.error("--arena-active-explore-curve-linear-speed-mps must be <= 0.10")
-    if args.arena_active_explore_curve_max_angular_rad_s > 0.80:
-        parser.error("--arena-active-explore-curve-max-angular-rad-s must be <= 0.80")
-    if (
-        args.arena_active_recovery_mode != "active_explore"
-        and args.arena_active_recovery_executor != "dry_run"
-    ):
-        parser.error(
-            "--arena-active-recovery-executor other than dry_run requires "
-            "--arena-active-recovery-mode active_explore"
-        )
-    if (
-        args.arena_active_center_reposition_min_step_m
-        > args.arena_active_center_reposition_max_step_m
-    ):
-        parser.error(
-            "--arena-active-center-reposition-min-step-m must be <= "
-            "--arena-active-center-reposition-max-step-m"
-        )
-    if (
-        args.arena_active_center_reposition_lateral_min_step_m
-        > args.arena_active_center_reposition_lateral_max_step_m
-    ):
-        parser.error(
-            "--arena-active-center-reposition-lateral-min-step-m must be <= "
-            "--arena-active-center-reposition-lateral-max-step-m"
-        )
-    if (
-        args.arena_active_center_reposition_heater_approach_min_step_m
-        > args.arena_active_center_reposition_heater_approach_max_step_m
-    ):
-        parser.error(
-            "--arena-active-center-reposition-heater-approach-min-step-m must be <= "
-            "--arena-active-center-reposition-heater-approach-max-step-m"
-        )
-    for field in [
-        "arena_active_center_reposition_heater_approach_min_selected_score",
-        "arena_active_center_reposition_heater_approach_max_opposite_score",
-        "arena_active_center_reposition_heater_approach_min_delta",
-    ]:
-        value = getattr(args, field)
-        if value > 1.0:
-            parser.error(f"--{field.replace('_', '-')} must be <= 1")
-    if args.arena_width_m is not None and args.arena_width_m <= 0.0:
-        parser.error("--arena-width-m must be greater than zero")
-    if args.arena_width_match_min_margin_m < 0.0:
-        parser.error("--arena-width-match-min-margin-m must be non-negative")
-    if args.arena_max_short_wall_range_sum_error_m < 0.0:
-        parser.error("--arena-max-short-wall-range-sum-error-m must be non-negative")
-    if args.arena_min_wall_points < 1:
-        parser.error("--arena-min-wall-points must be >= 1")
-    if (args.arena_force_short_wall_side is None) != (
-        args.arena_force_short_wall_type is None
-    ):
-        parser.error(
-            "--arena-force-short-wall-side and --arena-force-short-wall-type "
-            "must be provided together"
-        )
-    if args.min_waypoint_spacing_m < 0.0:
-        parser.error("--min-waypoint-spacing-m must be non-negative")
+    print(f"Exploration: {args.arena_active_recovery_mode}/{args.arena_active_recovery_executor}")
+    print("Follower command:", shlex.join(follower_command))
+    if args.verbose:
+        for name, value in sorted(vars(args).items()):
+            print(f"  {name}: {value}")
 
 
 def main(argv=None):
@@ -1121,142 +157,62 @@ def main(argv=None):
     try:
         waypoints = load_waypoints(args.waypoints)
         staging_goal = staging_goal_from_waypoints(waypoints)
-    except Exception as exc:
+    except (OSError, ValueError, KeyError) as exc:
         print(f"two_stage_waypoint_run.py: error: {exc}", file=sys.stderr)
         return 2
-
     follower_command = build_follower_command(args)
     if args.dry_run:
         print_dry_run(args, waypoints, staging_goal, follower_command)
         return 0
-
     if not require_motion_confirmation(args, staging_goal, follower_command):
-        print("Arena-prior two-stage waypoint run cancelled.")
+        print("Run cancelled.")
         return 130
-
     from . import ros_runtime
-
     if ros_runtime.rclpy is None:
         print("ROS 2 Python modules are unavailable. Source ROS 2 Humble first.", file=sys.stderr)
         return 2
-
-    diagnostics = RunDiagnostics(
-        timestamp=timestamp_now(),
-        start_wall_time=timestamp_now(),
-        follower_command=shlex.join(follower_command),
-        notes=args.notes,
-    )
-    start_monotonic = time.time()
     node = None
+    initialized = False
     return_code = 1
-
     try:
         ros_runtime.rclpy.init()
+        initialized = True
         node = ros_runtime.TwoStageCoordinator(args)
         node.preflight_before_motion()
-
-        phase_start = time.time()
         arena_result = node.perform_arena_active_spin()
-        diagnostics.arena_spin_duration_sec = time.time() - phase_start
         if not arena_result.success:
-            raise RuntimeError(
-                "arena-prior localization failed: "
-                f"{arena_result.failure_reason}"
-            )
-
+            raise RuntimeError(f"arena-prior localization failed: {arena_result.failure_reason}")
         phase_start = time.time()
-        node.publish_arena_active_initial_pose(
-            arena_result.pose_prior,
-            arena_result,
-        )
-        stability = node.wait_for_amcl_validation(
-            args.arena_active_validation_timeout_sec,
-            min_received_sec=phase_start,
-            min_settle_sec=args.amcl_settle_min_sec,
-        )
-        diagnostics.amcl_var_x = stability.cov_x
-        diagnostics.amcl_var_y = stability.cov_y
-        diagnostics.amcl_var_yaw_rad2 = stability.cov_yaw_rad2
-        diagnostics.stable_samples = stability.stable_count
-        diagnostics.max_pose_jump_m = stability.max_pose_jump_m
-        diagnostics.max_yaw_jump_deg = stability.max_yaw_jump_deg
-
-        post_amcl_pose, frame = node.validate_post_localization_tf()
-        diagnostics.selected_base_frame = frame
-        node.validate_post_amcl_pose_prior(
-            arena_result.pose_prior,
-            post_amcl_pose,
-            arena_result,
-            frame,
-        )
-
-        phase_start = time.time()
-        diagnostics.nav2_result_status = node.navigate_to_staging(staging_goal)
-        diagnostics.nav2_duration_sec = time.time() - phase_start
-        arrival = node.verify_arrival(staging_goal, waypoints)
-        diagnostics.selected_base_frame = arrival.base_frame
-        diagnostics.tf_arrival_x = arrival.pose.x
-        diagnostics.tf_arrival_y = arrival.pose.y
-        diagnostics.tf_arrival_yaw_deg = arrival.pose.yaw_deg
-        diagnostics.arrival_position_error_m = arrival.position_error_m
-        diagnostics.arrival_yaw_error_deg = arrival.yaw_error_deg
+        node.publish_arena_active_initial_pose(arena_result.pose_prior, arena_result)
+        node.wait_for_amcl_validation(args.arena_active_validation_timeout_sec,
+                                      min_received_sec=phase_start,
+                                      min_settle_sec=args.amcl_settle_min_sec)
+        pose, frame = node.validate_post_localization_tf()
+        node.validate_post_amcl_pose_prior(arena_result.pose_prior, pose, arena_result, frame)
+        # Always send a Nav2 staging goal, including when the localized pose is on-path.
+        node.navigate_to_staging(staging_goal)
+        node.verify_arrival(staging_goal, waypoints)
         node.stop_repeatedly()
-
-        phase_start = time.time()
-        follower_result = run_follower_command(follower_command)
-        diagnostics.follower_duration_sec = time.time() - phase_start
-        diagnostics.follower_return_code = follower_result.returncode
-        if follower_result.returncode != 0:
-            raise RuntimeError(f"Follower exited with return code {follower_result.returncode}")
-
-        final_pose, _frame = node.lookup_pose(description="final TF")
-        diagnostics.final_tf_x = final_pose.x
-        diagnostics.final_tf_y = final_pose.y
-        diagnostics.final_tf_yaw_deg = final_pose.yaw_deg
-        diagnostics.status = "completed"
-        diagnostics.final_status_reason = "completed"
+        result = run_follower_command(follower_command)
+        if result.returncode != 0:
+            raise RuntimeError(f"Follower exited with return code {result.returncode}")
         return_code = 0
-
     except KeyboardInterrupt:
-        diagnostics.status = "interrupted"
-        diagnostics.final_status_reason = "keyboard_interrupt"
-        print("Interrupted. Cancelling navigation and sending stop...")
-        if node is not None:
-            cleanup_motion(node)
+        print("Interrupted; cancelling navigation and stopping.")
         return_code = 130
-
     except Exception as exc:
-        diagnostics.status = "failed"
-        diagnostics.final_status_reason = str(exc)
         print(f"two_stage_waypoint_run.py: error: {exc}", file=sys.stderr)
-        if node is not None:
-            cleanup_motion(node)
-        return_code = 1
-
     finally:
-        diagnostics.end_wall_time = timestamp_now()
-        diagnostics.duration_sec = time.time() - start_monotonic
-        if node is not None:
-            try:
-                final_pose, _frame = node.lookup_pose(description="final TF logging")
-                diagnostics.final_tf_x = final_pose.x
-                diagnostics.final_tf_y = final_pose.y
-                diagnostics.final_tf_yaw_deg = final_pose.yaw_deg
-                diagnostics.selected_base_frame = node.selected_base_frame
-            except Exception:
-                pass
-            try:
-                node.destroy_node()
-            finally:
+        try:
+            if node is not None:
+                try:
+                    cleanup_motion(node)
+                except Exception as exc:
+                    print(f"Motion cleanup failed: {exc}", file=sys.stderr)
+                    return_code = 1
+                finally:
+                    node.destroy_node()
+        finally:
+            if initialized:
                 ros_runtime.rclpy.shutdown()
-        if not args.no_log:
-            try:
-                append_csv_row(
-                    args.results_csv,
-                    CSV_HEADER,
-                    build_log_row(args, staging_goal, diagnostics),
-                )
-            except Exception as log_exc:
-                print(f"Could not write two-stage run log: {log_exc}", file=sys.stderr)
-
     return return_code

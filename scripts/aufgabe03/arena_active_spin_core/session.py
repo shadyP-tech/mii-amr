@@ -27,7 +27,6 @@ from .explore_mission import (
     ExploreMissionController,
 )
 from .localizer_filter import ActiveExploreLocalizerFilter
-from .math_utils import shortest_angle_delta_rad
 from .models import (
     ACTIVE_EXPLORE_PHASE_LOCALIZATION_POSE,
     ACTIVE_EXPLORE_PHASE_LOCALIZATION_SPIN,
@@ -35,11 +34,8 @@ from .models import (
     DEFAULT_STOP_HZ,
     ArenaActiveSpinConfig,
     ArenaActiveSpinResult,
-    CenterRepositionAction,
-    CenterRepositionStep,
 )
 from .motion_executor import ActiveSpinMotionExecutor
-from .reposition import choose_center_reposition_action, choose_heater_approach_reposition_action
 from .scan_safety import (
     evaluate_clearance,
     min_valid_scan_range,
@@ -399,29 +395,6 @@ class ArenaActiveSpinSession:
     def active_explore_localizer_memory_samples(self):
         return self._localizer_filter.memory_samples()
 
-    def dedupe_samples_by_identity(self, sample_groups):
-        return self._localizer_filter.dedupe_samples_by_identity(sample_groups)
-
-    def stride_valid_range_count_for_sample(self, sample):
-        return self._localizer_filter.stride_valid_range_count_for_sample(sample)
-
-    def select_samples_for_point_budget(self, samples, point_budget):
-        return self._localizer_filter.select_samples_for_point_budget(
-            samples,
-            point_budget,
-        )
-
-    def pose_bin_for_mapping_sample(self, sample):
-        return self._localizer_filter.pose_bin_for_mapping_sample(sample)
-
-    def active_explore_mapping_memory_candidates(self, memory_samples, excluded_ids):
-        return self._localizer_filter.mapping_memory_candidates(
-            memory_samples,
-            excluded_ids,
-        )
-
-    def active_explore_localizer_point_budgets(self, final_samples, startup_samples):
-        return self._localizer_filter.point_budgets(final_samples, startup_samples)
 
     def balanced_active_explore_localizer_samples(self, memory_samples):
         return self._localizer_filter.balanced_samples(memory_samples)
@@ -462,77 +435,6 @@ class ArenaActiveSpinSession:
                 return math.radians(sample.odom_pose.yaw_deg)
         return 0.0
 
-    def publish_turn_command(self, publisher, target_yaw_rad):
-        if self.latest_odom_yaw_rad is None:
-            raise RuntimeError("fresh_odom_unavailable_during_reposition_turn")
-        command = self.twist_factory()
-        delta = shortest_angle_delta_rad(self.latest_odom_yaw_rad, target_yaw_rad)
-        command.angular.z = (
-            1.0 if delta >= 0.0 else -1.0
-        ) * abs(self.config.center_reposition_angular_speed_rad_s)
-        publisher.publish(command)
-
-    def turn_to_heading(self, publisher, target_yaw_rad):
-        return self._motion_executor.turn_to_heading(publisher, target_yaw_rad)
-
-    def publish_drive_command(self, publisher):
-        command = self.twist_factory()
-        command.linear.x = abs(self.config.center_reposition_linear_speed_mps)
-        publisher.publish(command)
-
-    def drive_forward(self, publisher, distance_m):
-        return self._motion_executor.drive_forward(publisher, distance_m)
-
-    def print_reposition_prompt(self, action: CenterRepositionAction):
-        steps = list(action.steps)
-        if not steps and action.odom_heading_rad is not None and action.planned_distance_m is not None:
-            steps = [
-                CenterRepositionStep(
-                    kind="legacy",
-                    reason=action.reason,
-                    planned_distance_m=action.planned_distance_m,
-                    local_heading_rad=action.local_heading_rad,
-                    odom_heading_rad=action.odom_heading_rad,
-                )
-            ]
-        if not self.config.verbose:
-            total_distance = sum(step.planned_distance_m for step in steps)
-            print(
-                "Arena-active reposition: "
-                f"{len(steps)} step(s), total planned distance={total_distance:.3f} m"
-            )
-            if self.config.require_operator_confirmation:
-                self.input_fn("Press Enter to start center reposition, or Ctrl+C to abort: ")
-            return
-        print("\nArena-active reposition recovery")
-        print(f"  nearest short wall: {action.nearest_axis_side}")
-        print(f"  away direction: {action.away_axis_side}")
-        print(f"  nearest range: {action.nearest_short_wall_range_m}")
-        print(f"  target nearest range: {action.target_nearest_short_wall_range_m}")
-        print(f"  suspected heater wall: {action.suspected_heater_axis_side}")
-        print(f"  suspected heater range: {action.suspected_heater_range_m}")
-        print(f"  target heater range: {action.heater_approach_target_range_m}")
-        print(f"  heater scores: {action.heater_scores}")
-        print(f"  heater delta: {action.heater_profile_delta}")
-        print(f"  lateral offset: {action.lateral_offset_m}")
-        print(f"  target lateral offset: {action.lateral_target_offset_m}")
-        for index, step in enumerate(steps, start=1):
-            heading_text = f"{math.degrees(step.odom_heading_rad):.1f} deg"
-            if step.dynamic_heading:
-                heading_text = f"dynamic ({step.dynamic_heading_source}), initial estimate {heading_text}"
-            print(
-                f"  step {index} {step.kind}: "
-                f"distance={step.planned_distance_m:.3f} m, "
-                f"target odom heading={heading_text}"
-            )
-        if action.lateral_step_skipped:
-            print(f"  lateral step: skipped ({action.lateral_skip_reason})")
-        print("  expected action: turn, drive, optionally turn sideways, drive, then spin again")
-        if self.config.require_operator_confirmation:
-            self.input_fn("Press Enter to start center reposition, or Ctrl+C to abort: ")
-
-    def execute_center_reposition(self, publisher, action: CenterRepositionAction):
-        return self._motion_executor.execute_center_reposition(publisher, action)
 
     def plan_active_explore_recovery(self, result):
         active_config = active_explore_config_from_arena_config(self.config)
@@ -631,12 +533,6 @@ class ArenaActiveSpinSession:
             return None
         return [float(self.latest_odom_pose.x), float(self.latest_odom_pose.y)]
 
-    def apply_active_explore_phase_selection(self, plan, attempt_index):
-        return self.active_explore_policy.select_for_phase(
-            plan,
-            attempt_index,
-            current_pose_point=self.latest_odom_point(),
-        )
 
     def print_active_explore_prompt(self, candidate, path_points):
         if not self.config.verbose:
@@ -749,74 +645,6 @@ class ArenaActiveSpinSession:
         self.active_explore_mission.record_spin(result)
         return result
 
-    def run_legacy_recovery(self, publisher, result):
-        reposition_attempts = 0
-        while (
-            not result.success
-            and reposition_attempts < self.config.center_reposition_max_attempts
-        ):
-            origin_yaw = self.first_sample_origin_yaw_rad()
-            action = choose_center_reposition_action(result, self.config, origin_yaw)
-            attempt_record = {
-                "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
-                "stage": "center",
-                "previous_failure_reason": result.failure_reason,
-                "previous_classifier_reason": result.short_wall_classification.reason,
-                "action": action.to_dict(),
-            }
-            self.diagnostics["reposition"]["attempts"].append(attempt_record)
-            if not action.ok:
-                break
-            self.diagnostics["fallback_used"] = True
-            motion_record = self.execute_center_reposition(publisher, action)
-            attempt_record["motion"] = motion_record
-            reposition_attempts += 1
-            self.run_spin_attempt(publisher, attempt_index=reposition_attempts)
-            result = self.analyze_result()
-            attempt_record["post_reposition_success"] = result.success
-            attempt_record["post_reposition_failure_reason"] = result.failure_reason
-            attempt_record["post_reposition_classifier_reason"] = (
-                result.short_wall_classification.reason
-            )
-
-        heater_approach_attempts = 0
-        while (
-            not result.success
-            and self.config.center_reposition_enable_heater_approach
-            and heater_approach_attempts
-            < self.config.center_reposition_heater_approach_max_attempts
-        ):
-            origin_yaw = self.first_sample_origin_yaw_rad()
-            action = choose_heater_approach_reposition_action(
-                result,
-                self.config,
-                origin_yaw,
-            )
-            attempt_record = {
-                "attempt_index": len(self.diagnostics["reposition"]["attempts"]),
-                "stage": "heater_approach",
-                "previous_failure_reason": result.failure_reason,
-                "previous_classifier_reason": result.short_wall_classification.reason,
-                "action": action.to_dict(),
-            }
-            self.diagnostics["reposition"]["attempts"].append(attempt_record)
-            if not action.ok:
-                break
-            self.diagnostics["fallback_used"] = True
-            motion_record = self.execute_center_reposition(publisher, action)
-            attempt_record["motion"] = motion_record
-            heater_approach_attempts += 1
-            self.run_spin_attempt(
-                publisher,
-                attempt_index=len(self.diagnostics["spin_attempts"]),
-            )
-            result = self.analyze_result()
-            attempt_record["post_reposition_success"] = result.success
-            attempt_record["post_reposition_failure_reason"] = result.failure_reason
-            attempt_record["post_reposition_classifier_reason"] = (
-                result.short_wall_classification.reason
-            )
-        return result
 
     def run_active_explore_recovery(self, publisher, result):
         return self._active_explore_recovery.run(publisher, result)
@@ -854,9 +682,7 @@ class ArenaActiveSpinSession:
             self.run_spin_attempt(publisher, attempt_index=0)
             result = self.analyze_result()
             recovery_mode = effective_recovery_mode(self.config)
-            if not result.success and recovery_mode == "legacy":
-                result = self.run_legacy_recovery(publisher, result)
-            elif not result.success and recovery_mode == "active_explore":
+            if not result.success and recovery_mode == "active_explore":
                 result = self.run_active_explore_recovery(publisher, result)
             pose_prior = self.pose_prior_from_result_or_raise(result)
             return self.finish_success(pose_prior)

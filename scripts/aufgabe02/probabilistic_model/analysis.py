@@ -1,7 +1,8 @@
 import math
 
-from .constants import REAL_ENDPOINT_COLUMNS, SIM_ENDPOINT_COLUMNS
 from .csv_data import (
+    DataError,
+    pose_columns,
     extract_points,
     extract_yaws,
     filter_latest_rows,
@@ -11,7 +12,6 @@ from .csv_data import (
     run_ids,
     valid_rows_with_columns,
 )
-from .errors import DataError
 from .geometry import local_displacements, motion_errors, vec_sub
 from .statistics import (
     circular_yaw_summary_deg,
@@ -32,11 +32,11 @@ def build_analysis_model(
     compare_sim_real=True,
 ):
     real_fieldnames, real_rows = read_csv_rows(real_csv)
-    require_columns(real_fieldnames, REAL_ENDPOINT_COLUMNS, real_csv)
+    require_columns(real_fieldnames, pose_columns("tracker"), real_csv)
     real_selected_rows = filter_rows_by_run_range(real_rows, real_run_range)
     real_valid_rows, skipped_real_rows = valid_rows_with_columns(
         real_selected_rows,
-        REAL_ENDPOINT_COLUMNS,
+        pose_columns("tracker"),
     )
 
     if len(real_valid_rows) < 2:
@@ -79,19 +79,14 @@ def build_analysis_model(
         "dy_m": None,
         "magnitude_m": None,
     }
-    sim_valid_rows = []
-    sim_errors = []
-    sim_local_delta = []
-    sim_error_mu = None
-    sim_error_sigma = None
 
     if compare_sim_real:
         sim_fieldnames, sim_rows = read_csv_rows(sim_csv)
-        require_columns(sim_fieldnames, SIM_ENDPOINT_COLUMNS, sim_csv)
+        require_columns(sim_fieldnames, pose_columns("odom"), sim_csv)
         sim_selected_rows = filter_latest_rows(sim_rows, sim_last_n)
         sim_valid_rows, skipped_sim_rows = valid_rows_with_columns(
             sim_selected_rows,
-            SIM_ENDPOINT_COLUMNS,
+            pose_columns("odom"),
         )
 
         if len(sim_valid_rows) < 2:
@@ -99,7 +94,7 @@ def build_analysis_model(
 
         sim_local_delta = local_displacements(sim_valid_rows, "odom")
         sim_errors = motion_errors(sim_local_delta, step_distance_m)
-        sim_error_mu, sim_error_sigma = empirical_mean_cov(sim_errors)
+        sim_error_mu, _ = empirical_mean_cov(sim_errors)
         bias = vec_sub(error_mu, sim_error_mu)
         sim2real_bias = {
             "dx_m": float(bias[0]),
@@ -156,18 +151,4 @@ def build_analysis_model(
         ],
     }
 
-    arrays = {
-        "real_endpoint_points": real_endpoint_points,
-        "real_errors": real_errors,
-        "real_local_delta": real_local_delta,
-        "sim_errors": sim_errors,
-        "sim_local_delta": sim_local_delta,
-        "endpoint_mu": endpoint_mu,
-        "endpoint_sigma": endpoint_sigma,
-        "error_mu": error_mu,
-        "error_sigma": error_sigma,
-        "sim_error_mu": sim_error_mu,
-        "sim_error_sigma": sim_error_sigma,
-    }
-
-    return model, arrays
+    return model

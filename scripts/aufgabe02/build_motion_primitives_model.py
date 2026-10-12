@@ -1,65 +1,41 @@
 #!/usr/bin/env python3
-
+"""Build measured forward and turn primitives in the robot's local start frame."""
 import argparse
-import csv
-import json
 import math
-from pathlib import Path
 
-import analyze_probabilistic_endpoint_model as endpoint_model
-import analyze_rotation_runs as rotation_analysis
-
+if __package__:
+    from .probabilistic_model import csv_data as data, geometry, statistics
+else:
+    from probabilistic_model import csv_data as data, geometry, statistics
 
 EIGEN_TOL = -1e-12
-FORWARD_COLUMNS = [
-    "run_id",
-    "tracker_start_x",
-    "tracker_start_y",
-    "tracker_start_yaw_deg",
-    "tracker_final_x",
-    "tracker_final_y",
-    "tracker_final_yaw_deg",
-]
-ROTATION_COLUMNS = [
-    "run_id",
-    "tracker_start_x",
-    "tracker_start_y",
-    "tracker_start_yaw_deg",
-    "tracker_final_x",
-    "tracker_final_y",
-    "tracker_final_yaw_deg",
-]
 
 
 class PrimitiveModelError(ValueError):
     """Raised when primitive model inputs or outputs are invalid."""
 
 
-def finite_float(row, column):
-    return endpoint_model.finite_float(row, column)
-
-
 def pose_local_delta_and_yaw_delta(row, prefix, tracker_yaw_sign):
     start = [
-        finite_float(row, f"{prefix}_start_x"),
-        finite_float(row, f"{prefix}_start_y"),
+        data.finite_float(row, f"{prefix}_start_x"),
+        data.finite_float(row, f"{prefix}_start_y"),
     ]
     final = [
-        finite_float(row, f"{prefix}_final_x"),
-        finite_float(row, f"{prefix}_final_y"),
+        data.finite_float(row, f"{prefix}_final_x"),
+        data.finite_float(row, f"{prefix}_final_y"),
     ]
-    start_yaw_deg = finite_float(row, f"{prefix}_start_yaw_deg")
-    final_yaw_deg = finite_float(row, f"{prefix}_final_yaw_deg")
+    start_yaw_deg = data.finite_float(row, f"{prefix}_start_yaw_deg")
+    final_yaw_deg = data.finite_float(row, f"{prefix}_final_yaw_deg")
 
-    world_delta = endpoint_model.vec_sub(final, start)
-    local_delta = endpoint_model.mat_vec(
-        endpoint_model.rotation_matrix(-math.radians(start_yaw_deg)),
+    world_delta = geometry.vec_sub(final, start)
+    local_delta = geometry.mat_vec(
+        geometry.rotation_matrix(-math.radians(start_yaw_deg)),
         world_delta,
     )
-    raw_yaw_delta = endpoint_model.normalize_angle_deg(
+    raw_yaw_delta = geometry.normalize_angle_deg(
         final_yaw_deg - start_yaw_deg
     )
-    yaw_delta = endpoint_model.normalize_angle_deg(
+    yaw_delta = geometry.normalize_angle_deg(
         tracker_yaw_sign * raw_yaw_delta
     )
 
@@ -67,17 +43,17 @@ def pose_local_delta_and_yaw_delta(row, prefix, tracker_yaw_sign):
 
 
 def angle_delta_summary_deg(values):
-    values = [endpoint_model.normalize_angle_deg(value) for value in values]
+    values = [geometry.normalize_angle_deg(value) for value in values]
     if not values:
         raise ValueError("At least one yaw delta is required")
 
-    circular = endpoint_model.circular_yaw_summary_deg(values)
+    circular = statistics.circular_yaw_summary_deg(values)
     mean = circular["mean_deg"]
     if len(values) < 2:
         std = 0.0
     else:
         residuals = [
-            endpoint_model.normalize_angle_deg(value - mean) for value in values
+            geometry.normalize_angle_deg(value - mean) for value in values
         ]
         std = math.sqrt(
             sum(residual * residual for residual in residuals)
@@ -107,7 +83,7 @@ def build_primitive(name, primitive_type, rows, prefix, tracker_yaw_sign):
         local_deltas.append(local_delta)
         yaw_deltas.append(yaw_delta)
 
-    local_delta_mu, local_delta_sigma = endpoint_model.empirical_mean_cov(
+    local_delta_mu, local_delta_sigma = statistics.empirical_mean_cov(
         local_deltas
     )
     yaw_summary = angle_delta_summary_deg(yaw_deltas)
@@ -116,13 +92,13 @@ def build_primitive(name, primitive_type, rows, prefix, tracker_yaw_sign):
         "type": primitive_type,
         "local_delta_mu": local_delta_mu,
         "local_delta_sigma": local_delta_sigma,
-        "local_delta_std": endpoint_model.matrix_std(local_delta_sigma),
+        "local_delta_std": statistics.matrix_std(local_delta_sigma),
         "yaw_delta_mean_deg": yaw_summary["mean"],
         "yaw_delta_std_deg": yaw_summary["std"],
         "yaw_delta_min_deg": yaw_summary["min"],
         "yaw_delta_max_deg": yaw_summary["max"],
         "n": len(rows),
-        "selected_run_ids": endpoint_model.run_ids(rows),
+        "selected_run_ids": data.run_ids(rows),
     }
 
     validate_primitive(name, primitive)
@@ -160,164 +136,51 @@ def validate_covariance(name, sigma):
             f"{name} covariance diagonal entries must be non-negative"
         )
 
-    eigvals, _ = endpoint_model.symmetric_eigen_2x2(sigma)
+    eigvals, _ = statistics.symmetric_eigen_2x2(sigma)
     if min(eigvals) < EIGEN_TOL:
         raise PrimitiveModelError(
             f"{name} covariance has a negative eigenvalue: {min(eigvals):.12g}"
         )
 
 
-def filter_rows_by_run_range_and_prefix(rows, run_range_text=None, run_id_prefix=None):
-    selected = endpoint_model.filter_rows_by_run_range(rows, run_range_text)
+def load_primitive_rows(path, run_range, run_id_prefix):
+    fields, rows = data.read_csv_rows(path)
+    columns = data.pose_columns("tracker")
+    data.require_columns(fields, columns, path)
+    selected = data.filter_rows_by_run_range(rows, run_range)
     if run_id_prefix:
-        selected = [
-            row for row in selected
-            if row.get("run_id", "").startswith(run_id_prefix)
-        ]
-    return selected
-
-
-def load_forward_rows(path, run_range, run_id_prefix=None):
-    fieldnames, rows = endpoint_model.read_csv_rows(path)
-    endpoint_model.require_columns(fieldnames, FORWARD_COLUMNS, path)
-    selected_rows = filter_rows_by_run_range_and_prefix(
-        rows,
-        run_range_text=run_range,
-        run_id_prefix=run_id_prefix,
-    )
-    valid_rows, skipped_rows = endpoint_model.valid_rows_with_columns(
-        selected_rows,
-        FORWARD_COLUMNS,
-    )
-    return valid_rows, skipped_rows
-
-
-def load_rotation_rows(path, run_range, run_id_prefix):
-    fieldnames, rows = endpoint_model.read_csv_rows(path)
-    endpoint_model.require_columns(fieldnames, ROTATION_COLUMNS, path)
-    selected_rows = rotation_analysis.filter_rows(
-        rows,
-        run_range_text=run_range,
-        run_id_prefix=run_id_prefix,
-    )
-    valid_rows, skipped_rows = endpoint_model.valid_rows_with_columns(
-        selected_rows,
-        ROTATION_COLUMNS,
-    )
-    return valid_rows, skipped_rows
+        selected = [row for row in selected if row.get("run_id", "").startswith(run_id_prefix)]
+    return data.valid_rows_with_columns(selected, columns)
 
 
 def build_motion_primitives_model(
-    forward_csv,
-    forward_run_range,
-    rotation_csv,
-    cw_prefix,
-    cw_run_range,
-    ccw_prefix,
-    ccw_run_range,
-    tracker_yaw_sign,
-    extra_forward_specs=None,
-    extra_rotation_specs=None,
+    forward_csv, forward_run_range, rotation_csv, cw_prefix, cw_run_range,
+    ccw_prefix, ccw_run_range, tracker_yaw_sign,
+    extra_forward_specs=None, extra_rotation_specs=None,
 ):
-    forward_rows, skipped_forward = load_forward_rows(
-        forward_csv,
-        forward_run_range,
-    )
-    cw_rows, skipped_cw = load_rotation_rows(rotation_csv, cw_run_range, cw_prefix)
-    ccw_rows, skipped_ccw = load_rotation_rows(
-        rotation_csv,
-        ccw_run_range,
-        ccw_prefix,
-    )
+    specs = [
+        ("F30", "forward", forward_csv, forward_run_range, None),
+        ("CW90", "rotation", rotation_csv, cw_run_range, cw_prefix),
+        ("CCW90", "rotation", rotation_csv, ccw_run_range, ccw_prefix),
+    ]
+    for kind, path, extras in [
+        ("forward", forward_csv, extra_forward_specs),
+        ("rotation", rotation_csv, extra_rotation_specs),
+    ]:
+        for spec in extras or []:
+            specs.append((spec["name"], kind, path, spec["run_range"], spec["run_id_prefix"]))
 
-    primitives = {
-        "F30": build_primitive(
-            "F30",
-            "forward",
-            forward_rows,
-            "tracker",
-            tracker_yaw_sign,
-        ),
-        "CW90": build_primitive(
-            "CW90",
-            "rotation",
-            cw_rows,
-            "tracker",
-            tracker_yaw_sign,
-        ),
-        "CCW90": build_primitive(
-            "CCW90",
-            "rotation",
-            ccw_rows,
-            "tracker",
-            tracker_yaw_sign,
-        ),
-    }
-
-    primitive_sources = {
-        "F30": {
-            "csv": str(forward_csv),
-            "run_range": forward_run_range,
-            "run_id_prefix": None,
-            "selected_run_ids": endpoint_model.run_ids(forward_rows),
-            "skipped_rows": skipped_forward,
-        },
-        "CW90": {
-            "csv": str(rotation_csv),
-            "run_range": cw_run_range,
-            "run_id_prefix": cw_prefix,
-            "selected_run_ids": endpoint_model.run_ids(cw_rows),
-            "skipped_rows": skipped_cw,
-        },
-        "CCW90": {
-            "csv": str(rotation_csv),
-            "run_range": ccw_run_range,
-            "run_id_prefix": ccw_prefix,
-            "selected_run_ids": endpoint_model.run_ids(ccw_rows),
-            "skipped_rows": skipped_ccw,
-        },
-    }
-
-    for spec in extra_forward_specs or []:
-        rows, skipped_rows = load_forward_rows(
-            forward_csv,
-            spec["run_range"],
-            run_id_prefix=spec["run_id_prefix"],
-        )
-        primitives[spec["name"]] = build_primitive(
-            spec["name"],
-            "forward",
-            rows,
-            "tracker",
-            tracker_yaw_sign,
-        )
-        primitive_sources[spec["name"]] = {
-            "csv": str(forward_csv),
-            "run_range": spec["run_range"],
-            "run_id_prefix": spec["run_id_prefix"],
-            "selected_run_ids": endpoint_model.run_ids(rows),
-            "skipped_rows": skipped_rows,
-        }
-
-    for spec in extra_rotation_specs or []:
-        rows, skipped_rows = load_rotation_rows(
-            rotation_csv,
-            spec["run_range"],
-            spec["run_id_prefix"],
-        )
-        primitives[spec["name"]] = build_primitive(
-            spec["name"],
-            "rotation",
-            rows,
-            "tracker",
-            tracker_yaw_sign,
-        )
-        primitive_sources[spec["name"]] = {
-            "csv": str(rotation_csv),
-            "run_range": spec["run_range"],
-            "run_id_prefix": spec["run_id_prefix"],
-            "selected_run_ids": endpoint_model.run_ids(rows),
-            "skipped_rows": skipped_rows,
+    primitives = {}
+    primitive_sources = {}
+    for name, kind, path, run_range, prefix in specs:
+        rows, skipped = load_primitive_rows(path, run_range, prefix)
+        primitives[name] = build_primitive(name, kind, rows, "tracker", tracker_yaw_sign)
+        primitive_sources[name] = {
+            "csv": str(path),
+            "run_range": run_range,
+            "run_id_prefix": prefix,
+            "selected_run_ids": data.run_ids(rows),
+            "skipped_rows": skipped,
         }
 
     return {
@@ -334,17 +197,17 @@ def build_motion_primitives_model(
         "data_selection": {
             "forward_csv": str(forward_csv),
             "forward_run_range": forward_run_range,
-            "selected_forward_run_ids": endpoint_model.run_ids(forward_rows),
-            "skipped_forward_rows": skipped_forward,
+            "selected_forward_run_ids": primitive_sources["F30"]["selected_run_ids"],
+            "skipped_forward_rows": primitive_sources["F30"]["skipped_rows"],
             "rotation_csv": str(rotation_csv),
             "cw_prefix": cw_prefix,
             "cw_run_range": cw_run_range,
-            "selected_cw_run_ids": endpoint_model.run_ids(cw_rows),
-            "skipped_cw_rows": skipped_cw,
+            "selected_cw_run_ids": primitive_sources["CW90"]["selected_run_ids"],
+            "skipped_cw_rows": primitive_sources["CW90"]["skipped_rows"],
             "ccw_prefix": ccw_prefix,
             "ccw_run_range": ccw_run_range,
-            "selected_ccw_run_ids": endpoint_model.run_ids(ccw_rows),
-            "skipped_ccw_rows": skipped_ccw,
+            "selected_ccw_run_ids": primitive_sources["CCW90"]["selected_run_ids"],
+            "skipped_ccw_rows": primitive_sources["CCW90"]["skipped_rows"],
             "primitive_sources": primitive_sources,
         },
         "primitives": primitives,
@@ -360,185 +223,41 @@ def build_motion_primitives_model(
     }
 
 
-def write_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as file:
-        json.dump(data, file, indent=2)
-        file.write("\n")
-
-
-def write_summary_csv(path, model):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    rows = []
-    for name, primitive in model["primitives"].items():
-        sigma = primitive["local_delta_sigma"]
-        rows.extend(
-            [
-                (name, "type", primitive["type"], ""),
-                (name, "n", primitive["n"], "count"),
-                (name, "local_delta_mu_x", primitive["local_delta_mu"][0], "m"),
-                (name, "local_delta_mu_y", primitive["local_delta_mu"][1], "m"),
-                (name, "local_delta_sigma_xx", sigma[0][0], "m^2"),
-                (name, "local_delta_sigma_xy", sigma[0][1], "m^2"),
-                (name, "local_delta_sigma_yy", sigma[1][1], "m^2"),
-                (name, "local_delta_std_x", primitive["local_delta_std"][0], "m"),
-                (name, "local_delta_std_y", primitive["local_delta_std"][1], "m"),
-                (
-                    name,
-                    "yaw_delta_mean",
-                    primitive["yaw_delta_mean_deg"],
-                    "deg",
-                ),
-                (
-                    name,
-                    "yaw_delta_std",
-                    primitive["yaw_delta_std_deg"],
-                    "deg",
-                ),
-            ]
-        )
-
-    with path.open("w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(["primitive", "metric", "value", "unit"])
-        writer.writerows(rows)
-
-
-def print_report(model):
-    print("Motion primitive model:")
-    print(f"  coordinate_frame = {model['coordinate_frame']}")
-    print(
-        "  tracker_yaw_sign_correction = "
-        f"{model['yaw_source']['tracker_yaw_sign_correction']:+.1f}"
-    )
-
-    for name, primitive in model["primitives"].items():
-        sigma = primitive["local_delta_sigma"]
-        print(f"\n{name}:")
-        print(f"  type = {primitive['type']}")
-        print(f"  n = {primitive['n']}")
-        print(
-            "  local_delta_mu = "
-            f"[{primitive['local_delta_mu'][0]:.6f}, "
-            f"{primitive['local_delta_mu'][1]:.6f}] m"
-        )
-        print(
-            "  local_delta_sigma = "
-            f"[[{sigma[0][0]:.10f}, {sigma[0][1]:.10f}], "
-            f"[{sigma[1][0]:.10f}, {sigma[1][1]:.10f}]] m^2"
-        )
-        print(
-            "  yaw_delta = "
-            f"{primitive['yaw_delta_mean_deg']:.3f} ± "
-            f"{primitive['yaw_delta_std_deg']:.3f} deg"
-        )
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Build empirical forward and rotation motion primitives.",
-    )
-    parser.add_argument(
-        "--forward-csv",
-        default="results/aufgabe02/real_scripted_drive_runs.csv",
-    )
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--forward-csv", default="results/aufgabe02/real_scripted_drive_runs.csv")
     parser.add_argument("--forward-run-range", default="21:50")
-    parser.add_argument(
-        "--rotation-csv",
-        default="results/aufgabe02/real_rotation_runs.csv",
-    )
+    parser.add_argument("--rotation-csv", default="results/aufgabe02/real_rotation_runs.csv")
     parser.add_argument("--cw-prefix", default="run_real_rot_cw90_")
     parser.add_argument("--cw-run-range", default="18:32")
     parser.add_argument("--ccw-prefix", default="run_real_rot_ccw90_")
     parser.add_argument("--ccw-run-range", default="1:15")
-    parser.add_argument("--f50-prefix", default=None)
-    parser.add_argument("--f50-run-range", default="1:15")
-    parser.add_argument("--ccw45-prefix", default=None)
-    parser.add_argument("--ccw45-run-range", default="1:15")
-    parser.add_argument("--cw45-prefix", default=None)
-    parser.add_argument("--cw45-run-range", default="1:15")
-    parser.add_argument("--ccw180-prefix", default=None)
-    parser.add_argument("--ccw180-run-range", default="1:15")
+    for name in ("f50", "ccw45", "cw45", "ccw180"):
+        parser.add_argument(f"--{name}-prefix")
+        parser.add_argument(f"--{name}-run-range", default="1:15")
     parser.add_argument("--tracker-yaw-sign", type=float, default=-1.0)
-    parser.add_argument(
-        "--output-json",
-        default="results/aufgabe02/probabilistic_motion_primitives_model.json",
-    )
-    parser.add_argument(
-        "--summary-csv",
-        default="results/aufgabe02/probabilistic_motion_primitives_model_summary.csv",
-    )
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    extra_forward_specs = []
-    if args.f50_prefix:
-        extra_forward_specs.append(
-            {
-                "name": "F50",
-                "run_id_prefix": args.f50_prefix,
-                "run_range": args.f50_run_range,
-            }
-        )
-
-    extra_rotation_specs = []
-    if args.ccw45_prefix:
-        extra_rotation_specs.append(
-            {
-                "name": "CCW45",
-                "run_id_prefix": args.ccw45_prefix,
-                "run_range": args.ccw45_run_range,
-            }
-        )
-    if args.cw45_prefix:
-        extra_rotation_specs.append(
-            {
-                "name": "CW45",
-                "run_id_prefix": args.cw45_prefix,
-                "run_range": args.cw45_run_range,
-            }
-        )
-    if args.ccw180_prefix:
-        extra_rotation_specs.append(
-            {
-                "name": "CCW180",
-                "run_id_prefix": args.ccw180_prefix,
-                "run_range": args.ccw180_run_range,
-            }
-        )
-
+    parser.add_argument("--output-json", default="results/aufgabe02/probabilistic_motion_primitives_model.json")
+    args = parser.parse_args()
+    extras = {"forward": [], "rotation": []}
+    for name in ("f50", "ccw45", "cw45", "ccw180"):
+        prefix = getattr(args, f"{name}_prefix")
+        if prefix:
+            extras["forward" if name == "f50" else "rotation"].append({
+                "name": name.upper(), "run_id_prefix": prefix,
+                "run_range": getattr(args, f"{name}_run_range"),
+            })
     model = build_motion_primitives_model(
-        forward_csv=args.forward_csv,
-        forward_run_range=args.forward_run_range,
-        rotation_csv=args.rotation_csv,
-        cw_prefix=args.cw_prefix,
-        cw_run_range=args.cw_run_range,
-        ccw_prefix=args.ccw_prefix,
-        ccw_run_range=args.ccw_run_range,
-        tracker_yaw_sign=args.tracker_yaw_sign,
-        extra_forward_specs=extra_forward_specs,
-        extra_rotation_specs=extra_rotation_specs,
+        args.forward_csv, args.forward_run_range, args.rotation_csv,
+        args.cw_prefix, args.cw_run_range, args.ccw_prefix, args.ccw_run_range,
+        args.tracker_yaw_sign, extras["forward"], extras["rotation"],
     )
-    write_json(args.output_json, model)
-    write_summary_csv(args.summary_csv, model)
-    print_report(model)
-    print("\nGenerated outputs:")
-    print(f"  {args.output_json}")
-    print(f"  {args.summary_csv}")
+    data.write_json(args.output_json, model)
+    print(args.output_json)
     return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (PrimitiveModelError, endpoint_model.DataError, ValueError) as exc:
-        print(f"ERROR: {exc}")
-        raise SystemExit(1)
-    except OSError as exc:
-        print(f"ERROR: {exc}")
-        raise SystemExit(1)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"ERROR: {exc}")

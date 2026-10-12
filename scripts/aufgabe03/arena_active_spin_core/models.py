@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from arena_geometry_localization import ArenaGeometryConfig
@@ -70,51 +70,6 @@ class SectorClearance:
 
 
 @dataclass(frozen=True)
-class CenterRepositionStep:
-    kind: str
-    reason: str
-    planned_distance_m: float
-    local_heading_rad: float | None
-    odom_heading_rad: float
-    dynamic_heading: bool = False
-    dynamic_heading_source: str | None = None
-
-    def to_dict(self):
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class CenterRepositionAction:
-    ok: bool
-    reason: str
-    nearest_axis_side: str | None = None
-    away_axis_side: str | None = None
-    suspected_heater_axis_side: str | None = None
-    nearest_short_wall_range_m: float | None = None
-    far_short_wall_range_m: float | None = None
-    suspected_heater_range_m: float | None = None
-    target_nearest_short_wall_range_m: float | None = None
-    heater_approach_target_range_m: float | None = None
-    planned_distance_m: float | None = None
-    local_heading_rad: float | None = None
-    odom_heading_rad: float | None = None
-    range_sum_error_m: float | None = None
-    heater_scores: dict[str, float] | None = None
-    selected_heater_score: float | None = None
-    opposite_heater_score: float | None = None
-    heater_profile_delta: float | None = None
-    lateral_offset_m: float | None = None
-    lateral_target_offset_m: float | None = None
-    lateral_planned_distance_m: float | None = None
-    lateral_step_skipped: bool = True
-    lateral_skip_reason: str | None = None
-    steps: tuple[CenterRepositionStep, ...] = ()
-
-    def to_dict(self):
-        return asdict(self)
-
-
-@dataclass(frozen=True)
 class ArenaActiveSpinConfig:
     run_id: str
     diagnostics_path: Path
@@ -142,27 +97,15 @@ class ArenaActiveSpinConfig:
     control_rate_hz: float = 10.0
     recovery_mode: str = "none"
     recovery_executor: str = "dry_run"
-    enable_center_reposition: bool = False
-    center_reposition_max_attempts: int = 1
     center_reposition_target_nearest_short_wall_range_m: float = 1.65
     center_reposition_min_step_m: float = 0.25
-    center_reposition_max_step_m: float = 1.10
-    center_reposition_linear_speed_mps: float = 0.08
-    center_reposition_angular_speed_rad_s: float = 0.25
-    center_reposition_heading_tolerance_deg: float = 8.0
     center_reposition_min_front_clearance_m: float = 0.45
     center_reposition_lateral_offset_threshold_m: float = 0.25
     center_reposition_lateral_target_offset_m: float = 0.10
-    center_reposition_lateral_min_step_m: float = 0.15
-    center_reposition_lateral_max_step_m: float = 0.55
-    center_reposition_enable_heater_approach: bool = True
-    center_reposition_heater_approach_max_attempts: int = 1
     center_reposition_heater_approach_target_range_m: float = 1.05
     center_reposition_heater_approach_min_selected_score: float = 0.50
     center_reposition_heater_approach_max_opposite_score: float = 0.30
     center_reposition_heater_approach_min_delta: float = 0.35
-    center_reposition_heater_approach_min_step_m: float = 0.25
-    center_reposition_heater_approach_max_step_m: float = 1.10
     active_explore_max_attempts: int = 6
     active_explore_max_single_move_m: float = 0.45
     active_explore_max_total_distance_m: float = 0.90

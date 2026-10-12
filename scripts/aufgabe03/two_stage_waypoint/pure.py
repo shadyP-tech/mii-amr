@@ -1,6 +1,5 @@
 import csv
 import math
-from datetime import datetime
 from pathlib import Path
 
 from .model import (
@@ -16,14 +15,6 @@ from .model import (
     StabilityState,
     Waypoint,
 )
-
-
-def timestamp_now():
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def empty_if_none(value):
-    return "" if value is None else value
 
 
 def shortest_angle_delta_deg(start_deg, end_deg):
@@ -61,6 +52,8 @@ def load_waypoints(path):
                 x=float(row["world_x_m"]),
                 y=float(row["world_y_m"]),
             )
+            if not math.isfinite(waypoint.x) or not math.isfinite(waypoint.y):
+                raise ValueError(f"{path} contains non-finite coordinates")
             if waypoints and waypoint.x == waypoints[-1].x and waypoint.y == waypoints[-1].y:
                 continue
             waypoints.append(waypoint)
@@ -156,6 +149,10 @@ def update_amcl_stability(
     samples_seen = state.samples_seen + 1
     if sample_sec is None:
         sample_sec = float(samples_seen)
+    if not all(math.isfinite(value) for value in (pose.x, pose.y, pose.yaw_deg)):
+        raise ValueError("AMCL pose must be finite")
+    if any(not math.isfinite(value) or value <= 0.0 for value in (cov.x, cov.y, cov.yaw_rad2)):
+        raise ValueError("AMCL covariance must be finite and positive")
     if cov.x > max_var_x or cov.y > max_var_y or cov.yaw_rad2 > max_var_yaw_rad2:
         return StabilityState(
             stable_count=0,
@@ -230,7 +227,7 @@ def required_preflight_interfaces(args):
 def arena_active_diagnostics_path(args):
     if args.arena_active_diagnostics_json is not None:
         return args.arena_active_diagnostics_json
-    return Path(args.results_csv).parent / f"{args.run_id}_arena_active_result.json"
+    return args.output_dir / f"{args.run_id}_arena_active_result.json"
 
 
 def validate_pose_prior_for_initialpose(pose_prior):
@@ -244,6 +241,8 @@ def validate_pose_prior_for_initialpose(pose_prior):
         raise RuntimeError("Arena-active pose prior contains non-finite pose values")
     if len(pose_prior.covariance) < 36:
         raise RuntimeError("Arena-active pose prior covariance must have 36 entries")
+    if not all(math.isfinite(value) for value in pose_prior.covariance):
+        raise RuntimeError("Arena-active pose prior has non-finite covariance")
     var_x = float(pose_prior.covariance[0])
     var_y = float(pose_prior.covariance[7])
     var_yaw = float(pose_prior.covariance[35])
@@ -262,141 +261,28 @@ def validate_pose_prior_for_initialpose(pose_prior):
 
 
 def build_follower_command(args):
-    command = [
-        str(args.python_executable),
-        str(args.follower_script),
-        "--waypoints",
-        str(args.waypoints),
-        "--run-id",
-        str(args.run_id),
-        "--yes",
-        "--start-selection",
-        "path-progress",
-        "--map-frame",
-        args.map_frame,
-        "--base-frame",
-        args.base_frame,
-        "--fallback-base-frame",
-        args.fallback_base_frame,
-        "--cmd-vel-topic",
-        args.cmd_vel_topic,
-        "--scan-topic",
-        args.scan_topic,
-        "--amcl-topic",
-        args.amcl_topic,
-        "--odom-topic",
-        args.odom_topic,
-        "--max-pose-age-sec",
-        str(args.max_pose_age_sec),
-        "--max-scan-age-sec",
-        str(args.max_scan_age_sec),
-        "--max-amcl-age-sec",
-        str(args.max_amcl_age_sec),
-        "--startup-timeout-sec",
-        str(args.follower_startup_timeout_sec),
-        "--start-on-path-tolerance-m",
-        str(args.follower_start_on_path_tolerance_m),
-        "--scan-half-angle-deg",
-        str(args.follower_scan_half_angle_deg),
-        "--hard-stop-range-m",
-        str(args.follower_hard_stop_range_m),
-        "--min-scan-range-m",
-        str(args.follower_min_scan_range_m),
-        "--max-amcl-var-x",
-        str(args.max_amcl_var_x),
-        "--max-amcl-var-y",
-        str(args.max_amcl_var_y),
-        "--max-amcl-var-yaw",
-        str(args.max_amcl_var_yaw_rad2),
-        "--waypoint-tolerance-m",
-        str(args.waypoint_tolerance_m),
-        "--goal-tolerance-m",
-        str(args.goal_tolerance_m),
-        "--min-waypoint-spacing-m",
-        str(args.min_waypoint_spacing_m),
-        "--notes",
-        f"{args.notes};two_stage_handoff",
-    ]
-    if args.wait_before_follow:
-        command.append("--wait-before-follow")
-    if getattr(args, "verbose", False):
-        command.append("--verbose")
+    # The child owns its ROS lifecycle and always joins the path by progress.
+    command = [str(args.python_executable), str(args.follower_script),
+               "--yes", "--start-selection", "path-progress"]
+    options = {
+        "waypoints-csv": args.waypoints,
+        "static-map": args.static_map,
+        "run-id": args.run_id,
+        "startup-timeout-sec": args.follower_startup_timeout_sec,
+        "start-on-path-tolerance-m": args.follower_start_on_path_tolerance_m,
+        "max-amcl-var-yaw": args.max_amcl_var_yaw_rad2,
+    }
+    for name in ("map_frame", "base_frame", "fallback_base_frame", "cmd_vel_topic",
+                 "scan_topic", "amcl_topic", "max_pose_age_sec", "max_scan_age_sec",
+                 "max_amcl_age_sec", "max_amcl_var_x", "max_amcl_var_y",
+                 "waypoint_tolerance_m", "goal_tolerance_m", "min_waypoint_spacing_m"):
+        options[name.replace("_", "-")] = getattr(args, name)
     if args.enable_lidar_map_replan:
-        command.extend([
-            "--enable-lidar-map-replan",
-            "--static-map",
-            str(args.static_map),
-            "--replan-output-dir",
-            str(args.replan_output_dir),
-            "--max-replans",
-            str(args.max_replans),
-            "--replan-timeout-sec",
-            str(args.replan_timeout_sec),
-            "--max-replan-scan-age-sec",
-            str(args.max_replan_scan_age_sec),
-            "--max-replan-tf-age-sec",
-            str(args.max_replan_tf_age_sec),
-            "--obstacle-forward-distance-m",
-            str(args.obstacle_forward_distance_m),
-            "--obstacle-forward-half-width-m",
-            str(args.obstacle_forward_half_width_m),
-            "--obstacle-angle-window-deg",
-            str(args.obstacle_angle_window_deg),
-            "--obstacle-min-range-m",
-            str(args.obstacle_min_range_m),
-            "--robot-footprint-radius-m",
-            str(args.robot_footprint_radius_m),
-            "--obstacle-min-cluster-size",
-            str(args.obstacle_min_cluster_size),
-            "--obstacle-min-cluster-width-m",
-            str(args.obstacle_min_cluster_width_m),
-            "--obstacle-inflate-radius-m",
-            str(args.obstacle_inflate_radius_m),
-            "--max-start-snap-m",
-            str(args.max_start_snap_m),
-            "--max-goal-snap-m",
-            str(args.max_goal_snap_m),
-            "--max-replan-path-length-ratio",
-            str(args.max_replan_path_length_ratio),
-            "--run-local-map-initial-scan-mode",
-            args.run_local_map_initial_scan_mode,
-            "--run-local-map-initial-scan-count",
-            str(args.run_local_map_initial_scan_count),
-            "--run-local-map-update-mode",
-            args.run_local_map_update_mode,
-            "--run-local-map-min-hit-count",
-            str(args.run_local_map_min_hit_count),
-            "--run-local-map-inflation-radius-m",
-            str(args.run_local_map_inflation_radius_m),
-            "--run-local-map-max-tf-age-sec",
-            str(args.run_local_map_max_tf_age_sec),
-            "--run-local-map-max-scan-age-sec",
-            str(args.run_local_map_max_scan_age_sec),
-            "--run-local-map-min-used-points",
-            str(args.run_local_map_min_used_points),
-            "--run-local-map-max-rejected-ratio",
-            str(args.run_local_map_max_rejected_ratio),
-            "--run-local-map-corridor-check-distance-m",
-            str(args.run_local_map_corridor_check_distance_m),
-            "--run-local-map-clearance-margin-m",
-            str(args.run_local_map_clearance_margin_m),
-            "--run-local-map-max-updates",
-            str(args.run_local_map_max_updates),
-        ])
-        if args.run_local_map_corridor_radius_m is not None:
-            command.extend([
-                "--run-local-map-corridor-radius-m",
-                str(args.run_local_map_corridor_radius_m),
-            ])
-        if args.run_local_map_artifact_prefix:
-            command.extend([
-                "--run-local-map-artifact-prefix",
-                args.run_local_map_artifact_prefix,
-            ])
-        if args.lidar_replan_artifact_only:
-            command.append("--lidar-replan-artifact-only")
-        if args.allow_latest_tf_replan_fallback:
-            command.append("--allow-latest-tf-replan-fallback")
+        command.extend(["--replan-on-obstacle", "--run-local-obstacle-map"])
+        options.update({"max-replans": args.max_replans,
+                        "run-local-map-max-updates": args.run_local_map_max_updates})
+    for name, value in options.items():
+        command.extend([f"--{name}", str(value)])
     return command
 
 

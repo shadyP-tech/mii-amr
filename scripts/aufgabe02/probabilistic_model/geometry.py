@@ -16,47 +16,8 @@ def mat_vec(matrix, vector):
     ]
 
 
-def mat_mul(a, b):
-    return [
-        [
-            a[0][0] * b[0][0] + a[0][1] * b[1][0],
-            a[0][0] * b[0][1] + a[0][1] * b[1][1],
-        ],
-        [
-            a[1][0] * b[0][0] + a[1][1] * b[1][0],
-            a[1][0] * b[0][1] + a[1][1] * b[1][1],
-        ],
-    ]
-
-
-def mat_transpose(matrix):
-    return [[matrix[0][0], matrix[1][0]], [matrix[0][1], matrix[1][1]]]
-
-
-def mat_add(a, b):
-    return [
-        [a[0][0] + b[0][0], a[0][1] + b[0][1]],
-        [a[1][0] + b[1][0], a[1][1] + b[1][1]],
-    ]
-
-
-def mat_scale(scale, matrix):
-    return [
-        [scale * matrix[0][0], scale * matrix[0][1]],
-        [scale * matrix[1][0], scale * matrix[1][1]],
-    ]
-
-
-def vec_add(a, b):
-    return [a[0] + b[0], a[1] + b[1]]
-
-
 def vec_sub(a, b):
     return [a[0] - b[0], a[1] - b[1]]
-
-
-def vec_scale(scale, vector):
-    return [scale * vector[0], scale * vector[1]]
 
 
 def local_displacements(rows, prefix):

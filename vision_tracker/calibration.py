@@ -34,17 +34,6 @@ def pixel_to_world(pixel, H):
     return world[0, 0]  # shape (2,)
 
 
-def world_to_pixel(point, H):
-    H_inv = np.linalg.inv(H)
-    world = np.array([[[point[0], point[1]]]], dtype=np.float32)
-    pixel = cv2.perspectiveTransform(world, H_inv)
-    return pixel[0, 0]  # shape (2,)
-
-
-def pixels_to_world(pixels, H):
-    return [pixel_to_world(p, H) for p in pixels]
-
-
 # calibration procedure
 def calibrate_interactive():
     global _clicked_points, _click_done
@@ -117,80 +106,8 @@ def calibrate_interactive():
     return H
 
 
-# verification mode
-def verify_interactive(H=None):
-    if H is None:
-        H = load_homography()
-    if H is None:
-        print("ERROR: No homography found.  Run calibration first.")
-        return
-
-    cap = camera.open_camera()
-
-    print("Verification mode — press SPACE to freeze frame, then click points.")
-    print("Press ESC to quit.\n")
-
-    global _clicked_points, _click_done
-    _clicked_points = []
-    _click_done = False
-
-    def _verify_click(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            world = pixel_to_world((x, y), H)
-            print(f"  Pixel ({x}, {y})  →  World ({world[0]:.4f}, {world[1]:.4f}) m")
-            _clicked_points.append((x, y, world[0], world[1]))
-
-    # live feed until SPACE is pressed (allows camera warmup)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue  # skip failed frames during warmup
-        cv2.imshow("verify", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord(" "):
-            break
-        if key == 27:
-            cap.release()
-            cv2.destroyAllWindows()
-            return
-
-    cap.release()
-
-    frame = cv2.resize(frame, None, fx=config.RESIZE_SCALE, fy=config.RESIZE_SCALE)
-
-    cv2.imshow("verify", frame)
-    cv2.setMouseCallback("verify", _verify_click)
-
-    while True:
-        # redraw with clicked points
-        display = frame.copy()
-        for px, py, wx, wy in _clicked_points:
-            cv2.circle(display, (px, py), 5, (0, 255, 0), -1)
-            cv2.putText(
-                display,
-                f"({wx:.3f},{wy:.3f})",
-                (px + 8, py - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (0, 255, 0),
-                1,
-            )
-        cv2.imshow("verify", display)
-        if cv2.waitKey(50) & 0xFF == 27:
-            break
-
-    cv2.destroyAllWindows()
-
-
-def main():
-    import sys
-
-    if "--verify" in sys.argv:
-        verify_interactive()
-    else:
-        H = calibrate_interactive()
-        print("Run again with --verify to test additional points.")
-
-
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    argparse.ArgumentParser(description="Calibrate the camera with four reference corners.").parse_args()
+    calibrate_interactive()

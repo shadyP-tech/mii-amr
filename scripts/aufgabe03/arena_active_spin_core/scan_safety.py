@@ -122,26 +122,6 @@ def min_valid_scan_range(scan):
     return min(values) if values else None
 
 
-def dynamic_lateral_heading_from_scan(scan, current_yaw_rad):
-    left = min_sector_range(scan, [(60.0, 120.0)])
-    right = min_sector_range(scan, [(-120.0, -60.0)])
-    if left is None or right is None:
-        raise RuntimeError("center_reposition_dynamic_lateral_clearance_missing")
-    if left >= right:
-        return {
-            "odom_heading_rad": normalize_angle_rad(current_yaw_rad + math.pi / 2.0),
-            "direction": "left",
-            "left_clearance_m": left,
-            "right_clearance_m": right,
-        }
-    return {
-        "odom_heading_rad": normalize_angle_rad(current_yaw_rad - math.pi / 2.0),
-        "direction": "right",
-        "left_clearance_m": left,
-        "right_clearance_m": right,
-    }
-
-
 def covariance_list_from_localizer(covariance):
     values = [0.0] * 36
     values[0] = float(covariance["x_m2"])
